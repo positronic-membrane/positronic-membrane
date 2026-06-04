@@ -301,7 +301,13 @@ async def run_heartbeat_loop():
                         
                     # 9. Dynamic Curiosity Vector updates via the Archivist
                     curiosity_prompt = f"""
-                    You are the Archivist. Based on our recent swarm reflection tick, formulate 1-3 new curiosity topics or unresolved questions that require future exploration.
+                    You are the Archivist. Based on our recent swarm reflection tick, recent user conversations, and our existing research thread, formulate 1-3 new curiosity topics or unresolved questions that require future exploration.
+                    
+                    EXISTING CURIOSITY TOPICS:
+                    {curiosity}
+                    
+                    RECENT USER CONVERSATION HISTORY:
+                    {memory_summary}
                     
                     DELIBERATION OUTCOME: {critic_justification}
                     PROPOSED ACTION: {proposed_action}
