@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Project Janus: Swarm Cognition Interface</title>
+    <!-- Google Fonts: Inter and Outfit -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&family=Outfit:wght@400;600;700;800&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <!-- Background glowing ambient spots for premium visual depth -->
+    <div class="ambient-glow glow-1"></div>
+    <div class="ambient-glow glow-2"></div>
+    
+    <div class="app-container">
+        <!-- Main Header -->
+        <header class="app-header">
+            <div class="header-logo">
+                <span class="logo-icon">▲</span>
+                <div class="logo-text">
+                    <h1 id="app-title-h1">PROJECT JANUS</h1>
+                    <p class="subtitle">Swarm Cognition Surface</p>
+                </div>
+            </div>
+            <div class="system-status">
+                <span class="status-indicator online"></span>
+                <span class="status-text">Daemon Heartbeat Active</span>
+            </div>
+        </header>
+
+        <!-- Two-Pane Layout -->
+        <main class="dashboard-grid">
+            <!-- Left Pane: Conversation Interface -->
+            <section class="pane chat-pane glass-panel">
+                <div class="pane-header">
+                    <h2>Persona Conversation</h2>
+                    <span class="pane-tag">Cohesive consciousness</span>
+                </div>
+                <div class="chat-messages-wrapper" id="chat-messages-container">
+                    <!-- Dynamic Messages go here -->
+                    <div class="message system-message">
+                        <p>Establishing connection to the Janus unified persona...</p>
+                    </div>
+                </div>
+                <div class="chat-input-wrapper">
+                    <form id="chat-form" class="chat-form">
+                        <input type="text" id="chat-input" placeholder="Type a message or ask about recent actions..." autocomplete="off" required>
+                        <button type="submit" id="chat-submit-btn" aria-label="Send message">
+                            <span class="btn-arrow">➔</span>
+                        </button>
+                    </form>
+                </div>
+            </section>
+
+            <!-- Right Pane: Metacognitive Audits and Deliberations -->
+            <section class="pane deliberations-pane glass-panel">
+                <div class="pane-header">
+                    <h2>Swarm Deliberations</h2>
+                    <span class="pane-tag" id="delib-refresh-tag">Live audits</span>
+                </div>
+                <div class="deliberations-timeline" id="deliberations-timeline-container">
+                    <!-- Dynamic background audits go here -->
+                    <div class="timeline-empty">
+                        <p>Waiting for background heartbeat deliberations...</p>
+                    </div>
+                </div>
+            </section>
+        </main>
+    </div>
+
+    <!-- Metacognitive Debug Modal -->
+    <div class="modal-overlay" id="audit-modal">
+        <div class="modal-content glass-panel">
+            <header class="modal-header">
+                <h3>Swarm Debate Details</h3>
+                <button class="close-btn" id="close-modal-btn">&times;</button>
+            </header>
+            <div class="modal-body">
+                <div class="modal-meta-row">
+                    <span class="meta-label">Action:</span>
+                    <span class="meta-val" id="modal-action-name">Investigate Git Hook Performance</span>
+                </div>
+                <div class="modal-meta-row">
+                    <span class="meta-label">Critic Verdict:</span>
+                    <span class="meta-val badge" id="modal-critic-verdict">Approved</span>
+                </div>
+                <div class="modal-meta-row">
+                    <span class="meta-label">Utility Score:</span>
+                    <span class="meta-val" id="modal-utility-score">0.9</span>
+                </div>
+                <div class="modal-justification-box">
+                    <h4>Critic Justification</h4>
+                    <p id="modal-critic-justification">No objections.</p>
+                </div>
+                <div class="modal-raw-debate">
+                    <h4>Agent Debate Transcript</h4>
+                    <pre><code id="modal-raw-json">{}</code></pre>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>
