@@ -50,6 +50,16 @@ def validate_action(proposed_action: str) -> bool:
     """
     logger.info(f"Middleware evaluating proposed action: '{proposed_action}'")
     
+    # 1. Check default config banned websites
+    import src.config
+    for site in src.config.DEFAULT_BANNED_WEBSITES:
+        pattern = re.compile(re.escape(site), re.IGNORECASE)
+        if pattern.search(proposed_action):
+            raise SafetyViolationError(
+                f"Safety Violation: Action contains references to default restricted boundary path/domain '{site}'."
+            )
+            
+    # 2. Check rules from constitution
     rules = get_constitution()
     
     # Extract rules from constitution

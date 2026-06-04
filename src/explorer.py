@@ -58,3 +58,77 @@ def fetch_webpage(url: str, timeout: int = 10) -> str:
     except Exception as e:
         logger.error(f"Error fetching webpage from {url}: {e}", exc_info=True)
         raise RuntimeError(f"Webpage fetch failed: {e}") from e
+
+def search_web(query: str, max_results: int = 5) -> list:
+    """
+    Queries DuckDuckGo HTML search page, parses results, and checks safety middleware.
+    Returns list of dicts containing 'title', 'url', and 'snippet'.
+    """
+    logger.info(f"Searching web for query: '{query}'")
+    
+    import urllib.parse
+    import urllib.request
+    
+    # URL encode query
+    query_encoded = urllib.parse.quote_plus(query)
+    search_url = f"https://html.duckduckgo.com/html/?q={query_encoded}"
+    
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    }
+    
+    try:
+        req = urllib.request.Request(search_url, headers=headers)
+        with urllib.request.urlopen(req, timeout=10) as response:
+            charset = response.headers.get_content_charset() or "utf-8"
+            html_content = response.read().decode(charset, errors="ignore")
+    except Exception as e:
+        logger.error(f"Failed to query DuckDuckGo search: {e}", exc_info=True)
+        raise RuntimeError(f"Search query failed: {e}") from e
+        
+    # Find all result divs
+    result_blocks = html_content.split('class="result ')
+    results = []
+    
+    for block in result_blocks[1:]:
+        url_match = re.search(r'href="([^"]*)"', block)
+        title_match = re.search(r'<a[^>]*class="result__snippet"[^>]*>(.*?)</a>', block, re.DOTALL)
+        # Fallback to result__title h2 link
+        if not title_match:
+            title_match = re.search(r'<h2 class="result__title">.*?<a[^>]*>(.*?)</a>', block, re.DOTALL)
+        snippet_match = re.search(r'<span class="result__snippet"[^>]*>(.*?)</span>', block, re.DOTALL)
+        
+        if url_match and title_match:
+            url = url_match.group(1)
+            # Clean redirect links
+            if "uddg=" in url:
+                parsed_url = urllib.parse.urlparse(url)
+                query_params = urllib.parse.parse_qs(parsed_url.query)
+                if "uddg" in query_params:
+                    url = query_params["uddg"][0]
+                    
+            # Strip tags
+            title = re.sub(r'<[^>]+>', '', title_match.group(1))
+            title = html.unescape(title).strip()
+            
+            snippet = ""
+            if snippet_match:
+                snippet = re.sub(r'<[^>]+>', '', snippet_match.group(1))
+                snippet = html.unescape(snippet).strip()
+                
+            # Filter results using safety middleware
+            try:
+                validate_action(url)
+                results.append({
+                    "title": title,
+                    "url": url,
+                    "snippet": snippet
+                })
+            except Exception:
+                continue
+                
+            if len(results) >= max_results:
+                break
+                
+    logger.info(f"Web search retrieved {len(results)} safe results.")
+    return results

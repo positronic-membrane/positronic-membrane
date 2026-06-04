@@ -20,6 +20,11 @@ LLM_API_KEY = os.getenv("LLM_API_KEY", "ollama")
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "nomic-embed-text")
 VECTOR_DB_PATH = os.getenv("VECTOR_DB_PATH", str(ROOT_DIR / "data" / "chromadb"))
 MEMORY_RELEVANCE_THRESHOLD = float(os.getenv("MEMORY_RELEVANCE_THRESHOLD", "1.0"))
+CONSOLIDATION_THRESHOLD = int(os.getenv("CONSOLIDATION_THRESHOLD", "5"))
+DEFAULT_BANNED_WEBSITES = [
+    "doubleclick.net", "googleadservices.com", "adsystem.com", "adnxs.com",
+    "facebook.com", "twitter.com", "instagram.com", "tiktok.com"
+]
 
 # Heartbeat Pacing (in seconds/minutes)
 T_IDLE = int(os.getenv("T_IDLE", "15"))  # Default 15 minutes

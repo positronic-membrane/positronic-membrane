@@ -66,3 +66,30 @@ def test_memory_threshold_filtering(mock_embeddings):
         assert len(matches) == 0
     finally:
         src.config.MEMORY_RELEVANCE_THRESHOLD = orig_threshold
+
+@patch("src.llm.query_agent")
+def test_memory_consolidation(mock_query_agent, mock_embeddings):
+    """Verify detailed memories are consolidated into a high-level concept."""
+    mock_query_agent.return_value = "Swarm researched database configurations."
+    
+    # 1. Add unconsolidated detailed memories to janus_details
+    add_memory("Ran sqlite performance scan.", {"consolidated": "false"}, "detail_1", "janus_details")
+    add_memory("Optimized WAL database mode.", {"consolidated": "false"}, "detail_2", "janus_details")
+    
+    # 2. Trigger consolidation
+    from src.memory import consolidate_memories, get_collection
+    consolidate_memories(batch_size=2)
+    
+    # 3. Verify concept added to janus_long_term
+    concepts = query_memories("database configurations", limit=1, collection_name="janus_long_term")
+    assert len(concepts) == 1
+    assert concepts[0]["content"] == "Swarm researched database configurations."
+    assert "detail_1" in concepts[0]["metadata"]["detail_ids"]
+    assert "detail_2" in concepts[0]["metadata"]["detail_ids"]
+    
+    # 4. Verify detail records updated to consolidated = "true" in janus_details
+    details_col = get_collection("janus_details")
+    detail_records = details_col.get(ids=["detail_1", "detail_2"])
+    assert detail_records["metadatas"][0]["consolidated"] == "true"
+    assert detail_records["metadatas"][1]["consolidated"] == "true"
+

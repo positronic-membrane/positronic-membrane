@@ -116,6 +116,18 @@ def init_db():
     );
     """)
 
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS swarm_messages (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        sender_id TEXT NOT NULL,
+        recipient_id TEXT NOT NULL,
+        message_type TEXT NOT NULL,
+        content TEXT NOT NULL,
+        status TEXT DEFAULT 'pending'
+    );
+    """)
+
     # Populate drive state if empty
     cursor.execute("SELECT COUNT(*) FROM drive_state;")
     if cursor.fetchone()[0] == 0:
@@ -283,4 +295,117 @@ def get_recent_episodic_memories(limit: int = 10) -> list:
     rows = cursor.fetchall()
     conn.close()
     return rows
+
+# Swarm Message Bus Helpers
+def send_swarm_message(sender_id: str, recipient_id: str, message_type: str, content: str):
+    """Inserts a message into the swarm message bus."""
+    conn = get_connection(read_only_constitution=True)
+    cursor = conn.cursor()
+    cursor.execute("""
+    INSERT INTO swarm_messages (sender_id, recipient_id, message_type, content)
+    VALUES (?, ?, ?, ?);
+    """, (sender_id, recipient_id, message_type, content))
+    conn.commit()
+    conn.close()
+
+def get_pending_swarm_messages(recipient_id: str) -> list:
+    """Retrieves all pending messages for a given recipient."""
+    conn = get_connection(read_only_constitution=True)
+    cursor = conn.cursor()
+    cursor.execute("""
+    SELECT id, sender_id, message_type, content, timestamp 
+    FROM swarm_messages 
+    WHERE recipient_id = ? AND status = 'pending'
+    ORDER BY id ASC;
+    """, (recipient_id,))
+    rows = cursor.fetchall()
+    conn.close()
+    return rows
+
+def mark_swarm_message_processed(message_id: int):
+    """Marks a message in the swarm message bus as processed."""
+    conn = get_connection(read_only_constitution=True)
+    cursor = conn.cursor()
+    cursor.execute("""
+    UPDATE swarm_messages 
+    SET status = 'processed' 
+    WHERE id = ?;
+    """, (message_id,))
+    conn.commit()
+    conn.close()
+
+# Dynamic Agent Registry Modifiers
+def register_helper_agent(agent_id: str, name: str, prompt: str, model: str = None):
+    """Registers or updates a helper agent in the agent registry."""
+    conn = get_connection(read_only_constitution=True)
+    cursor = conn.cursor()
+    cursor.execute("""
+    INSERT OR REPLACE INTO agent_registry (agent_id, agent_name, system_prompt, target_model, is_active, updated_at)
+    VALUES (?, ?, ?, ?, 1, CURRENT_TIMESTAMP);
+    """, (agent_id, name, prompt, model))
+    conn.commit()
+    conn.close()
+
+def deactivate_helper_agent(agent_id: str):
+    """Deactivates an agent in the registry (sets is_active to 0)."""
+    conn = get_connection(read_only_constitution=True)
+    cursor = conn.cursor()
+    cursor.execute("""
+    UPDATE agent_registry 
+    SET is_active = 0, updated_at = CURRENT_TIMESTAMP 
+    WHERE agent_id = ?;
+    """, (agent_id,))
+    conn.commit()
+    conn.close()
+
+# Staged Self-Modification Helpers
+def stage_modification_in_db(file_path: str, temp_dir: str, diff: str, status: str):
+    """Saves the pending code modification metadata in system_config."""
+    conn = get_connection(read_only_constitution=True)
+    cursor = conn.cursor()
+    configs = [
+        ("pending_mod_file", file_path),
+        ("pending_mod_dir", temp_dir),
+        ("pending_mod_diff", diff),
+        ("pending_mod_status", status)
+    ]
+    for key, val in configs:
+        cursor.execute("""
+        INSERT OR REPLACE INTO system_config (config_key, config_value, is_agent_modifiable)
+        VALUES (?, ?, 1);
+        """, (key, val))
+    conn.commit()
+    conn.close()
+
+def clear_pending_modification():
+    """Clears any pending modifications from system_config."""
+    conn = get_connection(read_only_constitution=True)
+    cursor = conn.cursor()
+    keys = ["pending_mod_file", "pending_mod_dir", "pending_mod_diff", "pending_mod_status"]
+    for key in keys:
+        cursor.execute("DELETE FROM system_config WHERE config_key = ?;", (key,))
+    conn.commit()
+    conn.close()
+
+def get_pending_modification() -> dict:
+    """Retrieves metadata of any pending self-modifications from system_config."""
+    conn = get_connection(read_only_constitution=True)
+    cursor = conn.cursor()
+    cursor.execute("""
+    SELECT config_key, config_value 
+    FROM system_config 
+    WHERE config_key IN ('pending_mod_file', 'pending_mod_dir', 'pending_mod_diff', 'pending_mod_status');
+    """)
+    rows = cursor.fetchall()
+    conn.close()
+    
+    if not rows:
+        return {}
+        
+    data = {k: v for k, v in rows}
+    if "pending_mod_file" in data and data["pending_mod_file"]:
+        return data
+    return {}
+
+
 

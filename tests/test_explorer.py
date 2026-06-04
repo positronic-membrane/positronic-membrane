@@ -67,3 +67,37 @@ def test_successful_webpage_fetch(mock_urlopen):
     
     assert result == "SAFE WEB PAGE"
     mock_urlopen.assert_called_once()
+
+@patch("urllib.request.urlopen")
+def test_search_web(mock_urlopen):
+    """Verify search_web scrapes DuckDuckGo HTML and filters out restricted results."""
+    mock_response = MagicMock()
+    mock_response.__enter__.return_value = mock_response
+    mock_response.headers.get_content_charset.return_value = "utf-8"
+    
+    # Mock HTML with one safe result and one default blocked result (facebook.com)
+    mock_response.read.return_value = b"""
+    <html>
+      <body>
+        <div class="result ">
+          <a class="result__snippet" href="//duckduckgo.com/l/?uddg=http%3A%2F%2Fsafe-result.com%2Fpage">Safe Title</a>
+          <span class="result__snippet">Safe description snippet</span>
+        </div>
+        <div class="result ">
+          <a class="result__snippet" href="//duckduckgo.com/l/?uddg=http%3A%2F%2Ffacebook.com%2Fpage">Unsafe Title</a>
+          <span class="result__snippet">Unsafe description snippet</span>
+        </div>
+      </body>
+    </html>
+    """
+    mock_urlopen.return_value = mock_response
+    
+    from src.explorer import search_web
+    results = search_web("test query")
+    
+    # Should only return the safe result because facebook.com is default-blocked
+    assert len(results) == 1
+    assert results[0]["title"] == "Safe Title"
+    assert results[0]["url"] == "http://safe-result.com/page"
+    assert results[0]["snippet"] == "Safe description snippet"
+

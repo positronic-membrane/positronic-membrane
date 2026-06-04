@@ -111,6 +111,13 @@ async def run_heartbeat_loop():
         context_type="background_thought"
     )
 
+    # Build initial codebase index on startup
+    try:
+        from src.codebase import index_codebase
+        index_codebase()
+    except Exception as e:
+        logger.error(f"Failed to build initial codebase index: {e}")
+
     try:
         while True:
             # Check user presence
@@ -167,42 +174,112 @@ async def run_heartbeat_loop():
                     memory_summary = "\n".join([f"[{ts}] {spk}: {msg}" for spk, msg, ts in reversed(memories)])
                     
                     # 2. Retrieve active curiosity vector
-                    curiosity = get_curiosity_vector()
+                    try:
+                        from src.memory import get_active_curiosity_topics
+                        curiosity = get_active_curiosity_topics(limit=5)
+                    except Exception as e:
+                        logger.error(f"Failed to query semantic curiosity: {e}")
+                        curiosity = []
+                    if not curiosity:
+                        curiosity = get_curiosity_vector()
+
                     
                     # 3. Retrieve relevant long-term semantic memories via ChromaDB
                     semantic_context = ""
                     if curiosity:
                         query_str = ", ".join(curiosity)
                         try:
-                            matches = query_memories(query_str, limit=3)
+                            matches = query_memories(query_str, limit=3, collection_name="janus_long_term")
                             if matches:
                                 semantic_context = "\n".join([f"- {m['content']}" for m in matches])
                         except Exception as e:
                             logger.error(f"Failed to query semantic memories: {e}")
                     
-                    # 4. Query the Proposer agent
-                    proposer_prompt = f"""
-                    You are the Proposer. Review our recent episodic logs, active curiosity vectors, and historical semantic memories:
+                    # 4. Swarm Message Bus Processing Loop inside reflection cycle
+                    bus_turns = 0
+                    max_bus_turns = 3
+                    pending_bus_context = ""
+                    proposed_action = ""
+                    proposer_resp = ""
+                    proposer_prompt = ""
                     
-                    RECENT EPISODIC MEMORIES:
-                    {memory_summary}
-                    
-                    ACTIVE CURIOSITY TOPICS:
-                    {curiosity}
-                    
-                    RELEVANT HISTORICAL SEMANTIC MEMORIES:
-                    {semantic_context if semantic_context else "None available."}
-                    
-                    Propose exactly one autonomous action that fits the project scope.
-                    Format your response with: "PROPOSED_ACTION: [Describe the action]"
-                    """
-                    
-                    proposer_resp = query_agent("proposer", proposer_prompt)
-                    
-                    # Parse proposed action
-                    action_match = re.search(r"proposed_action:\s*(.*)", proposer_resp, re.IGNORECASE)
-                    proposed_action = action_match.group(1).strip() if action_match else proposer_resp.strip()
-                    logger.info(f"Proposer proposed: '{proposed_action}'")
+                    while bus_turns < max_bus_turns:
+                        proposer_prompt = f"""
+                        You are the Proposer. Review our recent episodic logs, active curiosity vectors, and historical semantic memories:
+                        
+                        RECENT EPISODIC MEMORIES:
+                        {memory_summary}
+                        
+                        ACTIVE CURIOSITY TOPICS:
+                        {curiosity}
+                        
+                        RELEVANT HISTORICAL SEMANTIC MEMORIES:
+                        {semantic_context if semantic_context else "None available."}
+                        
+                        SWARM CHAT HISTORY (THIS TICK):
+                        {pending_bus_context if pending_bus_context else "No active sub-task discussions."}
+                        
+                        You can collaborate with other agents by sending a sub-task message. Formats:
+                        - SEND_MESSAGE: explorer | <search query or URL fetch task>
+                        - SEND_MESSAGE: archivist | <memory lookup task>
+                        - SEND_MESSAGE: critic | <constitutional opinion request>
+                        
+                        Alternatively, you can choose to use a direct tool yourself:
+                        - web_search: <search query>
+                        - fetch_url: <url>
+                        - read_codebase: <code symbol or file query>
+                        - scan_workspace
+                        - spawn_agent: <agent_id> | <agent_name> | <system_prompt>
+                        - execute_code: <python_code>
+                        - modify_code: <relative_file_path> | <complete_new_code_contents>
+
+                        
+                        If you are ready with the final action of this tick, output it exactly in the format:
+                        PROPOSED_ACTION: [Describe the final action or tool command to execute]
+                        """
+                        
+                        proposer_resp = query_agent("proposer", proposer_prompt)
+                        
+                        # Check if proposer wants to send a message
+                        msg_match = re.match(r"^send_message:\s*([a-z_]+)\s*\|\s*(.*)", proposer_resp.strip(), re.IGNORECASE)
+                        if msg_match:
+                            recipient = msg_match.group(1).lower().strip()
+                            content = msg_match.group(2).strip()
+                            
+                            logger.info(f"Proposer delegating task to '{recipient}': '{content}'")
+                            
+                            # Send message
+                            from src.database import send_swarm_message, get_pending_swarm_messages, mark_swarm_message_processed
+                            send_swarm_message("proposer", recipient, "task_request", content)
+                            
+                            # Process recipient task
+                            pending = get_pending_swarm_messages(recipient)
+                            for msg_id, sender_id, msg_type, msg_content, _ in pending:
+                                try:
+                                    recipient_resp = query_agent(recipient, f"Execute task request: {msg_content}")
+                                except Exception as err:
+                                    recipient_resp = f"Error executing task: {err}"
+                                    
+                                send_swarm_message(recipient, "proposer", "task_response", recipient_resp)
+                                mark_swarm_message_processed(msg_id)
+                                
+                            # Retrieve response messages for Proposer to see in the next turn
+                            proposer_pending = get_pending_swarm_messages("proposer")
+                            for p_id, p_sender, p_type, p_content, _ in proposer_pending:
+                                pending_bus_context += f"\n- You asked {p_sender}: '{content}'\n- {p_sender} responded: '{p_content}'\n"
+                                mark_swarm_message_processed(p_id)
+                                
+                            bus_turns += 1
+                        else:
+                            # No message send, must be the final proposed action
+                            action_match = re.search(r"proposed_action:\s*(.*)", proposer_resp, re.IGNORECASE)
+                            proposed_action = action_match.group(1).strip() if action_match else proposer_resp.strip()
+                            break
+                    else:
+                        proposed_action = "scan_workspace"
+                        logger.info("Swarm message bus reached max turns limit. Defaulting to 'scan_workspace'.")
+
+                    logger.info(f"Proposer resolved proposed action: '{proposed_action}'")
                     
                     # 5. Fetch constitution rules
                     constitution_rules = get_constitution()
@@ -263,8 +340,81 @@ async def run_heartbeat_loop():
                             context_type="background_thought"
                         )
                         
-                        # Trigger execution summary (mock logs + Archivist memory creation)
-                        execution_transcript = f"Action successfully run. Metadata generated. Output size: {len(proposed_action)} characters."
+                        # Execute the actual tool if matched, otherwise mock
+                        execution_transcript = ""
+                        action_clean = proposed_action.strip()
+                        
+                        web_search_match = re.match(r"^web_search:\s*(.*)", action_clean, re.IGNORECASE)
+                        fetch_url_match = re.match(r"^fetch_url:\s*(.*)", action_clean, re.IGNORECASE)
+                        read_codebase_match = re.match(r"^read_codebase:\s*(.*)", action_clean, re.IGNORECASE)
+                        scan_workspace_match = re.match(r"^scan_workspace\b", action_clean, re.IGNORECASE)
+                        spawn_agent_match = re.match(r"^spawn_agent:\s*([a-z0-9_-]+)\s*\|\s*([^|]+)\s*\|\s*(.*)", action_clean, re.IGNORECASE)
+                        execute_code_match = re.match(r"^execute_code:\s*(.*)", action_clean, re.DOTALL | re.IGNORECASE)
+                        modify_code_match = re.match(r"^modify_code:\s*([^|]+)\s*\|\s*(.*)", action_clean, re.DOTALL | re.IGNORECASE)
+                        
+                        try:
+                            if web_search_match:
+                                query = web_search_match.group(1).strip()
+                                from src.explorer import search_web
+                                results = search_web(query)
+                                if results:
+                                    execution_transcript = "Web search results:\n" + "\n".join([f"- Title: {r['title']}\n  URL: {r['url']}\n  Snippet: {r['snippet']}" for r in results])
+                                else:
+                                    execution_transcript = f"Web search for '{query}' returned no results."
+                            elif fetch_url_match:
+                                url = fetch_url_match.group(1).strip()
+                                from src.explorer import fetch_webpage
+                                page_text = fetch_webpage(url)
+                                execution_transcript = f"Fetched content from URL '{url}' (length {len(page_text)} chars):\n\n{page_text[:1500]}..."
+                            elif read_codebase_match:
+                                query = read_codebase_match.group(1).strip()
+                                from src.codebase import query_codebase_context
+                                execution_transcript = query_codebase_context(query)
+                            elif scan_workspace_match:
+                                from src.codebase import index_codebase
+                                index_codebase()
+                                execution_transcript = "Workspace codebase successfully scanned and indexed in ChromaDB."
+                            elif spawn_agent_match:
+                                agent_id = spawn_agent_match.group(1).strip().lower()
+                                name = spawn_agent_match.group(2).strip()
+                                prompt = spawn_agent_match.group(3).strip()
+                                from src.database import register_helper_agent
+                                register_helper_agent(agent_id, name, prompt)
+                                execution_transcript = f"Helper agent '{agent_id}' ({name}) successfully registered in agent_registry."
+                            elif execute_code_match:
+                                python_code = execute_code_match.group(1).strip()
+                                # Strip Markdown code fences
+                                python_code = re.sub(r"^```python\s*", "", python_code, flags=re.IGNORECASE)
+                                python_code = re.sub(r"\s*```$", "", python_code, flags=re.IGNORECASE)
+                                from src.sandbox import execute_code_safely
+                                result = execute_code_safely(python_code)
+                                execution_transcript = f"Sandbox code execution result:\n\n{result}"
+                            elif modify_code_match:
+                                rel_path = modify_code_match.group(1).strip()
+                                proposed_code = modify_code_match.group(2).strip()
+                                proposed_code = re.sub(r"^```python\s*", "", proposed_code, flags=re.IGNORECASE)
+                                proposed_code = re.sub(r"\s*```$", "", proposed_code, flags=re.IGNORECASE)
+                                
+                                from src.self_modification import stage_and_test, generate_diff
+                                from src.database import stage_modification_in_db
+                                
+                                passed, test_logs, temp_dir = stage_and_test(rel_path, proposed_code)
+                                status = "passed" if passed else "failed"
+                                diff = generate_diff(rel_path, proposed_code)
+                                stage_modification_in_db(rel_path, temp_dir, diff, status)
+                                
+                                execution_transcript = (
+                                    f"Staged modification for file '{rel_path}' in isolated folder '{temp_dir}'.\n"
+                                    f"Unit test status: {status.upper()}.\n"
+                                    f"Awaiting human approval before applying changes to the live codebase."
+                                )
+                            else:
+                                # Standard mock execution
+                                execution_transcript = f"Action successfully run. Metadata generated. Output size: {len(proposed_action)} characters."
+
+                        except Exception as exc:
+                            logger.error(f"Error executing tool action: {exc}", exc_info=True)
+                            execution_transcript = f"Action execution failed: {exc}"
                         
                         archivist_prompt = f"""
                         You are the Archivist. Summarize the following execution outcome into a compact semantic memory nugget (under 2 sentences) for our long-term memory store.
@@ -275,15 +425,16 @@ async def run_heartbeat_loop():
                         
                         memory_nugget = query_agent("archivist", archivist_prompt)
                         
-                        # Insert nugget into Vector DB (ChromaDB)
+                        # Insert nugget into Vector DB details collection (Cold Storage)
                         memory_id = f"mem_{int(time.time())}"
                         try:
                             add_memory(
                                 content=memory_nugget,
-                                metadata={"tags": "reflection_mvp", "timestamp": time.time()},
-                                memory_id=memory_id
+                                metadata={"tags": "reflection_mvp", "timestamp": time.time(), "consolidated": "false"},
+                                memory_id=memory_id,
+                                collection_name="janus_details"
                             )
-                            logger.info(f"Archived execution nugget in ChromaDB: '{memory_nugget}'")
+                            logger.info(f"Archived execution nugget in ChromaDB janus_details: '{memory_nugget}'")
                         except Exception as e:
                             logger.error(f"Failed to add memory nugget to ChromaDB: {e}")
                             
@@ -320,7 +471,13 @@ async def run_heartbeat_loop():
                     topics_match = re.search(r"curiosity_topics:\s*(.*)", curiosity_resp, re.IGNORECASE)
                     if topics_match:
                         new_topics = [t.strip() for t in topics_match.group(1).split(",") if t.strip()]
+                        try:
+                            from src.memory import update_curiosity_topics
+                            update_curiosity_topics(new_topics)
+                        except Exception as e:
+                            logger.error(f"Failed to semantically index curiosity: {e}")
                         update_curiosity_vector(new_topics)
+
                         logger.info(f"Updated curiosity vector to: {new_topics}")
                     else:
                         logger.warning(f"Failed to parse curiosity topics from response: '{curiosity_resp}'")
@@ -336,6 +493,13 @@ async def run_heartbeat_loop():
                 # Reset boredom
                 reset_boredom()
                 logger.info("Boredom reset to 0 after reflection.")
+                
+                # 10. Check for memory consolidation
+                try:
+                    from src.memory import consolidate_memories
+                    consolidate_memories(batch_size=src.config.CONSOLIDATION_THRESHOLD)
+                except Exception as e:
+                    logger.error(f"Memory consolidation failed: {e}")
 
     except asyncio.CancelledError:
         logger.info("Heartbeat loop cancelled gracefully.")
