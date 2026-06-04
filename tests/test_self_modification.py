@@ -6,6 +6,9 @@ from unittest.mock import patch, MagicMock
 import src.config
 from src.self_modification import generate_diff, stage_and_test, apply_staged_change
 
+if os.environ.get("JANUS_TEST_MODE") == "1":
+    pytest.skip("Skip self-modification tests during staged validation runs to avoid nested staging loops", allow_module_level=True)
+
 @pytest.fixture(autouse=True)
 def setup_test_context(tmp_path, monkeypatch):
     """Isolate workspace paths and config for self-modification testing."""

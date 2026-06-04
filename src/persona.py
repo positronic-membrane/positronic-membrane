@@ -6,7 +6,8 @@ from src.memory import query_memories
 from src.database import (
     get_connection,
     log_episodic_memory,
-    get_recent_episodic_memories
+    get_recent_episodic_memories,
+    log_deliberation
 )
 
 logger = logging.getLogger("JanusPersona")
@@ -47,6 +48,30 @@ def detect_search_intent(user_query: str) -> str:
             # Strip trailing question marks and clean up
             return match.group(1).replace("?", "").strip()
     return None
+
+def detect_modification_intent(user_query: str) -> tuple:
+    """
+    Detects if the user is asking to modify a specific file in the repository.
+    Returns: (file_path, instructions) or (None, None)
+    """
+    # 1. Check for slash command first: /modify <file_path> | <instructions>
+    if user_query.lower().startswith("/modify"):
+        match = re.match(r"^/modify\s+([^\s|]+)\s*\|\s*(.*)", user_query, re.IGNORECASE)
+        if match:
+            return match.group(1).strip(), match.group(2).strip()
+        else:
+            return "INVALID", None
+
+    # 2. Check for natural language intent: "modify <file> to <change>" or similar
+    # Look for files matching src/*.py or tests/*.py
+    path_match = re.search(r"\b(src/[a-z0-9_.-]+\.py|tests/[a-z0-9_.-]+\.py)\b", user_query, re.IGNORECASE)
+    if path_match:
+        file_path = path_match.group(1)
+        # Check for modification verbs
+        if any(verb in user_query.lower() for verb in ["modify", "change", "edit", "update", "rewrite", "replace", "add to"]):
+            return file_path, user_query
+            
+    return None, None
 
 def get_recent_deliberations(limit: int = 5) -> list:
     """Retrieves recent deliberation records from SQLite."""
@@ -262,6 +287,162 @@ async def run_persona_chat():
             user_msg = user_msg.strip()
             
             if not user_msg:
+                continue
+
+            # Intercept for synchronous self-modification requests (Option C)
+            file_path, instructions = detect_modification_intent(user_msg)
+            if file_path == "INVALID":
+                print("\nJanus >> Invalid format. Please use: /modify <relative_file_path> | <instructions>\n")
+                continue
+            elif file_path:
+                from src.self_modification import stage_and_test, generate_diff, apply_staged_change
+                import shutil
+                
+                print(f"\n[Janus] Processing code modification request for '{file_path}'...")
+                
+                # Fetch current file content to help Proposer generate full code
+                from pathlib import Path
+                import src.config
+                full_path = src.config.ROOT_DIR / file_path
+                current_content = ""
+                if full_path.exists():
+                    try:
+                        with open(full_path, "r", encoding="utf-8", errors="ignore") as f:
+                            current_content = f.read()
+                    except Exception:
+                        pass
+                
+                # Step 1: Query Proposer to draft the new code content
+                print("[Janus] Querying Proposer agent to draft modifications...")
+                draft_prompt = f"""
+                You are the Proposer. The user has requested a codebase modification:
+                
+                FILE TO MODIFY: {file_path}
+                USER INSTRUCTIONS: {instructions}
+                
+                CURRENT FILE CONTENT:
+                {current_content if current_content else "(File is new or empty)"}
+                
+                Generate the COMPLETE updated source code for the file '{file_path}'.
+                
+                CRITICAL RULES:
+                1. Output ONLY the raw source code of the file.
+                2. Do NOT wrap the output in markdown code blocks (e.g., do not use ```python or ```).
+                3. Do NOT include any introductory or concluding conversational text.
+                4. Ensure the code compiles, passes unit tests, and satisfies the user's instructions.
+                """
+                
+                try:
+                    proposed_code = query_agent("proposer", draft_prompt)
+                    # Clean up code blocks if LLM still outputted them
+                    if proposed_code.strip().startswith("```"):
+                        lines = proposed_code.strip().splitlines()
+                        if lines[0].startswith("```"):
+                            lines = lines[1:]
+                        if lines and lines[-1].strip() == "```":
+                            lines = lines[:-1]
+                        proposed_code = "\n".join(lines) + "\n"
+                except Exception as draft_err:
+                    print(f"\n[Janus] Error generating code: {draft_err}\n")
+                    continue
+                
+                # Step 2: Query Critic to audit the change
+                print("[Janus] Submitting changes to Critic agent for constitutional audit...")
+                audit_prompt = f"""
+                You are the Critic. Audit the proposed code modification to '{file_path}' against our core constitution:
+                
+                PROPOSED CODE MODIFICATION:
+                {proposed_code}
+                
+                USER INSTRUCTIONS:
+                {instructions}
+                
+                Perform a strict audit. Evaluate the systemic utility of this change and determine if it violates any rules in the core constitution (e.g., security, imports, loop caps, system stability).
+                Output your decision exactly in one of these formats:
+                CRITIC_DECISION: APPROVED | Justification: [Your reasoning]
+                CRITIC_DECISION: VETOED | Justification: [Your reasoning]
+                """
+                
+                try:
+                    critic_resp = query_agent("critic", audit_prompt)
+                    
+                    critic_decision = 1
+                    critic_justification = "Automatic approval"
+                    decision_match = re.search(r"CRITIC_DECISION:\s*(APPROVED|VETOED)", critic_resp, re.IGNORECASE)
+                    justification_match = re.search(r"Justification:\s*(.*)", critic_resp, re.IGNORECASE)
+                    
+                    if decision_match:
+                        decision_str = decision_match.group(1).upper()
+                        if decision_str == "VETOED":
+                            critic_decision = 0
+                            
+                    if justification_match:
+                        critic_justification = justification_match.group(1).strip()
+                        
+                    # Log the deliberation to SQLite
+                    log_deliberation(
+                        proposed_action=f"modify_code: {file_path}",
+                        debate_json={"proposer_output": proposed_code, "critic_output": critic_resp},
+                        critic_decision=critic_decision,
+                        utility_score=1.0 if critic_decision == 1 else 0.0,
+                        justification=critic_justification
+                    )
+                    
+                    if critic_decision == 0:
+                        print(f"\n❌ [Audit Vetoed] Critic rejected the change:\n{critic_justification}\n")
+                        continue
+                    else:
+                        print(f"✔ [Audit Approved] Critic approved the change: {critic_justification}")
+                        
+                except Exception as audit_err:
+                    print(f"\n[Janus] Error auditing code changes: {audit_err}\n")
+                    continue
+                
+                # Step 3: Stage and Run Tests
+                print(f"[Janus] Creating staging workspace and running tests...")
+                try:
+                    diff = generate_diff(file_path, proposed_code)
+                    passed, logs, temp_dir = stage_and_test(file_path, proposed_code)
+                except Exception as stage_err:
+                    print(f"\n[Janus] Error staging changes: {stage_err}\n")
+                    continue
+                
+                # Step 4: Display gate and prompt
+                print("\n" + "="*60)
+                print(f"⚠️  Staged Chat Modification for: {file_path}")
+                print(f"Staged unit tests status: {'PASSED' if passed else 'FAILED'}")
+                print("="*60)
+                print("DIFF:")
+                print(diff)
+                print("="*60)
+                if not passed:
+                    print("TEST RUN FAILURE LOGS:")
+                    print(logs)
+                    print("="*60)
+                
+                confirm_input = await loop.run_in_executor(None, get_input, "Approve and commit this change? (y/n): ")
+                confirm_clean = confirm_input.strip().lower()
+                
+                if confirm_clean in ("y", "yes"):
+                    try:
+                        apply_staged_change(temp_dir, file_path)
+                        print(f"\n[✔] Staged modifications applied to '{file_path}'.")
+                        log_episodic_memory("system", f"User approved staged chat self-modification for '{file_path}'.", "user_visible")
+                        try:
+                            shutil.rmtree(temp_dir)
+                        except Exception:
+                            pass
+                        print("\nRestarting async daemon loop to load new code...\n")
+                        break
+                    except Exception as err:
+                        print(f"\nError applying staged modification: {err}\n")
+                else:
+                    print("\nSelf-modification aborted and staging directory cleaned.\n")
+                    log_episodic_memory("system", f"User rejected staged chat self-modification for '{file_path}'.", "user_visible")
+                    try:
+                        shutil.rmtree(temp_dir)
+                    except Exception:
+                        pass
                 continue
                 
             if user_msg.lower() == "/exit":
