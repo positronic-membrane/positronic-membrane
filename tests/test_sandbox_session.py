@@ -111,8 +111,8 @@ def test_run_sandbox_tests(mock_save, mock_run, mock_get_session, tmp_path):
     assert passed is True
     assert "All tests passed" in logs
     
-    # Verify DB was updated to "passed"
-    mock_save.assert_called_once_with(str(sandbox_path), "janus/sandbox-feat", "passed")
+    # Verify DB was updated to "passed" with correct logs
+    mock_save.assert_called_once_with(str(sandbox_path), "janus/sandbox-feat", "passed", test_logs="All tests passed\n")
 
 @patch("src.sandbox_session.get_sandbox_session")
 @patch("src.sandbox_session.subprocess.run")

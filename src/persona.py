@@ -229,6 +229,28 @@ def generate_persona_response(user_query: str) -> str:
     """
     semantic_context = ""
     
+    # Inject active sandbox information if present
+    from src.sandbox_session import get_active_sandbox, get_sandbox_modified_files
+    try:
+        active_sb = get_active_sandbox()
+        if active_sb:
+            status = active_sb.get("active_sandbox_status", "active")
+            sandbox_info = f"--- Active Sandbox Session ---\n"
+            sandbox_info += f"- Path: {active_sb['active_sandbox_path']}\n"
+            sandbox_info += f"- Branch: {active_sb['active_sandbox_branch']}\n"
+            sandbox_info += f"- Test Status: {status.upper()}\n"
+            
+            modified = get_sandbox_modified_files()
+            if modified:
+                sandbox_info += f"- Modified Files: {', '.join(modified)}\n"
+            
+            if status == "failed" and active_sb.get("active_sandbox_test_logs"):
+                sandbox_info += f"- Last Sandbox Pytest Failures:\n{active_sb['active_sandbox_test_logs']}\n"
+            
+            semantic_context += sandbox_info + "\n"
+    except Exception as sb_err:
+        logger.error(f"Failed to inject sandbox session details into prompt: {sb_err}")
+    
     # 1. Check for web search request intent
     search_query = detect_search_intent(user_query)
     if search_query:
@@ -439,6 +461,11 @@ async def run_persona_chat():
                                 print(f"    - {f}")
                         else:
                             print("  * Modified Files: None")
+                            
+                        if active.get("active_sandbox_status") == "failed" and active.get("active_sandbox_test_logs"):
+                            print("="*60)
+                            print("LAST RUN FAILURES / TEST LOGS:")
+                            print(active["active_sandbox_test_logs"])
                         print("="*60 + "\n")
                         
                 elif cmd_type == "diff":

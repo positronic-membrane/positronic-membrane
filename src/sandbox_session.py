@@ -142,7 +142,16 @@ def run_sandbox_tests() -> tuple:
         logs = f"Error executing tests: {e}"
         
     new_status = "passed" if passed else "failed"
-    save_sandbox_session(str(sandbox_root), branch_name, new_status)
+    save_sandbox_session(str(sandbox_root), branch_name, new_status, test_logs=logs)
+    
+    # Save copy of logs to sandbox root log file
+    try:
+        log_file = sandbox_root / "sandbox_test.log"
+        with open(log_file, "w", encoding="utf-8") as f:
+            f.write(logs)
+    except Exception as log_err:
+        logger.warning(f"Failed to write sandbox log file: {log_err}")
+        
     return passed, logs
 
 def get_sandbox_diff() -> str:
