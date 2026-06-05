@@ -1,6 +1,7 @@
 import re
 import asyncio
 import logging
+import src.config
 from src.llm import query_agent
 from src.memory import query_memories
 from src.database import (
@@ -93,7 +94,6 @@ def parse_proposed_changes(message_content: str) -> dict:
     and queries the LLM to construct a mapping of relative file paths to their complete updated contents.
     """
     import json
-    import src.config
     
     # Scan message for relative file paths
     paths = re.findall(
@@ -557,7 +557,6 @@ async def run_persona_chat():
                                 
                                 # Read current file contents to assist proposer
                                 from pathlib import Path
-                                import src.config
                                 full_path = src.config.ROOT_DIR / target_file
                                 current_content = ""
                                 if full_path.exists():
@@ -618,7 +617,6 @@ async def run_persona_chat():
                 
                 # Fetch current file content to help Proposer generate full code
                 from pathlib import Path
-                import src.config
                 full_path = src.config.ROOT_DIR / file_path
                 current_content = ""
                 if full_path.exists():
