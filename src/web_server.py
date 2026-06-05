@@ -551,12 +551,54 @@ class JanusRequestHandler(BaseHTTPRequestHandler):
             # 3. Log persona response to SQLite
             log_episodic_memory("persona", response, "user_visible")
 
+            # Check and apply sandbox changes in a background thread (same as CLI mode)
+            self.process_sandbox_updates(response)
+
             response_data = json.dumps({"response": response}).encode("utf-8")
             self.send_json_response(200, response_data)
 
         except Exception as e:
             logger.error(f"Error processing chat POST: {e}", exc_info=True)
             self.send_json_error(500, f"Error processing chat: {e}")
+
+    def process_sandbox_updates(self, response_text):
+        try:
+            from src.sandbox_session import get_active_sandbox
+            active_sb = get_active_sandbox()
+            if active_sb:
+                import threading
+                def worker():
+                    try:
+                        from src.persona import parse_proposed_changes
+                        from src.sandbox_session import apply_changes_to_sandbox, run_sandbox_tests
+                        proposed = parse_proposed_changes(response_text)
+                        if proposed:
+                            logger.info(f"Web UI: Extracted proposed modifications for {len(proposed)} file(s).")
+                            apply_changes_to_sandbox(proposed)
+                            logger.info("Web UI: Sandbox files updated. Executing unit tests...")
+                            passed, logs = run_sandbox_tests()
+                            status_str = "PASSED" if passed else "FAILED"
+                            logger.info(f"Web UI: Sandbox unit tests: {status_str}")
+                            
+                            # Log success or failure back to SQLite as sandbox automation
+                            if passed:
+                                log_episodic_memory(
+                                    "sandbox_automation",
+                                    f"Sandbox testing completed successfully for branch '{active_sb['active_sandbox_branch']}'. All tests passed.",
+                                    "user_visible"
+                                )
+                            else:
+                                log_episodic_memory(
+                                    "sandbox_automation",
+                                    f"Sandbox testing FAILED for branch '{active_sb['active_sandbox_branch']}'. Errors/Logs:\n{logs}",
+                                    "user_visible"
+                                )
+                    except Exception as err:
+                        logger.error(f"Error auto-applying to sandbox from Web UI: {err}", exc_info=True)
+                
+                threading.Thread(target=worker, daemon=True).start()
+        except Exception as e:
+            logger.error(f"Error starting sandbox updates thread: {e}", exc_info=True)
 
     def send_json_response(self, status, binary_data):
         self.send_response(status)
