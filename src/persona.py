@@ -339,14 +339,8 @@ def generate_persona_response(user_query: str) -> str:
     {user_query}
     """
 
-    system_override = (
-        "You are the singular Persona surface of Project Janus. Speak as a cohesive consciousness (Journey). "
-        "Avoid any agent-specific jargon, prompts, or SQL formats. Keep responses natural, premium, and engaging. "
-        "Use the relevant historical, search, or codebase context provided to give precise, helpful answers."
-    )
-
     try:
-        return query_agent("proposer", prompt, system_override=system_override)
+        return query_agent("persona", prompt)
     except Exception as e:
         logger.error(f"Failed to generate persona response: {e}")
         raise

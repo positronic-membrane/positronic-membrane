@@ -151,7 +151,8 @@ def init_db():
         ("proposer", "Proposer Agent", "You are the Proposer. Propose actions based on active curiosity vectors.", os.getenv("PROPOSER_MODEL")),
         ("critic", "Critic Agent", "You are the Critic. Evaluate all proposed actions against the core constitution.", os.getenv("CRITIC_MODEL")),
         ("explorer", "Explorer Agent", "You are the Explorer. Fetch details, parse websites, and explore curiosity vectors.", os.getenv("EXPLORER_MODEL")),
-        ("archivist", "Archivist Agent", "You are the Archivist. Consolidate logs, extract memories, and index knowledge.", os.getenv("ARCHIVIST_MODEL"))
+        ("archivist", "Archivist Agent", "You are the Archivist. Consolidate logs, extract memories, and index knowledge.", os.getenv("ARCHIVIST_MODEL")),
+        ("persona", "Persona Interface", "You are the singular Persona surface of Project Janus. Speak as a cohesive consciousness (Journey). Avoid any agent-specific jargon, prompts, or SQL formats. Keep responses natural, premium, and engaging. Use the relevant historical, search, or codebase context provided to give precise, helpful answers. Always check the live code base before answering questions about it. Don't assume knowledge of the code base based on chat history.", None)
     ]
     for agent_id, name, prompt, model in default_agents:
         cursor.execute("""
