@@ -252,7 +252,10 @@ async def run_heartbeat_loop():
 
                         
                         If you are ready with the final action of this tick, output it exactly in the format:
-                        PROPOSED_ACTION: [Describe the final action or tool command to execute]
+                        PROPOSED_ACTION: <tool_name>:<arguments>
+                        
+                        CRITICAL: You must output the raw tool call syntax prefix immediately. Do not describe the tool or use introductory words (like "Use the modify_code tool to..."). For example, output:
+                        PROPOSED_ACTION: modify_code: src/main.py | [code contents]
                         """
                         
                         proposer_resp = query_agent("proposer", proposer_prompt)
@@ -361,16 +364,29 @@ async def run_heartbeat_loop():
                         execution_transcript = ""
                         action_clean = proposed_action.strip()
                         
-                        web_search_match = re.match(r"^web_search:\s*(.*)", action_clean, re.IGNORECASE)
-                        fetch_url_match = re.match(r"^fetch_url:\s*(.*)", action_clean, re.IGNORECASE)
-                        read_codebase_match = re.match(r"^read_codebase:\s*(.*)", action_clean, re.IGNORECASE)
-                        scan_workspace_match = re.match(r"^scan_workspace\b", action_clean, re.IGNORECASE)
-                        spawn_agent_match = re.match(r"^spawn_agent:\s*([a-z0-9_-]+)\s*\|\s*([^|]+)\s*\|\s*(.*)", action_clean, re.IGNORECASE)
-                        execute_code_match = re.match(r"^execute_code:\s*(.*)", action_clean, re.DOTALL | re.IGNORECASE)
-                        modify_code_match = re.match(r"^modify_code:\s*([^|]+)\s*\|\s*(.*)", action_clean, re.DOTALL | re.IGNORECASE)
+                        # Guardrail A: Strict tool call matching with search fallbacks
+                        web_search_match = re.match(r"^web_search:\s*(.*)", action_clean, re.IGNORECASE) or re.search(r"\bweb_search:\s*(.*)", action_clean, re.IGNORECASE)
+                        fetch_url_match = re.match(r"^fetch_url:\s*(.*)", action_clean, re.IGNORECASE) or re.search(r"\bfetch_url:\s*(.*)", action_clean, re.IGNORECASE)
+                        read_codebase_match = re.match(r"^read_codebase:\s*(.*)", action_clean, re.IGNORECASE) or re.search(r"\bread_codebase:\s*(.*)", action_clean, re.IGNORECASE)
+                        scan_workspace_match = re.match(r"^scan_workspace\b", action_clean, re.IGNORECASE) or re.search(r"\bscan_workspace\b", action_clean, re.IGNORECASE)
+                        spawn_agent_match = re.match(r"^spawn_agent:\s*([a-z0-9_-]+)\s*\|\s*([^|]+)\s*\|\s*(.*)", action_clean, re.IGNORECASE) or re.search(r"\bspawn_agent:\s*([a-z0-9_-]+)\s*\|\s*([^|]+)\s*\|\s*(.*)", action_clean, re.IGNORECASE)
+                        execute_code_match = re.match(r"^execute_code:\s*(.*)", action_clean, re.DOTALL | re.IGNORECASE) or re.search(r"\bexecute_code:\s*(.*)", action_clean, re.DOTALL | re.IGNORECASE)
+                        modify_code_match = re.match(r"^modify_code:\s*([^|]+)\s*\|\s*(.*)", action_clean, re.DOTALL | re.IGNORECASE) or re.search(r"\bmodify_code:\s*([^|]+)\s*\|\s*(.*)", action_clean, re.DOTALL | re.IGNORECASE)
+
+                        # Detect malformed tool formats before executing
+                        has_tool_keyword = any(kw in action_clean.lower() for kw in ["web_search", "fetch_url", "read_codebase", "scan_workspace", "spawn_agent", "execute_code", "modify_code"])
+                        any_matched = any([web_search_match, fetch_url_match, read_codebase_match, scan_workspace_match, spawn_agent_match, execute_code_match, modify_code_match])
+
+                        if has_tool_keyword and not any_matched:
+                            execution_transcript = (
+                                f"Error: Proposed action contains a tool name but uses incorrect syntax. "
+                                f"For modify_code, make sure to format exactly as: 'modify_code: <path> | <complete content>'"
+                            )
                         
                         try:
-                            if web_search_match:
+                            if has_tool_keyword and not any_matched:
+                                pass  # execution_transcript already populated with malformed error message
+                            elif web_search_match:
                                 query = web_search_match.group(1).strip()
                                 from src.explorer import search_web
                                 results = search_web(query)

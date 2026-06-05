@@ -97,6 +97,25 @@ def parse_proposed_changes(message_content: str) -> dict:
     and queries the LLM to construct a mapping of relative file paths to their complete updated contents.
     """
     import json
+
+    # --- Guardrail B: Deterministic Regex Parser ---
+    # Look for files matching 'Path: relative/path' followed by code fences:
+    regex_proposed = {}
+    pattern = r"(?:[Pp]ath|[Ff]ile|[Ff]ilename):\s*([a-zA-Z0-9_/.-]+)\s*\n+```[a-zA-Z0-9-]*\n(.*?)\n```"
+    matches = re.findall(pattern, message_content, re.DOTALL)
+    for path, content in matches:
+        path = path.strip().rstrip(".,;!?`\"'")
+        # Ensure path is relative and doesn't do directory traversal
+        try:
+            full_path = src.config.ROOT_DIR / path
+            full_path.relative_to(src.config.ROOT_DIR)
+            regex_proposed[path] = content.strip()
+        except ValueError:
+            pass
+            
+    if regex_proposed:
+        logger.info(f"Deterministic parser successfully extracted {len(regex_proposed)} file(s).")
+        return regex_proposed
     
     # Scan message for relative file paths
     paths = re.findall(
@@ -1210,6 +1229,19 @@ async def run_persona_chat():
                                 
                             if not passed:
                                 print("  (Tip: Run '/sandbox status' or '/sandbox ship' to view test failure logs)")
+                        else:
+                            has_path_mentions = bool(re.findall(
+                                r"\b((?:src|tests)/[a-zA-Z0-9_/.-]+|[a-zA-Z0-9_/.-]+\.md|[a-zA-Z0-9_/.-]+\.json|requirements\.txt)\b",
+                                msg_content
+                            ))
+                            has_code_blocks = "```" in msg_content
+                            if has_path_mentions and has_code_blocks:
+                                log_episodic_memory(
+                                    "sandbox_automation",
+                                    "[Warning] Found code blocks and file paths in response, but failed to auto-extract changes. "
+                                    "Ensure files are prefixed with 'Path: <relative_path>' or 'File: <relative_path>' immediately above their code blocks.",
+                                    "user_visible"
+                                )
                     except Exception as e:
                         logger.error(f"Error auto-applying to sandbox: {e}")
                 

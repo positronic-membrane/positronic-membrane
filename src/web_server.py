@@ -593,6 +593,20 @@ class JanusRequestHandler(BaseHTTPRequestHandler):
                                     f"Sandbox testing FAILED for branch '{active_sb['active_sandbox_branch']}'. Errors/Logs:\n{logs}",
                                     "user_visible"
                                 )
+                        else:
+                            import re
+                            has_path_mentions = bool(re.findall(
+                                r"\b((?:src|tests)/[a-zA-Z0-9_/.-]+|[a-zA-Z0-9_/.-]+\.md|[a-zA-Z0-9_/.-]+\.json|requirements\.txt)\b",
+                                response_text
+                            ))
+                            has_code_blocks = "```" in response_text
+                            if has_path_mentions and has_code_blocks:
+                                log_episodic_memory(
+                                    "sandbox_automation",
+                                    "[Warning] Found code blocks and file paths in response, but failed to auto-extract changes. "
+                                    "Ensure files are prefixed with 'Path: <relative_path>' or 'File: <relative_path>' immediately above their code blocks.",
+                                    "user_visible"
+                                )
                     except Exception as err:
                         logger.error(f"Error auto-applying to sandbox from Web UI: {err}", exc_info=True)
                 
