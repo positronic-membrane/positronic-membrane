@@ -408,5 +408,54 @@ def get_pending_modification() -> dict:
         return data
     return {}
 
+# Staged Sandbox Session Helpers
+def save_sandbox_session(path: str, branch: str, status: str):
+    """Saves active sandbox session metadata in system_config."""
+    conn = get_connection(read_only_constitution=True)
+    cursor = conn.cursor()
+    configs = [
+        ("active_sandbox_path", path),
+        ("active_sandbox_branch", branch),
+        ("active_sandbox_status", status)
+    ]
+    for key, val in configs:
+        cursor.execute("""
+        INSERT OR REPLACE INTO system_config (config_key, config_value, is_agent_modifiable)
+        VALUES (?, ?, 1);
+        """, (key, val))
+    conn.commit()
+    conn.close()
+
+def clear_sandbox_session():
+    """Clears any active sandbox session from system_config."""
+    conn = get_connection(read_only_constitution=True)
+    cursor = conn.cursor()
+    keys = ["active_sandbox_path", "active_sandbox_branch", "active_sandbox_status"]
+    for key in keys:
+        cursor.execute("DELETE FROM system_config WHERE config_key = ?;", (key,))
+    conn.commit()
+    conn.close()
+
+def get_sandbox_session() -> dict:
+    """Retrieves metadata of the active sandbox session from system_config."""
+    conn = get_connection(read_only_constitution=True)
+    cursor = conn.cursor()
+    cursor.execute("""
+    SELECT config_key, config_value 
+    FROM system_config 
+    WHERE config_key IN ('active_sandbox_path', 'active_sandbox_branch', 'active_sandbox_status');
+    """)
+    rows = cursor.fetchall()
+    conn.close()
+    
+    if not rows:
+        return {}
+        
+    data = {k: v for k, v in rows}
+    if "active_sandbox_path" in data and data["active_sandbox_path"]:
+        return data
+    return {}
+
+
 
 

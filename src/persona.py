@@ -74,19 +74,22 @@ def detect_modification_intent(user_query: str) -> tuple:
             
     return None, None
 
-def get_last_persona_message() -> str:
-    """Fetches the last message content spoken by 'persona' from SQLite."""
+def get_recent_persona_messages(limit: int = 1) -> str:
+    """Fetches recent message contents spoken by 'persona' from SQLite and concatenates them."""
     conn = get_connection(read_only_constitution=True)
     cursor = conn.cursor()
     cursor.execute("""
     SELECT message_content FROM episodic_memory 
     WHERE speaker = 'persona' 
     ORDER BY id DESC 
-    LIMIT 1;
-    """)
-    row = cursor.fetchone()
+    LIMIT ?;
+    """, (limit,))
+    rows = cursor.fetchall()
     conn.close()
-    return row[0] if row else None
+    if not rows:
+        return None
+    # Concatenate in chronological order (oldest to newest)
+    return "\n\n".join(row[0] for row in reversed(rows))
 
 def parse_proposed_changes(message_content: str) -> dict:
     """
@@ -380,17 +383,156 @@ async def run_persona_chat():
             if not user_msg:
                 continue
 
+            if user_msg.lower().startswith("/sandbox"):
+                parts = user_msg.split()
+                if len(parts) < 2:
+                    print("\n[Error] Missing sandbox command. Usage: /sandbox [start | status | diff | ship | abort]\n")
+                    continue
+                
+                cmd_type = parts[1].lower()
+                from src.sandbox_session import (
+                    get_active_sandbox, create_sandbox_session, run_sandbox_tests,
+                    get_sandbox_diff, get_sandbox_modified_files, ship_sandbox_session,
+                    abort_sandbox_session
+                )
+                
+                if cmd_type == "start":
+                    if len(parts) < 3:
+                        print("\n[Error] Please specify a session name: /sandbox start <name>\n")
+                        continue
+                    session_name = parts[2]
+                    active = get_active_sandbox()
+                    if active:
+                        print(f"\n[Warning] An active sandbox session already exists at '{active['active_sandbox_path']}' on branch '{active['active_sandbox_branch']}'.")
+                        confirm_abort = await loop.run_in_executor(None, get_input, "Abort the existing session first? (y/n): ")
+                        if confirm_abort.strip().lower() in ("y", "yes"):
+                            abort_sandbox_session()
+                            print("[Janus] Existing sandbox session aborted.")
+                        else:
+                            print("[Janus] Action canceled. Existing sandbox remains active.")
+                            continue
+                            
+                    try:
+                        path, branch = create_sandbox_session(session_name)
+                        print(f"\n[✔] Sandbox session '{session_name}' successfully created!")
+                        print(f"  * Workspace Path: {path}")
+                        print(f"  * Git Branch: {branch}\n")
+                    except Exception as err:
+                        print(f"\n[Error] Failed to create sandbox session: {err}\n")
+                        
+                elif cmd_type == "status":
+                    active = get_active_sandbox()
+                    if not active:
+                        print("\nJanus >> No active sandbox session. Start one with: /sandbox start <name>\n")
+                    else:
+                        print("\n" + "="*60)
+                        print("[Janus] Active Sandbox Session Status")
+                        print("="*60)
+                        print(f"  * Path:   {active['active_sandbox_path']}")
+                        print(f"  * Branch: {active['active_sandbox_branch']}")
+                        print(f"  * Status: {active['active_sandbox_status'].upper()}")
+                        
+                        modified_files = get_sandbox_modified_files()
+                        if modified_files:
+                            print("  * Modified Files:")
+                            for f in modified_files:
+                                print(f"    - {f}")
+                        else:
+                            print("  * Modified Files: None")
+                        print("="*60 + "\n")
+                        
+                elif cmd_type == "diff":
+                    active = get_active_sandbox()
+                    if not active:
+                        print("\nJanus >> No active sandbox session.\n")
+                    else:
+                        diff = get_sandbox_diff()
+                        print("\n" + "="*60)
+                        print(f"[Janus] Cumulative Sandbox Diff ({active['active_sandbox_branch']})")
+                        print("="*60)
+                        if diff.strip():
+                            print(diff)
+                        else:
+                            print("No changes in sandbox.")
+                        print("="*60 + "\n")
+                        
+                elif cmd_type == "ship":
+                    active = get_active_sandbox()
+                    if not active:
+                        print("\nJanus >> No active sandbox session.\n")
+                        continue
+                        
+                    # First run tests to check compliance
+                    print("\n[Janus] Running final validations inside the sandbox...")
+                    passed, logs = await asyncio.to_thread(run_sandbox_tests)
+                    status_str = "PASSED" if passed else "FAILED"
+                    print(f"Sandbox test suite status: {status_str}")
+                    if not passed:
+                        print("="*60)
+                        print("TEST LOGS:")
+                        print(logs)
+                        print("="*60)
+                        print("\n[Warning] Sandbox tests failed. Shipping may introduce regressions.")
+                        
+                    confirm = await loop.run_in_executor(None, get_input, "Proceed to ship and apply sandbox changes to live workspace? (y/n): ")
+                    if confirm.strip().lower() in ("y", "yes"):
+                        try:
+                            copied = ship_sandbox_session()
+                            print(f"\n[✔] Sandbox successfully shipped and applied! Disposed of worktree.")
+                            print("Modified files merged:")
+                            for f in copied:
+                                print(f"  - {f}")
+                            print()
+                            # Restart to load new code if files changed
+                            if copied:
+                                print("Restarting async daemon loop to load new code...\n")
+                                return
+                        except Exception as err:
+                            print(f"\n[Error] Failed to ship sandbox changes: {err}\n")
+                    else:
+                        print("\nShipping canceled. Sandbox session remains active.\n")
+                        
+                elif cmd_type == "abort":
+                    active = get_active_sandbox()
+                    if not active:
+                        print("\nJanus >> No active sandbox session.\n")
+                        continue
+                    confirm = await loop.run_in_executor(None, get_input, "Are you sure you want to abort? All sandbox changes will be lost permanently. (y/n): ")
+                    if confirm.strip().lower() in ("y", "yes"):
+                        abort_sandbox_session()
+                        print("\n[✔] Sandbox session aborted and temporary workspace cleaned.\n")
+                    else:
+                        print("\nAbort canceled.\n")
+                        
+                else:
+                    print(f"\n[Error] Unknown sandbox command '{cmd_type}'. Options are: start, status, diff, ship, abort\n")
+                continue
+
             if user_msg.lower().startswith("/stage"):
-                last_msg = get_last_persona_message()
+                parts = user_msg.split()
+                limit = 1
+                if len(parts) > 1:
+                    try:
+                        limit = int(parts[1])
+                        if limit <= 0:
+                            raise ValueError()
+                    except ValueError:
+                        print("\n[Error] Invalid lookback count. Usage: /stage [count] (must be positive integer)\n")
+                        continue
+                
+                last_msg = get_recent_persona_messages(limit)
                 if not last_msg:
                     print("\nJanus >> No previous message found to stage changes from.\n")
                     continue
                 
-                print("\n[Janus] Parsing proposed changes from our last message...")
+                if limit == 1:
+                    print("\n[Janus] Parsing proposed changes from our last message...")
+                else:
+                    print(f"\n[Janus] Parsing proposed changes from our last {limit} messages...")
                 proposed_mods = parse_proposed_changes(last_msg)
                 
                 if not proposed_mods:
-                    print("\nJanus >> No proposed code changes or file paths could be parsed from the last message.\n")
+                    print("\nJanus >> No proposed code changes or file paths could be parsed from the messages.\n")
                     continue
                 
                 approved_files = set()
@@ -993,6 +1135,28 @@ async def run_persona_chat():
 
             # Log persona response to SQLite
             log_episodic_memory("persona", response, "user_visible")
+
+            # Check if there is an active sandbox session. If so, parse and apply changes in the background!
+            from src.sandbox_session import get_active_sandbox, apply_changes_to_sandbox, run_sandbox_tests
+            active_sb = get_active_sandbox()
+            if active_sb:
+                async def parse_and_apply_to_sandbox_async(msg_content):
+                    try:
+                        proposed = await asyncio.to_thread(parse_proposed_changes, msg_content)
+                        if proposed:
+                            print(f"\n[Janus Daemon] Extracted proposed modifications for {len(proposed)} file(s).")
+                            print("Applying changes to sandbox in background...")
+                            apply_changes_to_sandbox(proposed)
+                            print("[Janus Daemon] Sandbox files updated. Executing unit tests in sandbox...")
+                            passed, logs = await asyncio.to_thread(run_sandbox_tests)
+                            status_str = "PASSED" if passed else "FAILED"
+                            print(f"\n[Janus Daemon] Sandbox unit tests: {status_str}")
+                            if not passed:
+                                print("  (Tip: Run '/sandbox status' or '/sandbox ship' to view test failure logs)")
+                    except Exception as e:
+                        logger.error(f"Error auto-applying to sandbox: {e}")
+                
+                asyncio.create_task(parse_and_apply_to_sandbox_async(response))
 
         except asyncio.CancelledError:
             break

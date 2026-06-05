@@ -19,7 +19,8 @@ class DirectoryWatcher:
             ".DS_Store", 
             "__pycache__",
             ".janus_snapshots",
-            "data"
+            "data",
+            ".janus_sandboxes"
         }
         state = {}
         for root, dirs, files in os.walk(self.path):

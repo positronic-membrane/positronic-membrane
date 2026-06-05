@@ -232,3 +232,5 @@ janus.db-journal
 janus.db-wal
 janus.db-shm
 data/
+.janus_sandboxes/
+.janus_snapshots/

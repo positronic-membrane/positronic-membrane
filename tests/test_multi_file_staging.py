@@ -5,7 +5,7 @@ from pathlib import Path
 from unittest.mock import patch, MagicMock
 import src.config
 from src.database import init_db, log_episodic_memory
-from src.persona import get_last_persona_message, parse_proposed_changes
+from src.persona import get_recent_persona_messages, parse_proposed_changes
 from src.self_modification import (
     stage_and_test_multi,
     generate_multi_diff,
@@ -49,15 +49,20 @@ def setup_test_workspace(tmp_path):
     yield project_root
     src.config.ROOT_DIR = orig_root
 
-def test_get_last_persona_message():
-    """Verify retrieval of the last message spoken by the persona."""
+def test_get_recent_persona_messages():
+    """Verify retrieval and concatenation of recent messages spoken by the persona."""
     log_episodic_memory("user", "Hello", "user_visible")
     log_episodic_memory("persona", "How can I help you?", "user_visible")
     log_episodic_memory("user", "Do something else", "user_visible")
     log_episodic_memory("persona", "I did something else.", "user_visible")
     
-    msg = get_last_persona_message()
-    assert msg == "I did something else."
+    # Test default/1 limit
+    msg1 = get_recent_persona_messages(1)
+    assert msg1 == "I did something else."
+    
+    # Test limit=2
+    msg2 = get_recent_persona_messages(2)
+    assert msg2 == "How can I help you?\n\nI did something else."
 
 @patch("src.persona.query_agent")
 def test_parse_proposed_changes(mock_query, setup_test_workspace):
@@ -158,7 +163,7 @@ def test_regex_extract_failing_tests():
     assert failing_tests == ["tests/test_memory.py", "tests/test_persona.py"]
 
 @pytest.mark.asyncio
-@patch("src.persona.get_last_persona_message")
+@patch("src.persona.get_recent_persona_messages")
 @patch("src.persona.parse_proposed_changes")
 @patch("src.persona.query_agent")
 @patch("src.persona.get_input")
@@ -172,11 +177,11 @@ async def test_staging_caching_and_self_healing(
     mock_get_input,
     mock_query_agent,
     mock_parse_proposed_changes,
-    mock_get_last_persona_message,
+    mock_get_recent_persona_messages,
     setup_test_workspace
 ):
     # 1. Setup mocks
-    mock_get_last_persona_message.return_value = "Modify src/calc.py"
+    mock_get_recent_persona_messages.return_value = "Modify src/calc.py"
     mock_parse_proposed_changes.return_value = {
         "src/calc.py": "def add(a, b): return a + b\n"
     }
@@ -259,4 +264,56 @@ async def test_staging_caching_and_self_healing(
     assert "src/calc.py" in last_mods_tested
     assert "tests/test_calc.py" in last_mods_tested
     assert last_mods_tested["tests/test_calc.py"] == "def test_add(): assert add(2, 3) == 5\n"
+
+
+@pytest.mark.asyncio
+@patch("src.persona.get_recent_persona_messages")
+@patch("src.persona.parse_proposed_changes")
+@patch("src.persona.get_input")
+@patch("src.persona.query_agent")
+async def test_stage_with_limit_argument(
+    mock_query_agent,
+    mock_get_input,
+    mock_parse_proposed_changes,
+    mock_get_recent_persona_messages,
+    setup_test_workspace
+):
+    """Verify that /stage with a limit argument calls get_recent_persona_messages with that limit."""
+    mock_get_recent_persona_messages.return_value = "Modify src/calc.py"
+    mock_parse_proposed_changes.return_value = {}  # Trigger early abort
+    
+    # Input is /stage 3, then exit
+    inputs = ["/stage 3", "/exit"]
+    def mock_get_input_side_effect(prompt):
+        if inputs:
+            return inputs.pop(0)
+        return "/exit"
+    mock_get_input.side_effect = mock_get_input_side_effect
+    
+    from src.persona import run_persona_chat
+    await run_persona_chat()
+    
+    mock_get_recent_persona_messages.assert_called_with(3)
+
+
+@pytest.mark.asyncio
+@patch("src.persona.get_recent_persona_messages")
+@patch("src.persona.get_input")
+async def test_stage_with_invalid_limit_argument(
+    mock_get_input,
+    mock_get_recent_persona_messages,
+    setup_test_workspace
+):
+    """Verify that /stage with an invalid argument prints an error and doesn't query messages."""
+    inputs = ["/stage -5", "/stage abc", "/exit"]
+    def mock_get_input_side_effect(prompt):
+        if inputs:
+            return inputs.pop(0)
+        return "/exit"
+    mock_get_input.side_effect = mock_get_input_side_effect
+    
+    from src.persona import run_persona_chat
+    await run_persona_chat()
+    
+    mock_get_recent_persona_messages.assert_not_called()
 
