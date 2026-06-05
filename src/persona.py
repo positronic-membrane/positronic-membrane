@@ -393,6 +393,8 @@ async def run_persona_chat():
                     print("\nJanus >> No proposed code changes or file paths could be parsed from the last message.\n")
                     continue
                 
+                approved_files = set()
+                
                 # Keep loop for selection/editing
                 while True:
                     print("\n" + "="*60)
@@ -432,6 +434,10 @@ async def run_persona_chat():
                         
                         audit_tasks = []
                         for file_path, proposed_code in proposed_mods.items():
+                            if file_path in approved_files:
+                                print(f"✔ [Audit Cached] Critic already approved '{file_path}'. Skipping audit.")
+                                continue
+                            
                             audit_prompt = f"""
                             You are the Critic. Audit the proposed code modification to '{file_path}' against our core constitution:
                             
@@ -446,10 +452,13 @@ async def run_persona_chat():
                             audit_tasks.append((file_path, proposed_code, audit_prompt))
                             
                         # Run audits concurrently in background threads
-                        audit_results = await asyncio.gather(*[
-                            asyncio.to_thread(query_agent, "critic", item[2])
-                            for item in audit_tasks
-                        ])
+                        if audit_tasks:
+                            audit_results = await asyncio.gather(*[
+                                asyncio.to_thread(query_agent, "critic", item[2])
+                                for item in audit_tasks
+                            ])
+                        else:
+                            audit_results = []
                         
                         for (file_path, proposed_code, _), critic_resp in zip(audit_tasks, audit_results):
                             try:
@@ -477,11 +486,16 @@ async def run_persona_chat():
                                 if critic_decision == 0:
                                     print(f"\n❌ [Audit Vetoed] Critic rejected changes for '{file_path}':\n{critic_justification}\n")
                                     vetoed_files[file_path] = critic_justification
+                                    if file_path in approved_files:
+                                        approved_files.remove(file_path)
                                 else:
                                     print(f"✔ [Audit Approved] Critic approved '{file_path}': {critic_justification}")
+                                    approved_files.add(file_path)
                             except Exception as audit_err:
                                 print(f"\n[Janus] Error processing audit for '{file_path}': {audit_err}\n")
                                 vetoed_files[file_path] = f"Audit failed: {audit_err}"
+                                if file_path in approved_files:
+                                    approved_files.remove(file_path)
                         
                         if vetoed_files:
                             print("\n" + "="*60)
@@ -546,6 +560,8 @@ async def run_persona_chat():
                                                 lines = lines[:-1]
                                             proposed_code = "\n".join(lines) + "\n"
                                         proposed_mods[file_path] = proposed_code
+                                        if file_path in approved_files:
+                                            approved_files.remove(file_path)
                                         print(f"✔ [Janus] Successfully regenerated '{file_path}'.")
                                     except Exception as draft_err:
                                         print(f"\n[Janus] Error regenerating code for '{file_path}': {draft_err}\n")
@@ -576,6 +592,87 @@ async def run_persona_chat():
                             print("TEST RUN FAILURE LOGS:")
                             print(logs)
                             print("="*60)
+                            
+                            # Log Parsing for test failures
+                            failing_tests = []
+                            for match in re.findall(r"(?:FAILED|ERROR)\s+(tests/test_[a-zA-Z0-9_-]+\.py)|(tests/test_[a-zA-Z0-9_-]+\.py)::\S+\s+(?:FAILED|ERROR)", logs):
+                                failing_tests.append(match[0] or match[1])
+                            failing_tests = sorted(list(set(failing_tests)))
+                            if failing_tests:
+                                print("Failing test file(s) detected:")
+                                for f in failing_tests:
+                                    print(f"  - {f}")
+                                print("="*60)
+                                
+                                heal_input = await loop.run_in_executor(
+                                    None, get_input,
+                                    "Pre-existing test file(s) failed in staging. Would you like Janus to attempt self-healing? (y/n): "
+                                )
+                                if heal_input.strip().lower() in ("y", "yes"):
+                                    heal_tasks = []
+                                    for test_file in failing_tests:
+                                        print(f"\n[Janus] Preparing self-healing for '{test_file}'...")
+                                        full_path = src.config.ROOT_DIR / test_file
+                                        current_content = ""
+                                        if full_path.exists():
+                                            try:
+                                                with open(full_path, "r", encoding="utf-8", errors="ignore") as f:
+                                                    current_content = f.read()
+                                            except Exception:
+                                                pass
+                                                
+                                        draft_prompt = f"""
+                                        You are the Proposer. A pre-existing test file has failed during staging.
+                                        We need to automatically fix (self-heal) this test file so it passes correctly.
+                                        
+                                        FAILING TEST FILE: {test_file}
+                                        
+                                        TEST RUN FAILURE LOGS:
+                                        {logs}
+                                        
+                                        CURRENT TEST FILE CONTENT:
+                                        {current_content}
+                                        
+                                        Please fix this test file to resolve the failures shown in the logs.
+                                        Follow mocking best practices (e.g. mock where imported/used, not where defined).
+                                        
+                                        Generate the COMPLETE updated source code for the test file '{test_file}'.
+                                        
+                                        CRITICAL RULES:
+                                        1. Output ONLY the raw source code of the file.
+                                        2. Do NOT wrap the output in markdown code blocks (e.g., do not use ```python or ```).
+                                        3. Do NOT include any introductory or concluding conversational text.
+                                        4. Ensure the code compiles, passes unit tests, and satisfies all guidelines.
+                                        """
+                                        heal_tasks.append((test_file, draft_prompt))
+                                    
+                                    print(f"\n[Janus] Querying Proposer agents concurrently to self-heal {len(heal_tasks)} files...")
+                                    heal_results = await asyncio.gather(*[
+                                        asyncio.to_thread(query_agent, "proposer", item[1])
+                                        for item in heal_tasks
+                                    ])
+                                    
+                                    for (test_file, _), proposed_code in zip(heal_tasks, heal_results):
+                                        try:
+                                            if proposed_code.strip().startswith("```"):
+                                                lines = proposed_code.strip().splitlines()
+                                                if lines[0].startswith("```"):
+                                                    lines = lines[1:]
+                                                if lines and lines[-1].strip() == "```":
+                                                    lines = lines[:-1]
+                                                proposed_code = "\n".join(lines) + "\n"
+                                            proposed_mods[test_file] = proposed_code
+                                            if test_file in approved_files:
+                                                approved_files.remove(test_file)
+                                            print(f"✔ [Janus] Successfully self-healed '{test_file}'.")
+                                        except Exception as draft_err:
+                                            print(f"\n[Janus] Error self-healing '{test_file}': {draft_err}\n")
+                                            
+                                    try:
+                                        shutil.rmtree(temp_dir)
+                                    except Exception:
+                                        pass
+                                    continue
                             
                         confirm_input = await loop.run_in_executor(None, get_input, "Approve and commit these changes? (y/n): ")
                         confirm_clean = confirm_input.strip().lower()
@@ -611,6 +708,8 @@ async def run_persona_chat():
                             if 0 <= idx < len(mod_files):
                                 removed_file = mod_files[idx]
                                 del proposed_mods[removed_file]
+                                if removed_file in approved_files:
+                                    approved_files.remove(removed_file)
                                 print(f"\n[Janus] Excluded '{removed_file}' from staging list.")
                             else:
                                 print("\n[Error] Invalid index.\n")
@@ -685,6 +784,8 @@ async def run_persona_chat():
                                             lines = lines[:-1]
                                         proposed_code = "\n".join(lines) + "\n"
                                     proposed_mods[target_file] = proposed_code
+                                    if target_file in approved_files:
+                                        approved_files.remove(target_file)
                                     print(f"✔ [Janus] Successfully regenerated '{target_file}'.")
                                 except Exception as draft_err:
                                     print(f"\n[Janus] Error regenerating code: {draft_err}\n")

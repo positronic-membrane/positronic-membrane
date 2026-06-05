@@ -28,6 +28,7 @@ This section documents the non-negotiable architectural boundaries, performance 
 * **Veto Gate for Swarm Alterations:** Any self-modification proposals—such as registering a new agent, altering an existing agent's prompt, or swapping an active model in `agent_registry`—must be logged in `internal_deliberations` and submitted to the Critic agent for an audit. The Critic must evaluate if the modification introduces cognitive bias, bypasses safety valves, or violates the core constitution.
 * **Safe Configuration Mutation:** Agents can only modify configuration values in `system_config` where `is_agent_modifiable = 1`. Any modification to non-modifiable keys must trigger an immediate safety halt.
 - **Automated Memory Retention**: The codebase utilizes a polling-based `FileWatcher` (`src/watcher.py`) coupled with a `MemoryOrchestrator` (`src/memory.py`). Any structural or logical modifications to the workspace must be intercepted by this orchestrator to generate point-in-time JSON snapshots in `.janus_snapshots/`, ensuring no contextual drift occurs during asynchronous development cycles.
+- **Mocking Namespace Isolation**: All test files must mock classes/functions in the module where they are imported and used, rather than where they are defined (e.g., use `@patch("src.memory.query_agent")` instead of `@patch("src.llm.query_agent")`). The Proposer must write tests using this rule, and the Critic must veto any tests that violate it.
 
 ---
 

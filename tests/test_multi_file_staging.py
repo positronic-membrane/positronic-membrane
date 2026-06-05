@@ -140,3 +140,123 @@ def test_apply_staged_multi(setup_test_workspace):
     calc_path = setup_test_workspace / "src" / "calc.py"
     assert calc_path.read_text() == "def multiply(a, b): return a * b * 10\n"
     shutil.rmtree(staging_dir)
+
+def test_regex_extract_failing_tests():
+    import re
+    logs = """
+    ============================= test session starts ==============================
+    collected 3 items
+    
+    tests/test_memory.py::test_add_and_query_memory FAILED
+    tests/test_database.py::test_database_initialization PASSED
+    tests/test_persona.py::test_detect_metacognitive_intent FAILED
+    """
+    failing_tests = []
+    for match in re.findall(r"(?:FAILED|ERROR)\s+(tests/test_[a-zA-Z0-9_-]+\.py)|(tests/test_[a-zA-Z0-9_-]+\.py)::\S+\s+(?:FAILED|ERROR)", logs):
+        failing_tests.append(match[0] or match[1])
+    failing_tests = sorted(list(set(failing_tests)))
+    assert failing_tests == ["tests/test_memory.py", "tests/test_persona.py"]
+
+@pytest.mark.asyncio
+@patch("src.persona.get_last_persona_message")
+@patch("src.persona.parse_proposed_changes")
+@patch("src.persona.query_agent")
+@patch("src.persona.get_input")
+@patch("src.self_modification.stage_and_test_multi")
+@patch("src.self_modification.generate_multi_diff")
+@patch("shutil.rmtree")
+async def test_staging_caching_and_self_healing(
+    mock_rmtree,
+    mock_generate_multi_diff,
+    mock_stage_and_test_multi,
+    mock_get_input,
+    mock_query_agent,
+    mock_parse_proposed_changes,
+    mock_get_last_persona_message,
+    setup_test_workspace
+):
+    # 1. Setup mocks
+    mock_get_last_persona_message.return_value = "Modify src/calc.py"
+    mock_parse_proposed_changes.return_value = {
+        "src/calc.py": "def add(a, b): return a + b\n"
+    }
+    
+    # query_agent mock behavior:
+    # First, it gets called with "critic" to audit src/calc.py (approved).
+    # Then proposer for self-healing tests/test_calc.py.
+    # Then critic to audit tests/test_calc.py (approved).
+    def mock_query_agent_side_effect(agent_name, prompt, **kwargs):
+        if agent_name == "critic":
+            return "CRITIC_DECISION: APPROVED | Justification: Looks good."
+        elif agent_name == "proposer":
+            return "def test_add(): assert add(2, 3) == 5\n"
+        return "mock response"
+    mock_query_agent.side_effect = mock_query_agent_side_effect
+    
+    # get_input mock behavior:
+    # 1. "User >> ": "/stage" -> starts staging
+    # 2. "Selection >> ": "y" -> stages and runs tests (which will fail)
+    # 3. "Pre-existing test file(s) failed...": "y" -> confirms self-healing
+    # 4. "Selection >> ": "y" -> runs audit again (with cache)
+    # 5. "Approve and commit...": "n" -> aborts
+    # 6. "User >> ": "/exit" -> exits chat
+    inputs = [
+        "/stage",
+        "y",
+        "y",
+        "y",
+        "n",
+        "/exit"
+    ]
+    def mock_get_input_side_effect(prompt):
+        if inputs:
+            return inputs.pop(0)
+        return "/exit"
+    mock_get_input.side_effect = mock_get_input_side_effect
+    
+    # stage_and_test_multi mock behavior:
+    # First call: fails with tests/test_calc.py failing
+    # Second call: passes
+    call_count = 0
+    def mock_stage_and_test_side_effect(proposed_mods):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return False, "tests/test_calc.py::test_add FAILED", "dummy_temp_dir"
+        return True, "All passed", "dummy_temp_dir"
+    mock_stage_and_test_multi.side_effect = mock_stage_and_test_side_effect
+    
+    mock_generate_multi_diff.return_value = "dummy diff"
+    
+    # Write a dummy test file in workspace so self-healing can read it
+    test_file_path = setup_test_workspace / "tests" / "test_calc.py"
+    test_file_path.write_text("def test_add(): assert False\n")
+    
+    # Run the chat loop
+    from src.persona import run_persona_chat
+    await run_persona_chat()
+    
+    # Assertions
+    # 1. stage_and_test_multi was called twice
+    assert mock_stage_and_test_multi.call_count == 2
+    
+    # 2. query_agent critic was called for src/calc.py and tests/test_calc.py,
+    # but NOT twice for src/calc.py (due to caching)
+    critic_calls = [
+        call for call in mock_query_agent.call_args_list 
+        if call[0][0] == "critic"
+    ]
+    # Total critic calls should be 2:
+    # Call 1: src/calc.py (first selection 'y')
+    # Call 2: tests/test_calc.py (second selection 'y', after self-healing added it and invalidated cache)
+    assert len(critic_calls) == 2
+    assert "src/calc.py" in critic_calls[0][0][1]
+    assert "tests/test_calc.py" in critic_calls[1][0][1]
+    
+    # 3. self-healed file was added to proposed_mods
+    # The last call to stage_and_test_multi should have both src/calc.py and tests/test_calc.py
+    last_mods_tested = mock_stage_and_test_multi.call_args_list[-1][0][0]
+    assert "src/calc.py" in last_mods_tested
+    assert "tests/test_calc.py" in last_mods_tested
+    assert last_mods_tested["tests/test_calc.py"] == "def test_add(): assert add(2, 3) == 5\n"
+
