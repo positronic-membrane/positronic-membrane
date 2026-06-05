@@ -265,3 +265,56 @@ def get_active_curiosity_topics(limit: int = 5) -> list:
     packed.sort(key=lambda x: (x["relevance_count"], x["timestamp"]), reverse=True)
     
     return [item["document"] for item in packed[:limit]]
+
+def orchestrate_workspace_snapshot(changes: dict) -> None:
+    """
+    Callback triggered by the DirectoryWatcher.
+    Constructs a point-in-time JSON snapshot of changes and writes it to `.janus_snapshots/`.
+    """
+    import json
+    from pathlib import Path
+    
+    logger.info(f"MemoryOrchestrator intercepting changes: {changes}")
+    
+    snapshots_dir = src.config.ROOT_DIR / ".janus_snapshots"
+    snapshots_dir.mkdir(exist_ok=True)
+    
+    # Read content for added and modified files
+    contents = {}
+    for filepath in changes.get("added", []) + changes.get("modified", []):
+        try:
+            rel_path = Path(filepath).relative_to(src.config.ROOT_DIR)
+            with open(filepath, "r", encoding="utf-8", errors="ignore") as f:
+                contents[str(rel_path)] = f.read()
+        except Exception as e:
+            logger.error(f"Failed to read file content for snapshot {filepath}: {e}")
+            
+    # Relativize the added/removed/modified lists
+    rel_changes = {
+        "added": [],
+        "removed": [],
+        "modified": []
+    }
+    for key in ("added", "removed", "modified"):
+        for path in changes.get(key, []):
+            try:
+                rel = Path(path).relative_to(src.config.ROOT_DIR)
+                rel_changes[key].append(str(rel))
+            except ValueError:
+                # If file is not in workspace root, use basename
+                rel_changes[key].append(Path(path).name)
+                
+    snapshot_data = {
+        "timestamp": time.time(),
+        "changes": rel_changes,
+        "contents": contents
+    }
+    
+    snapshot_filename = f"snapshot_{int(time.time())}_{uuid.uuid4().hex[:8]}.json"
+    snapshot_path = snapshots_dir / snapshot_filename
+    try:
+        with open(snapshot_path, "w", encoding="utf-8") as f:
+            json.dump(snapshot_data, f, indent=2)
+        logger.info(f"Successfully wrote point-in-time snapshot to {snapshot_path}")
+    except Exception as e:
+        logger.error(f"Failed to write snapshot file {snapshot_path}: {e}")

@@ -8,9 +8,27 @@ class DirectoryWatcher:
         self.callback = callback
 
     def _get_state(self):
+        ignored_items = {
+            ".git", 
+            ".venv", 
+            "venv", 
+            "janus.db", 
+            "janus.db-journal", 
+            "janus.db-wal", 
+            "janus.db-shm", 
+            ".DS_Store", 
+            "__pycache__",
+            ".janus_snapshots",
+            "data"
+        }
         state = {}
-        for root, _, files in os.walk(self.path):
+        for root, dirs, files in os.walk(self.path):
+            # Prune ignored directories in-place to avoid traversing them
+            dirs[:] = [d for d in dirs if d not in ignored_items]
             for file in files:
+                if (file in ignored_items or 
+                    file.endswith((".pyc", ".pyo", ".db", ".db-wal", ".db-shm", ".db-journal", ".sqlite", ".sqlite3"))):
+                    continue
                 filepath = os.path.join(root, file)
                 try:
                     state[filepath] = os.path.getmtime(filepath)

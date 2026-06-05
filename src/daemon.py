@@ -118,6 +118,23 @@ async def run_heartbeat_loop():
     except Exception as e:
         logger.error(f"Failed to build initial codebase index: {e}")
 
+    # Start DirectoryWatcher in background thread
+    from src.watcher import DirectoryWatcher
+    from src.memory import orchestrate_workspace_snapshot
+    import threading
+
+    stop_watcher_event = threading.Event()
+    watcher = DirectoryWatcher(
+        path=str(src.config.ROOT_DIR),
+        callback=orchestrate_workspace_snapshot
+    )
+    def watcher_thread_func():
+        watcher.watch(interval=2.0, stop_event=stop_watcher_event)
+
+    watcher_thread = threading.Thread(target=watcher_thread_func, daemon=True)
+    watcher_thread.start()
+    logger.info(f"DirectoryWatcher started on path: {src.config.ROOT_DIR}")
+
     try:
         while True:
             # Check user presence
@@ -505,3 +522,8 @@ async def run_heartbeat_loop():
         logger.info("Heartbeat loop cancelled gracefully.")
     except Exception as e:
         logger.critical(f"Unhandled error in heartbeat daemon loop: {e}", exc_info=True)
+    finally:
+        logger.info("Stopping DirectoryWatcher...")
+        stop_watcher_event.set()
+        watcher_thread.join(timeout=3.0)
+        logger.info("DirectoryWatcher stopped.")
