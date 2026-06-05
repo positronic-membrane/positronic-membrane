@@ -105,3 +105,51 @@ async def test_heartbeat_loop_execution(mock_query, mock_query_memories, mock_ad
     
     # We expect at least 1 mock deliberation to have been logged and boredom to have reset
     assert deliberations_count >= 1
+
+@pytest.mark.asyncio
+@patch("src.daemon.add_memory")
+@patch("src.daemon.query_memories")
+@patch("src.daemon.query_agent")
+async def test_modify_code_path_verification(mock_query, mock_query_memories, mock_add_memory, tmp_path, monkeypatch):
+    """Verify that modify_code tool execution validates directories and reports error on invalid parent path."""
+    mock_query_memories.return_value = []
+    mock_add_memory.return_value = None
+
+    def side_effect(agent_id, prompt):
+        if agent_id == "proposer":
+            return "PROPOSED_ACTION: modify_code: invalid_parent_dir/new_file.py | print('Hello')"
+        elif agent_id == "critic":
+            return "Decision: 1\nJustification: Approved."
+        elif agent_id == "archivist":
+            return "Curiosity rules or summary."
+        return ""
+    mock_query.side_effect = side_effect
+
+    monkeypatch.setenv("JANUS_TEST_MODE", "1")
+    monkeypatch.setattr(src.config, "BOREDOM_THRESHOLD", 1)
+    monkeypatch.setattr(src.config, "ROOT_DIR", tmp_path)
+
+    daemon_task = asyncio.create_task(run_heartbeat_loop())
+    await asyncio.sleep(2.5) # Allow 1 tick
+    daemon_task.cancel()
+    try:
+        await daemon_task
+    except asyncio.CancelledError:
+        pass
+
+    # Verify that the deliberation log captured the failure
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT proposed_action, critic_decision FROM internal_deliberations;")
+    rows = cursor.fetchall()
+    
+    # Verify the episodic memory contains the failure message
+    cursor.execute("SELECT message_content FROM episodic_memory WHERE speaker = 'system' AND message_content LIKE '%Action execution failed%';")
+    system_errors = cursor.fetchall()
+    conn.close()
+
+    assert len(rows) >= 1
+    assert "invalid_parent_dir/new_file.py" in rows[0][0]
+    
+    assert len(system_errors) >= 1
+    assert "parent directory 'invalid_parent_dir' does not exist" in system_errors[0][0]

@@ -428,6 +428,13 @@ async def run_heartbeat_loop():
                                 proposed_code = re.sub(r"^```python\s*", "", proposed_code, flags=re.IGNORECASE)
                                 proposed_code = re.sub(r"\s*```$", "", proposed_code, flags=re.IGNORECASE)
                                 
+                                # Path verification guardrail:
+                                full_path = Path(src.config.ROOT_DIR) / rel_path
+                                if not full_path.exists() and not full_path.parent.exists():
+                                    raise FileNotFoundError(
+                                        f"Target file path '{rel_path}' is invalid: parent directory '{Path(rel_path).parent}' does not exist."
+                                    )
+                                
                                 from src.self_modification import stage_and_test, generate_diff
                                 from src.database import stage_modification_in_db
                                 
@@ -448,6 +455,11 @@ async def run_heartbeat_loop():
                         except Exception as exc:
                             logger.error(f"Error executing tool action: {exc}", exc_info=True)
                             execution_transcript = f"Action execution failed: {exc}"
+                            log_episodic_memory(
+                                speaker="system",
+                                message_content=f"Action execution failed: {exc}",
+                                context_type="background_thought"
+                            )
                         
                         archivist_prompt = f"""
                         You are the Archivist. Summarize the following execution outcome into a compact semantic memory nugget (under 2 sentences) for our long-term memory store.

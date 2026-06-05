@@ -67,11 +67,16 @@ def web_server():
     shutil.rmtree(temp_db_dir, ignore_errors=True)
 
 def test_default_seeded_rule(setup_test_db):
-    """Verify that the database seeds the default persona rule successfully."""
-    rules = get_agent_rules("persona")
-    assert len(rules) == 1
-    assert rules[0]["key"] == "verify_live_codebase"
-    assert "Always check the live code base" in rules[0]["text"]
+    """Verify that the database seeds the default persona and proposer rules successfully."""
+    persona_rules = get_agent_rules("persona")
+    assert len(persona_rules) == 1
+    assert persona_rules[0]["key"] == "verify_live_codebase"
+    assert "Always check the live code base" in persona_rules[0]["text"]
+
+    proposer_rules = get_agent_rules("proposer")
+    assert len(proposer_rules) == 3
+    keys = {r["key"] for r in proposer_rules}
+    assert keys == {"verify_file_existence", "strict_tool_syntax", "dependency_check"}
 
 def test_agent_rules_crud_helpers(setup_test_db):
     """Verify database CRUD functions for agent rules."""
@@ -80,31 +85,28 @@ def test_agent_rules_crud_helpers(setup_test_db):
     add_agent_rule("proposer", "test_rule_2", "This is rule text 2.")
     
     rules = get_agent_rules("proposer")
-    assert len(rules) == 2
-    assert rules[0]["key"] == "test_rule_1"
-    assert rules[1]["key"] == "test_rule_2"
+    # 3 seeded proposer rules + 2 added proposer rules = 5
+    assert len(rules) == 5
     
     # Read All
     all_rules = get_all_agent_rules()
-    # At least the seeded persona rule and the 2 proposer rules should be returned
-    assert len(all_rules) >= 3
+    # 1 seeded persona + 3 seeded proposer + 2 added proposer = 6
+    assert len(all_rules) >= 6
     
     # Toggle (deactivate)
     toggle_agent_rule("test_rule_1", False)
     rules_after_toggle = get_agent_rules("proposer")
-    assert len(rules_after_toggle) == 1
-    assert rules_after_toggle[0]["key"] == "test_rule_2"
+    assert len(rules_after_toggle) == 4
     
     # Toggle (reactivate)
     toggle_agent_rule("test_rule_1", True)
     rules_after_reactivate = get_agent_rules("proposer")
-    assert len(rules_after_reactivate) == 2
+    assert len(rules_after_reactivate) == 5
     
     # Delete
     delete_agent_rule("test_rule_1")
     rules_after_delete = get_agent_rules("proposer")
-    assert len(rules_after_delete) == 1
-    assert rules_after_delete[0]["key"] == "test_rule_2"
+    assert len(rules_after_delete) == 4
 
 @patch("src.llm.OpenAI")
 def test_query_agent_compiles_rules(mock_openai_class, setup_test_db):

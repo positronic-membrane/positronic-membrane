@@ -172,13 +172,18 @@ def init_db():
         VALUES (?, ?, ?, ?);
         """, (agent_id, name, prompt, model))
 
-    # Populate default agent rules if empty
-    cursor.execute("SELECT COUNT(*) FROM agent_rules;")
-    if cursor.fetchone()[0] == 0:
+    # Populate default agent rules
+    default_rules = [
+        ('persona', 'verify_live_codebase', "Always check the live code base before answering questions about it. Don't assume knowledge of the code base based on chat history."),
+        ('proposer', 'verify_file_existence', "Always confirm that a target file path exists using read_codebase or scan_workspace before proposing modifications to it. Do not guess or hallucinate directories."),
+        ('proposer', 'strict_tool_syntax', "Direct tool calls must be formatted exactly as PROPOSED_ACTION: <tool_name>:<arguments>. Do not wrap code content in markdown fences inside tool call arguments, and omit all conversational prefix text."),
+        ('proposer', 'dependency_check', "Ensure any proposed code edits only import libraries defined in requirements.txt or the Python standard library. Verify import paths align with the active project structure.")
+    ]
+    for agent_id, rule_key, rule_text in default_rules:
         cursor.execute("""
         INSERT OR IGNORE INTO agent_rules (agent_id, rule_key, rule_text)
-        VALUES ('persona', 'verify_live_codebase', 'Always check the live code base before answering questions about it. Don''t assume knowledge of the code base based on chat history.');
-        """)
+        VALUES (?, ?, ?);
+        """, (agent_id, rule_key, rule_text))
 
     conn.commit()
     conn.close()
