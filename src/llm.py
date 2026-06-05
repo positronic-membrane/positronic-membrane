@@ -24,17 +24,10 @@ def resolve_agent_model(agent_id: str, db_model: str) -> str:
     """
     Resolves the model target for an agent by checking:
     1. Agent specific target_model stored in the database.
-    2. Role specific overrides in config (.env) (e.g. PROPOSER_MODEL, CRITIC_MODEL).
-    3. Global fallback LLM_MODEL.
+    2. Global fallback LLM_MODEL.
     """
     if db_model:
         return db_model
-
-    # Check env config overrides
-    env_override_key = f"{agent_id.upper()}_MODEL"
-    override = getattr(src.config, env_override_key, None)
-    if override:
-        return override
 
     return src.config.LLM_MODEL
 

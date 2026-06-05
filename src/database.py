@@ -145,12 +145,13 @@ def init_db():
         VALUES (?, ?, ?);
         """, (key, value, modifiable))
 
+    import os
     # Populate default agent registry if empty
     default_agents = [
-        ("proposer", "Proposer Agent", "You are the Proposer. Propose actions based on active curiosity vectors.", None),
-        ("critic", "Critic Agent", "You are the Critic. Evaluate all proposed actions against the core constitution.", None),
-        ("explorer", "Explorer Agent", "You are the Explorer. Fetch details, parse websites, and explore curiosity vectors.", None),
-        ("archivist", "Archivist Agent", "You are the Archivist. Consolidate logs, extract memories, and index knowledge.", None)
+        ("proposer", "Proposer Agent", "You are the Proposer. Propose actions based on active curiosity vectors.", os.getenv("PROPOSER_MODEL")),
+        ("critic", "Critic Agent", "You are the Critic. Evaluate all proposed actions against the core constitution.", os.getenv("CRITIC_MODEL")),
+        ("explorer", "Explorer Agent", "You are the Explorer. Fetch details, parse websites, and explore curiosity vectors.", os.getenv("EXPLORER_MODEL")),
+        ("archivist", "Archivist Agent", "You are the Archivist. Consolidate logs, extract memories, and index knowledge.", os.getenv("ARCHIVIST_MODEL"))
     ]
     for agent_id, name, prompt, model in default_agents:
         cursor.execute("""

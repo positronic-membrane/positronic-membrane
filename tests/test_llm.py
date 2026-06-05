@@ -26,17 +26,11 @@ def test_resolve_agent_model(monkeypatch):
     """Verify dynamic model overrides resolve in order of priority."""
     # 1. Global default fallback
     monkeypatch.setattr(src.config, "LLM_MODEL", "global-model-7b")
-    monkeypatch.setattr(src.config, "PROPOSER_MODEL", "global-model-7b")
     
     resolved = resolve_agent_model("proposer", db_model=None)
     assert resolved == "global-model-7b"
     
-    # 2. Env Override
-    monkeypatch.setattr(src.config, "PROPOSER_MODEL", "env-override-13b")
-    resolved = resolve_agent_model("proposer", db_model=None)
-    assert resolved == "env-override-13b"
-    
-    # 3. DB Override (Highest priority)
+    # 2. DB Override (Highest priority)
     resolved = resolve_agent_model("proposer", db_model="db-override-32b")
     assert resolved == "db-override-32b"
 

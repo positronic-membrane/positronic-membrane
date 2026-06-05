@@ -32,12 +32,6 @@ T_ACTIVE = int(os.getenv("T_ACTIVE", "1"))  # Default 1 minute
 BOREDOM_THRESHOLD = int(os.getenv("BOREDOM_THRESHOLD", "5"))
 N_LOOP_LIMIT = int(os.getenv("N_LOOP_LIMIT", "5"))
 
-# Overrides for agents
-PROPOSER_MODEL = os.getenv("PROPOSER_MODEL", LLM_MODEL)
-CRITIC_MODEL = os.getenv("CRITIC_MODEL", LLM_MODEL)
-EXPLORER_MODEL = os.getenv("EXPLORER_MODEL", LLM_MODEL)
-ARCHIVIST_MODEL = os.getenv("ARCHIVIST_MODEL", LLM_MODEL)
-
 # OpenRouter Configuration
 OPENROUTER_BASE_URL = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
