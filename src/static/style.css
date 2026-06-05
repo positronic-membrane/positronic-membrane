@@ -663,6 +663,7 @@ body {
 
 .sidebar {
     width: 240px;
+    flex-shrink: 0;
     display: flex;
     flex-direction: column;
     border-right: 1px solid var(--border-color);
@@ -714,6 +715,8 @@ body {
 
 .workspace {
     flex-grow: 1;
+    flex-shrink: 1;
+    min-width: 0;
     display: flex;
     flex-direction: column;
     overflow: hidden;
