@@ -428,7 +428,7 @@ async def run_persona_chat():
                         
                         # Step 1: Critic Audits
                         print("\n[Janus] Submitting changes to Critic agent for constitutional audit...")
-                        audits_passed = True
+                        vetoed_files = {}
                         for file_path, proposed_code in proposed_mods.items():
                             audit_prompt = f"""
                             You are the Critic. Audit the proposed code modification to '{file_path}' against our core constitution:
@@ -467,17 +467,70 @@ async def run_persona_chat():
                                 
                                 if critic_decision == 0:
                                     print(f"\n❌ [Audit Vetoed] Critic rejected changes for '{file_path}':\n{critic_justification}\n")
-                                    audits_passed = False
-                                    break
+                                    vetoed_files[file_path] = critic_justification
                                 else:
                                     print(f"✔ [Audit Approved] Critic approved '{file_path}': {critic_justification}")
                             except Exception as audit_err:
                                 print(f"\n[Janus] Error auditing '{file_path}': {audit_err}\n")
-                                audits_passed = False
-                                break
+                                vetoed_files[file_path] = f"Audit failed: {audit_err}"
                         
-                        if not audits_passed:
-                            # Re-prompt selection loop
+                        if vetoed_files:
+                            print("\n" + "="*60)
+                            print("⚠️  Some files were vetoed by the Critic.")
+                            print("="*60)
+                            auto_refine_input = await loop.run_in_executor(
+                                None, get_input, 
+                                "Would you like to automatically refine these files using the Critic's feedback? (y/n): "
+                            )
+                            if auto_refine_input.strip().lower() in ("y", "yes"):
+                                for file_path, reason in vetoed_files.items():
+                                    print(f"\n[Janus] Automatically refining '{file_path}'...")
+                                    
+                                    # Read current file contents to assist proposer
+                                    from pathlib import Path
+                                    full_path = src.config.ROOT_DIR / file_path
+                                    current_content = ""
+                                    if full_path.exists():
+                                        try:
+                                            with open(full_path, "r", encoding="utf-8", errors="ignore") as f:
+                                                current_content = f.read()
+                                        except Exception:
+                                            pass
+                                            
+                                    draft_prompt = f"""
+                                    You are the Proposer. The user has requested a codebase modification for a specific file during multi-file staging.
+                                    The Critic has vetoed the previous draft with the following feedback:
+                                    
+                                    VETO REASON / FEEDBACK:
+                                    {reason}
+                                    
+                                    FILE TO MODIFY: {file_path}
+                                    
+                                    CURRENT FILE CONTENT:
+                                    {current_content if current_content else "(File is new or empty)"}
+                                    
+                                    Generate the COMPLETE updated source code for the file '{file_path}' addressing all feedback.
+                                    
+                                    CRITICAL RULES:
+                                    1. Output ONLY the raw source code of the file.
+                                    2. Do NOT wrap the output in markdown code blocks (e.g., do not use ```python or ```).
+                                    3. Do NOT include any introductory or concluding conversational text.
+                                    4. Ensure the code compiles, passes unit tests, and satisfies all guidelines.
+                                    """
+                                    
+                                    try:
+                                        proposed_code = query_agent("proposer", draft_prompt)
+                                        if proposed_code.strip().startswith("```"):
+                                            lines = proposed_code.strip().splitlines()
+                                            if lines[0].startswith("```"):
+                                                lines = lines[1:]
+                                            if lines and lines[-1].strip() == "```":
+                                                lines = lines[:-1]
+                                            proposed_code = "\n".join(lines) + "\n"
+                                        proposed_mods[file_path] = proposed_code
+                                        print(f"✔ [Janus] Successfully regenerated '{file_path}'.")
+                                    except Exception as draft_err:
+                                        print(f"\n[Janus] Error regenerating code for '{file_path}': {draft_err}\n")
                             continue
                             
                         # Step 2: Stage and Test Multi
@@ -547,13 +600,34 @@ async def run_persona_chat():
                             print("\n[Error] Invalid remove syntax. Use: remove <number>\n")
                             
                     elif selection.lower().startswith("edit "):
-                        match = re.match(r"^edit\s+(\d+)\s*\|\s*(.*)", selection, re.IGNORECASE)
+                        match = re.match(r"^edit\s+(\d+)(?:\s*\|\s*(.*))?", selection, re.IGNORECASE)
                         if match:
                             idx = int(match.group(1)) - 1
-                            edit_inst = match.group(2).strip()
-                            if 0 <= idx < len(mod_files) and edit_inst:
+                            edit_inst = match.group(2).strip() if match.group(2) else None
+                            if 0 <= idx < len(mod_files):
                                 target_file = mod_files[idx]
-                                print(f"\n[Janus] Regenerating '{target_file}' changes based on new instructions: '{edit_inst}'...")
+                                
+                                if not edit_inst:
+                                    # Fetch last veto from SQLite
+                                    conn = get_connection(read_only_constitution=True)
+                                    cursor = conn.cursor()
+                                    cursor.execute("""
+                                    SELECT justification FROM internal_deliberations 
+                                    WHERE proposed_action LIKE ? AND critic_decision = 0 
+                                    ORDER BY id DESC LIMIT 1;
+                                    """, (f"%{target_file}%",))
+                                    row = cursor.fetchone()
+                                    conn.close()
+                                    
+                                    if row:
+                                        edit_inst = f"Fix the issues raised by the Critic: {row[0]}"
+                                        print(f"\n[Janus] Automatically refining '{target_file}' using Critic's feedback:")
+                                        print(f"  > {row[0]}")
+                                    else:
+                                        print(f"\n[Error] No prior Critic veto justification found for '{target_file}'. Please specify instructions using: edit <number> | <instructions>\n")
+                                        continue
+                                
+                                print(f"\n[Janus] Regenerating '{target_file}' changes based on instructions: '{edit_inst}'...")
                                 
                                 # Read current file contents to assist proposer
                                 from pathlib import Path
@@ -597,9 +671,9 @@ async def run_persona_chat():
                                 except Exception as draft_err:
                                     print(f"\n[Janus] Error regenerating code: {draft_err}\n")
                             else:
-                                print("\n[Error] Invalid index or instructions.\n")
+                                print("\n[Error] Invalid index.\n")
                         else:
-                            print("\n[Error] Invalid edit syntax. Use: edit <number> | <new instructions>\n")
+                            print("\n[Error] Invalid edit syntax. Use: edit <number> or edit <number> | <instructions>\n")
                     else:
                         print("\n[Error] Unknown selection. Please use: 'y', 'n', 'remove <number>', or 'edit <number> | <instructions>'.\n")
                 continue
