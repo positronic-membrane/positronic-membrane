@@ -429,6 +429,8 @@ async def run_persona_chat():
                         # Step 1: Critic Audits
                         print("\n[Janus] Submitting changes to Critic agent for constitutional audit...")
                         vetoed_files = {}
+                        
+                        audit_tasks = []
                         for file_path, proposed_code in proposed_mods.items():
                             audit_prompt = f"""
                             You are the Critic. Audit the proposed code modification to '{file_path}' against our core constitution:
@@ -441,9 +443,16 @@ async def run_persona_chat():
                             CRITIC_DECISION: APPROVED | Justification: [Your reasoning]
                             CRITIC_DECISION: VETOED | Justification: [Your reasoning]
                             """
+                            audit_tasks.append((file_path, proposed_code, audit_prompt))
                             
+                        # Run audits concurrently in background threads
+                        audit_results = await asyncio.gather(*[
+                            asyncio.to_thread(query_agent, "critic", item[2])
+                            for item in audit_tasks
+                        ])
+                        
+                        for (file_path, proposed_code, _), critic_resp in zip(audit_tasks, audit_results):
                             try:
-                                critic_resp = query_agent("critic", audit_prompt)
                                 critic_decision = 1
                                 critic_justification = "Automatic approval"
                                 decision_match = re.search(r"CRITIC_DECISION:\s*(APPROVED|VETOED)", critic_resp, re.IGNORECASE)
@@ -471,7 +480,7 @@ async def run_persona_chat():
                                 else:
                                     print(f"✔ [Audit Approved] Critic approved '{file_path}': {critic_justification}")
                             except Exception as audit_err:
-                                print(f"\n[Janus] Error auditing '{file_path}': {audit_err}\n")
+                                print(f"\n[Janus] Error processing audit for '{file_path}': {audit_err}\n")
                                 vetoed_files[file_path] = f"Audit failed: {audit_err}"
                         
                         if vetoed_files:
@@ -483,8 +492,9 @@ async def run_persona_chat():
                                 "Would you like to automatically refine these files using the Critic's feedback? (y/n): "
                             )
                             if auto_refine_input.strip().lower() in ("y", "yes"):
+                                refine_tasks = []
                                 for file_path, reason in vetoed_files.items():
-                                    print(f"\n[Janus] Automatically refining '{file_path}'...")
+                                    print(f"\n[Janus] Preparing automatic refinement for '{file_path}'...")
                                     
                                     # Read current file contents to assist proposer
                                     from pathlib import Path
@@ -517,9 +527,17 @@ async def run_persona_chat():
                                     3. Do NOT include any introductory or concluding conversational text.
                                     4. Ensure the code compiles, passes unit tests, and satisfies all guidelines.
                                     """
-                                    
+                                    refine_tasks.append((file_path, draft_prompt))
+                                
+                                # Run proposer regenerations concurrently in background threads
+                                print(f"\n[Janus] Querying Proposer agents concurrently for {len(refine_tasks)} files...")
+                                refine_results = await asyncio.gather(*[
+                                    asyncio.to_thread(query_agent, "proposer", item[1])
+                                    for item in refine_tasks
+                                ])
+                                
+                                for (file_path, _), proposed_code in zip(refine_tasks, refine_results):
                                     try:
-                                        proposed_code = query_agent("proposer", draft_prompt)
                                         if proposed_code.strip().startswith("```"):
                                             lines = proposed_code.strip().splitlines()
                                             if lines[0].startswith("```"):
