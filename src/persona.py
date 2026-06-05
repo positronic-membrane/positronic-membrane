@@ -73,6 +73,97 @@ def detect_modification_intent(user_query: str) -> tuple:
             
     return None, None
 
+def get_last_persona_message() -> str:
+    """Fetches the last message content spoken by 'persona' from SQLite."""
+    conn = get_connection(read_only_constitution=True)
+    cursor = conn.cursor()
+    cursor.execute("""
+    SELECT message_content FROM episodic_memory 
+    WHERE speaker = 'persona' 
+    ORDER BY id DESC 
+    LIMIT 1;
+    """)
+    row = cursor.fetchone()
+    conn.close()
+    return row[0] if row else None
+
+def parse_proposed_changes(message_content: str) -> dict:
+    """
+    Extracts potential file paths from the message, retrieves their current live contents,
+    and queries the LLM to construct a mapping of relative file paths to their complete updated contents.
+    """
+    import json
+    import src.config
+    
+    # Scan message for relative file paths
+    paths = re.findall(
+        r"\b((?:src|tests)/[a-zA-Z0-9_/.-]+|[a-zA-Z0-9_/.-]+\.md|[a-zA-Z0-9_/.-]+\.json|requirements\.txt)\b",
+        message_content
+    )
+    
+    unique_paths = set()
+    for p in paths:
+        p = p.rstrip(".,;!?`\"'")
+        # Ensure path is relative and doesn't do directory traversal
+        try:
+            full_path = src.config.ROOT_DIR / p
+            full_path.relative_to(src.config.ROOT_DIR)
+            unique_paths.add(p)
+        except ValueError:
+            pass
+            
+    current_files = {}
+    for p in unique_paths:
+        full_path = src.config.ROOT_DIR / p
+        if full_path.is_file():
+            try:
+                with open(full_path, "r", encoding="utf-8", errors="ignore") as f:
+                    current_files[p] = f.read()
+            except Exception:
+                pass
+                
+    current_files_json = json.dumps(current_files, indent=2)
+    prompt = f"""
+    You are a precise parsing agent. Analyze the following message from Janus, which proposes file changes (either as new files, full code blocks, or unified diffs).
+    Your task is to output the COMPLETE, updated content for every file proposed to be created or modified.
+
+    We have provided the current live content of the files mentioned in the message below for your reference (to apply diffs or modifications).
+
+    CURRENT FILE CONTENTS:
+    {current_files_json}
+
+    PROPOSED MESSAGE:
+    {message_content}
+
+    Generate a JSON object mapping each relative file path to its COMPLETE new content.
+    Ensure you output ONLY a valid JSON object matching the schema below. Do not wrap in markdown block, just output raw JSON:
+    {{
+      "files": {{
+        "relative/path/to/file1": "complete updated content...",
+        "relative/path/to/file2": "complete updated content..."
+      }}
+    }}
+    """
+    
+    try:
+        raw_json_str = query_agent("proposer", prompt)
+        
+        # Clean up any potential markdown code blocks
+        raw_json_str = raw_json_str.strip()
+        if raw_json_str.startswith("```"):
+            lines = raw_json_str.splitlines()
+            if lines[0].startswith("```"):
+                lines = lines[1:]
+            if lines and lines[-1].strip() == "```":
+                lines = lines[:-1]
+            raw_json_str = "\n".join(lines).strip()
+            
+        parsed = json.loads(raw_json_str)
+        return parsed.get("files", {})
+    except Exception as e:
+        logger.error(f"Failed to parse proposed changes using LLM: {e}")
+        return {}
+
 def get_recent_deliberations(limit: int = 5) -> list:
     """Retrieves recent deliberation records from SQLite."""
     conn = get_connection(read_only_constitution=True)
@@ -287,6 +378,231 @@ async def run_persona_chat():
             user_msg = user_msg.strip()
             
             if not user_msg:
+                continue
+
+            if user_msg.lower().startswith("/stage"):
+                last_msg = get_last_persona_message()
+                if not last_msg:
+                    print("\nJanus >> No previous message found to stage changes from.\n")
+                    continue
+                
+                print("\n[Janus] Parsing proposed changes from our last message...")
+                proposed_mods = parse_proposed_changes(last_msg)
+                
+                if not proposed_mods:
+                    print("\nJanus >> No proposed code changes or file paths could be parsed from the last message.\n")
+                    continue
+                
+                # Keep loop for selection/editing
+                while True:
+                    print("\n" + "="*60)
+                    print("[Janus] Proposed Modifications:")
+                    print("="*60)
+                    mod_files = list(proposed_mods.keys())
+                    for idx, file in enumerate(mod_files, start=1):
+                        is_new = not (src.config.ROOT_DIR / file).exists()
+                        status_str = "New File" if is_new else "Modified File"
+                        print(f"  {idx}. {file} ({status_str})")
+                    print("="*60)
+                    print("Options:")
+                    print("  - Enter 'y' to stage and run tests for all of the above.")
+                    print("  - Enter 'n' to cancel/abort.")
+                    print("  - Enter 'remove <number>' to exclude a file.")
+                    print("  - Enter 'edit <number> | <new instructions>' to regenerate the changes for that file.")
+                    print("="*60)
+                    
+                    selection = await loop.run_in_executor(None, get_input, "Selection >> ")
+                    selection = selection.strip()
+                    
+                    if not selection:
+                        continue
+                    
+                    if selection.lower() in ("n", "no", "cancel"):
+                        print("\nStaging canceled.\n")
+                        break
+                    
+                    elif selection.lower() in ("y", "yes"):
+                        if not proposed_mods:
+                            print("\nNo files are left to stage. Canceled.\n")
+                            break
+                        
+                        # Step 1: Critic Audits
+                        print("\n[Janus] Submitting changes to Critic agent for constitutional audit...")
+                        audits_passed = True
+                        for file_path, proposed_code in proposed_mods.items():
+                            audit_prompt = f"""
+                            You are the Critic. Audit the proposed code modification to '{file_path}' against our core constitution:
+                            
+                            PROPOSED CODE MODIFICATION:
+                            {proposed_code}
+                            
+                            Perform a strict audit. Evaluate the systemic utility of this change and determine if it violates any rules in the core constitution (e.g., security, imports, loop caps, system stability).
+                            Output your decision exactly in one of these formats:
+                            CRITIC_DECISION: APPROVED | Justification: [Your reasoning]
+                            CRITIC_DECISION: VETOED | Justification: [Your reasoning]
+                            """
+                            
+                            try:
+                                critic_resp = query_agent("critic", audit_prompt)
+                                critic_decision = 1
+                                critic_justification = "Automatic approval"
+                                decision_match = re.search(r"CRITIC_DECISION:\s*(APPROVED|VETOED)", critic_resp, re.IGNORECASE)
+                                justification_match = re.search(r"Justification:\s*(.*)", critic_resp, re.IGNORECASE)
+                                
+                                if decision_match:
+                                    decision_str = decision_match.group(1).upper()
+                                    if decision_str == "VETOED":
+                                        critic_decision = 0
+                                        
+                                if justification_match:
+                                    critic_justification = justification_match.group(1).strip()
+                                    
+                                log_deliberation(
+                                    proposed_action=f"modify_code_multi: {file_path}",
+                                    debate_json={"proposer_output": proposed_code, "critic_output": critic_resp},
+                                    critic_decision=critic_decision,
+                                    utility_score=1.0 if critic_decision == 1 else 0.0,
+                                    justification=critic_justification
+                                )
+                                
+                                if critic_decision == 0:
+                                    print(f"\n❌ [Audit Vetoed] Critic rejected changes for '{file_path}':\n{critic_justification}\n")
+                                    audits_passed = False
+                                    break
+                                else:
+                                    print(f"✔ [Audit Approved] Critic approved '{file_path}': {critic_justification}")
+                            except Exception as audit_err:
+                                print(f"\n[Janus] Error auditing '{file_path}': {audit_err}\n")
+                                audits_passed = False
+                                break
+                        
+                        if not audits_passed:
+                            # Re-prompt selection loop
+                            continue
+                            
+                        # Step 2: Stage and Test Multi
+                        from src.self_modification import stage_and_test_multi, generate_multi_diff, apply_staged_multi
+                        import shutil
+                        print(f"\n[Janus] Creating staging workspace and running tests for all modified files...")
+                        try:
+                            diff = generate_multi_diff(proposed_mods)
+                            passed, logs, temp_dir = stage_and_test_multi(proposed_mods)
+                        except Exception as stage_err:
+                            print(f"\n[Janus] Error staging changes: {stage_err}\n")
+                            break
+                            
+                        # Step 3: Present combined results
+                        print("\n" + "="*60)
+                        print(f"⚠️  Staged Chat Modifications for multiple files:")
+                        for file in proposed_mods:
+                            print(f"  - {file}")
+                        print(f"Staged unit tests status: {'PASSED' if passed else 'FAILED'}")
+                        print("="*60)
+                        print("DIFF:")
+                        print(diff)
+                        print("="*60)
+                        if not passed:
+                            print("TEST RUN FAILURE LOGS:")
+                            print(logs)
+                            print("="*60)
+                            
+                        confirm_input = await loop.run_in_executor(None, get_input, "Approve and commit these changes? (y/n): ")
+                        confirm_clean = confirm_input.strip().lower()
+                        
+                        if confirm_clean in ("y", "yes"):
+                            try:
+                                apply_staged_multi(temp_dir, proposed_mods)
+                                print(f"\n[✔] Staged modifications applied to active codebase.")
+                                for file in proposed_mods:
+                                    log_episodic_memory("system", f"User approved staged multi-file self-modification for '{file}'.", "user_visible")
+                                try:
+                                    shutil.rmtree(temp_dir)
+                                except Exception:
+                                    pass
+                                print("\nRestarting async daemon loop to load new code...\n")
+                                return
+                            except Exception as err:
+                                print(f"\nError applying staged modifications: {err}\n")
+                        else:
+                            print("\nSelf-modifications aborted and staging directory cleaned.\n")
+                            for file in proposed_mods:
+                                log_episodic_memory("system", f"User rejected staged multi-file self-modification for '{file}'.", "user_visible")
+                            try:
+                                shutil.rmtree(temp_dir)
+                            except Exception:
+                                pass
+                        break
+                        
+                    elif selection.lower().startswith("remove "):
+                        match = re.match(r"^remove\s+(\d+)", selection, re.IGNORECASE)
+                        if match:
+                            idx = int(match.group(1)) - 1
+                            if 0 <= idx < len(mod_files):
+                                removed_file = mod_files[idx]
+                                del proposed_mods[removed_file]
+                                print(f"\n[Janus] Excluded '{removed_file}' from staging list.")
+                            else:
+                                print("\n[Error] Invalid index.\n")
+                        else:
+                            print("\n[Error] Invalid remove syntax. Use: remove <number>\n")
+                            
+                    elif selection.lower().startswith("edit "):
+                        match = re.match(r"^edit\s+(\d+)\s*\|\s*(.*)", selection, re.IGNORECASE)
+                        if match:
+                            idx = int(match.group(1)) - 1
+                            edit_inst = match.group(2).strip()
+                            if 0 <= idx < len(mod_files) and edit_inst:
+                                target_file = mod_files[idx]
+                                print(f"\n[Janus] Regenerating '{target_file}' changes based on new instructions: '{edit_inst}'...")
+                                
+                                # Read current file contents to assist proposer
+                                from pathlib import Path
+                                import src.config
+                                full_path = src.config.ROOT_DIR / target_file
+                                current_content = ""
+                                if full_path.exists():
+                                    try:
+                                        with open(full_path, "r", encoding="utf-8", errors="ignore") as f:
+                                            current_content = f.read()
+                                    except Exception:
+                                        pass
+                                
+                                draft_prompt = f"""
+                                You are the Proposer. The user has requested a codebase modification for a specific file during multi-file staging:
+                                
+                                FILE TO MODIFY: {target_file}
+                                USER INSTRUCTIONS: {edit_inst}
+                                
+                                CURRENT FILE CONTENT:
+                                {current_content if current_content else "(File is new or empty)"}
+                                
+                                Generate the COMPLETE updated source code for the file '{target_file}'.
+                                
+                                CRITICAL RULES:
+                                1. Output ONLY the raw source code of the file.
+                                2. Do NOT wrap the output in markdown code blocks (e.g., do not use ```python or ```).
+                                3. Do NOT include any introductory or concluding conversational text.
+                                4. Ensure the code compiles, passes unit tests, and satisfies the user's instructions.
+                                """
+                                try:
+                                    proposed_code = query_agent("proposer", draft_prompt)
+                                    if proposed_code.strip().startswith("```"):
+                                        lines = proposed_code.strip().splitlines()
+                                        if lines[0].startswith("```"):
+                                            lines = lines[1:]
+                                        if lines and lines[-1].strip() == "```":
+                                            lines = lines[:-1]
+                                        proposed_code = "\n".join(lines) + "\n"
+                                    proposed_mods[target_file] = proposed_code
+                                    print(f"✔ [Janus] Successfully regenerated '{target_file}'.")
+                                except Exception as draft_err:
+                                    print(f"\n[Janus] Error regenerating code: {draft_err}\n")
+                            else:
+                                print("\n[Error] Invalid index or instructions.\n")
+                        else:
+                            print("\n[Error] Invalid edit syntax. Use: edit <number> | <new instructions>\n")
+                    else:
+                        print("\n[Error] Unknown selection. Please use: 'y', 'n', 'remove <number>', or 'edit <number> | <instructions>'.\n")
                 continue
 
             # Intercept for synchronous self-modification requests (Option C)
