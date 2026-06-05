@@ -299,12 +299,12 @@ def generate_persona_response(user_query: str) -> str:
     except Exception as e:
         logger.error(f"Failed to query semantic memories: {e}")
 
-    # 4. Fetch recent user-persona conversation history from SQLite
-    memories = get_recent_episodic_memories(limit=8)
+    # 4. Fetch recent conversation history from SQLite (user, persona, system, sandbox_automation)
+    memories = get_recent_episodic_memories(limit=15)
     chat_history = []
     for speaker, msg, _ in reversed(memories):
-        if speaker in ("user", "persona"):
-            chat_history.append(f"{speaker}: {msg}")
+        if speaker in ("user", "persona", "system", "sandbox_automation"):
+            chat_history.append(f"{speaker.upper()}: {msg}")
     history_summary = "\n".join(chat_history)
 
     prompt = f"""
@@ -439,6 +439,11 @@ async def run_persona_chat():
                         print(f"\n[✔] Sandbox session '{session_name}' successfully created!")
                         print(f"  * Workspace Path: {path}")
                         print(f"  * Git Branch: {branch}\n")
+                        log_episodic_memory(
+                            "sandbox_automation",
+                            f"Sandbox session '{session_name}' initialized on branch '{branch}'. Sandbox path: '{path}'.",
+                            "user_visible"
+                        )
                     except Exception as err:
                         print(f"\n[Error] Failed to create sandbox session: {err}\n")
                         
@@ -509,6 +514,11 @@ async def run_persona_chat():
                             print("Modified files merged:")
                             for f in copied:
                                 print(f"  - {f}")
+                            log_episodic_memory(
+                                "sandbox_automation",
+                                f"Sandbox session branch '{active['active_sandbox_branch']}' successfully shipped and applied to active workspace. Files modified: {', '.join(copied)}.",
+                                "user_visible"
+                            )
                             print()
                             # Restart to load new code if files changed
                             if copied:
@@ -528,6 +538,11 @@ async def run_persona_chat():
                     if confirm.strip().lower() in ("y", "yes"):
                         abort_sandbox_session()
                         print("\n[✔] Sandbox session aborted and temporary workspace cleaned.\n")
+                        log_episodic_memory(
+                            "sandbox_automation",
+                            f"Sandbox session branch '{active['active_sandbox_branch']}' aborted and cleaned up.",
+                            "user_visible"
+                        )
                     else:
                         print("\nAbort canceled.\n")
                         
@@ -1178,6 +1193,21 @@ async def run_persona_chat():
                             passed, logs = await asyncio.to_thread(run_sandbox_tests)
                             status_str = "PASSED" if passed else "FAILED"
                             print(f"\n[Janus Daemon] Sandbox unit tests: {status_str}")
+                            
+                            # Log success or failure back to Janus as sandbox automation
+                            if passed:
+                                log_episodic_memory(
+                                    "sandbox_automation",
+                                    f"Sandbox testing completed successfully for branch '{active_sb['active_sandbox_branch']}'. All tests passed.",
+                                    "user_visible"
+                                )
+                            else:
+                                log_episodic_memory(
+                                    "sandbox_automation",
+                                    f"Sandbox testing FAILED for branch '{active_sb['active_sandbox_branch']}'. Errors/Logs:\n{logs}",
+                                    "user_visible"
+                                )
+                                
                             if not passed:
                                 print("  (Tip: Run '/sandbox status' or '/sandbox ship' to view test failure logs)")
                     except Exception as e:
