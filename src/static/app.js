@@ -41,6 +41,18 @@ document.addEventListener("DOMContentLoaded", () => {
 
         // Event Listeners
         chatForm.addEventListener("submit", handleChatSubmit);
+        
+        chatInput.addEventListener("keydown", (e) => {
+            if (e.key === "Enter" && !e.shiftKey) {
+                e.preventDefault();
+                chatForm.requestSubmit();
+            }
+        });
+
+        chatInput.addEventListener("input", () => {
+            chatInput.style.height = "auto";
+            chatInput.style.height = chatInput.scrollHeight + "px";
+        });
         closeModalBtn.addEventListener("click", () => closeModal());
         
         // Sandbox controls
@@ -138,6 +150,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
         // Clear input field immediately
         chatInput.value = "";
+        chatInput.style.height = "auto";
 
         // Append user message
         appendMessage("user", text);
