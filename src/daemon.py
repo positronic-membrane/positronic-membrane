@@ -292,7 +292,7 @@ async def run_heartbeat_loop():
                             bus_turns += 1
                         else:
                             # No message send, must be the final proposed action
-                            action_match = re.search(r"proposed_action:\s*(.*)", proposer_resp, re.IGNORECASE)
+                            action_match = re.search(r"proposed_action:\s*(.*)", proposer_resp, re.DOTALL | re.IGNORECASE)
                             proposed_action = action_match.group(1).strip() if action_match else proposer_resp.strip()
                             break
                     else:
