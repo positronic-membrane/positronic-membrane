@@ -1222,3 +1222,339 @@ async def run_persona_chat():
             print(f"\nJanus >> (Error communicating with internal swarm: {e})\n")
 
 
+async def handle_web_slash_command(user_msg: str) -> str:
+    """
+    Processes slash commands in Web UI mode asynchronously and returns a response text.
+    Handles /sandbox, /stage, /modify, /amend.
+    """
+    import shutil
+    from pathlib import Path
+    user_msg = user_msg.strip()
+    
+    # 1. /sandbox commands
+    if user_msg.lower().startswith("/sandbox"):
+        parts = user_msg.split()
+        if len(parts) < 2:
+            return "[Error] Missing sandbox command. Usage: /sandbox [start | status | diff | ship | abort]"
+        
+        cmd_type = parts[1].lower()
+        from src.sandbox_session import (
+            get_active_sandbox, create_sandbox_session, run_sandbox_tests,
+            get_sandbox_diff, get_sandbox_modified_files, ship_sandbox_session,
+            abort_sandbox_session
+        )
+        
+        if cmd_type == "start":
+            if len(parts) < 3:
+                return "[Error] Please specify a session name: /sandbox start <name>"
+            session_name = parts[2]
+            active = get_active_sandbox()
+            if active:
+                return f"[Error] An active sandbox session already exists at '{active['active_sandbox_path']}' on branch '{active['active_sandbox_branch']}'. Abort/ship it first."
+            try:
+                path, branch = create_sandbox_session(session_name)
+                log_episodic_memory(
+                    "sandbox_automation",
+                    f"Sandbox session '{session_name}' initialized on branch '{branch}'. Sandbox path: '{path}'.",
+                    "user_visible"
+                )
+                return f"[✔] Sandbox session '{session_name}' successfully created!\n* Workspace Path: {path}\n* Git Branch: {branch}"
+            except Exception as err:
+                return f"[Error] Failed to create sandbox session: {err}"
+                
+        elif cmd_type == "status":
+            active = get_active_sandbox()
+            if not active:
+                return "Janus >> No active sandbox session. Start one with: /sandbox start <name>"
+            
+            modified_files = get_sandbox_modified_files()
+            modified_str = ", ".join(modified_files) if modified_files else "None"
+            
+            status_text = (
+                f"Janus >> Active Sandbox Session Status\n"
+                f"* Path: {active['active_sandbox_path']}\n"
+                f"* Branch: {active['active_sandbox_branch']}\n"
+                f"* Status: {active['active_sandbox_status'].upper()}\n"
+                f"* Modified Files: {modified_str}\n"
+            )
+            if active.get("active_sandbox_status") == "failed" and active.get("active_sandbox_test_logs"):
+                status_text += f"\nLast Test Failures/Logs:\n{active['active_sandbox_test_logs']}"
+            return status_text
+            
+        elif cmd_type == "diff":
+            active = get_active_sandbox()
+            if not active:
+                return "Janus >> No active sandbox session."
+            diff = get_sandbox_diff()
+            if not diff.strip():
+                return "No changes in sandbox."
+            return f"Janus >> Cumulative Sandbox Diff ({active['active_sandbox_branch']}):\n\n{diff}"
+            
+        elif cmd_type == "test":
+            active = get_active_sandbox()
+            if not active:
+                return "Janus >> No active sandbox session."
+            passed, logs = await asyncio.to_thread(run_sandbox_tests)
+            status_str = "PASSED" if passed else "FAILED"
+            return f"Janus >> Sandbox tests completed: {status_str}\n\n{logs}"
+            
+        elif cmd_type == "ship":
+            active = get_active_sandbox()
+            if not active:
+                return "Janus >> No active sandbox session."
+            passed, logs = await asyncio.to_thread(run_sandbox_tests)
+            try:
+                copied = ship_sandbox_session()
+                msg = f"Sandbox session branch '{active['active_sandbox_branch']}' successfully shipped and applied. Files modified: {', '.join(copied)}."
+                log_episodic_memory("sandbox_automation", msg, "user_visible")
+                return f"[✔] Sandbox successfully shipped and applied!\n* Merged Files:\n" + "\n".join(f"  - {f}" for f in copied)
+            except Exception as err:
+                return f"[Error] Failed to ship sandbox changes: {err}"
+                
+        elif cmd_type == "abort":
+            active = get_active_sandbox()
+            if not active:
+                return "Janus >> No active sandbox session."
+            try:
+                abort_sandbox_session()
+                log_episodic_memory(
+                    "sandbox_automation",
+                    f"Sandbox session branch '{active['active_sandbox_branch']}' aborted and cleaned up.",
+                    "user_visible"
+                )
+                return f"[✔] Sandbox session '{active['active_sandbox_branch']}' aborted and cleaned up."
+            except Exception as err:
+                return f"[Error] Failed to abort sandbox: {err}"
+        else:
+            return f"[Error] Unknown sandbox command '{cmd_type}'. Options are: start, status, diff, ship, abort"
+            
+    # 2. /stage commands
+    elif user_msg.lower().startswith("/stage"):
+        parts = user_msg.split()
+        limit = 1
+        if len(parts) > 1:
+            try:
+                limit = int(parts[1])
+                if limit <= 0:
+                    raise ValueError()
+            except ValueError:
+                return "[Error] Invalid lookback count. Usage: /stage [count] (must be positive integer)"
+                
+        last_msg = get_recent_persona_messages(limit)
+        if not last_msg:
+            return "Janus >> No previous message found to stage changes from."
+            
+        proposed_mods = await asyncio.to_thread(parse_proposed_changes, last_msg)
+        if not proposed_mods:
+            return "Janus >> No proposed code changes or file paths could be parsed from the messages."
+            
+        vetoed_files = {}
+        approved_files = set()
+        
+        audit_tasks = []
+        for file_path, proposed_code in proposed_mods.items():
+            audit_prompt = f"""
+            You are the Critic. Audit the proposed code modification to '{file_path}' against our core constitution:
+            
+            PROPOSED CODE MODIFICATION:
+            {proposed_code}
+            
+            Perform a strict audit. Evaluate the systemic utility of this change and determine if it violates any rules in the core constitution.
+            Output your decision exactly in one of these formats:
+            CRITIC_DECISION: APPROVED | Justification: [Your reasoning]
+            CRITIC_DECISION: VETOED | Justification: [Your reasoning]
+            """
+            audit_tasks.append((file_path, proposed_code, audit_prompt))
+            
+        if audit_tasks:
+            audit_results = await asyncio.gather(*[
+                asyncio.to_thread(query_agent, "critic", item[2])
+                for item in audit_tasks
+            ])
+        else:
+            audit_results = []
+            
+        for (file_path, proposed_code, _), critic_resp in zip(audit_tasks, audit_results):
+            critic_decision = 1
+            critic_justification = "Automatic approval"
+            decision_match = re.search(r"CRITIC_DECISION:\s*(APPROVED|VETOED)", critic_resp, re.IGNORECASE)
+            justification_match = re.search(r"Justification:\s*(.*)", critic_resp, re.IGNORECASE)
+            
+            if decision_match:
+                if decision_match.group(1).upper() == "VETOED":
+                    critic_decision = 0
+            if justification_match:
+                critic_justification = justification_match.group(1).strip()
+                
+            log_deliberation(
+                proposed_action=f"modify_code_multi: {file_path}",
+                debate_json={"proposer_output": proposed_code, "critic_output": critic_resp},
+                critic_decision=critic_decision,
+                utility_score=1.0 if critic_decision == 1 else 0.0,
+                justification=critic_justification
+            )
+            
+            if critic_decision == 0:
+                vetoed_files[file_path] = critic_justification
+            else:
+                approved_files.add(file_path)
+                
+        if vetoed_files:
+            refine_tasks = []
+            for file_path, reason in vetoed_files.items():
+                full_path = src.config.ROOT_DIR / file_path
+                current_content = ""
+                if full_path.exists():
+                    try:
+                        with open(full_path, "r", encoding="utf-8") as f:
+                            current_content = f.read()
+                    except Exception:
+                        pass
+                draft_prompt = f"""
+                You are the Proposer. The Critic has vetoed the previous draft with feedback:
+                VETO REASON / FEEDBACK: {reason}
+                FILE TO MODIFY: {file_path}
+                CURRENT FILE CONTENT: {current_content}
+                Generate the COMPLETE updated source code for the file '{file_path}' addressing all feedback.
+                CRITICAL RULES:
+                1. Output ONLY the raw source code of the file.
+                2. Do NOT wrap the output in markdown code blocks.
+                """
+                refine_tasks.append((file_path, draft_prompt))
+                
+            refine_results = await asyncio.gather(*[
+                asyncio.to_thread(query_agent, "proposer", item[1])
+                for item in refine_tasks
+            ])
+            for (file_path, _), proposed_code in zip(refine_tasks, refine_results):
+                if proposed_code.strip().startswith("```"):
+                    lines = proposed_code.strip().splitlines()
+                    if lines[0].startswith("```"):
+                        lines = lines[1:]
+                    if lines and lines[-1].strip() == "```":
+                        lines = lines[:-1]
+                    proposed_code = "\n".join(lines) + "\n"
+                proposed_mods[file_path] = proposed_code
+                
+        from src.self_modification import stage_and_test_multi, generate_multi_diff
+        passed, logs, temp_dir = await asyncio.to_thread(stage_and_test_multi, proposed_mods)
+        diff = generate_multi_diff(proposed_mods)
+        
+        from src.database import stage_modification_in_db
+        files_str = ",".join(proposed_mods.keys())
+        stage_modification_in_db(files_str, temp_dir, diff, "passed" if passed else "failed")
+        
+        try:
+            with open(Path(temp_dir) / "staging_test.log", "w", encoding="utf-8") as f:
+                f.write(logs)
+        except Exception:
+            pass
+            
+        status_text = (
+            f"Janus >> Staged modifications for files: {', '.join(proposed_mods.keys())}\n"
+            f"* Staged unit tests status: {'PASSED' if passed else 'FAILED'}\n"
+            f"You can approve, refine, or self-heal these changes via the Web UI dashboard."
+        )
+        return status_text
+        
+    # 3. /modify commands
+    elif user_msg.lower().startswith("/modify"):
+        file_path, instructions = detect_modification_intent(user_msg)
+        if file_path == "INVALID" or not file_path:
+            return "[Error] Invalid format. Please use: /modify <relative_file_path> | <instructions>"
+            
+        full_path = src.config.ROOT_DIR / file_path
+        current_content = ""
+        if full_path.exists():
+            try:
+                with open(full_path, "r", encoding="utf-8") as f:
+                    current_content = f.read()
+            except Exception:
+                pass
+                
+        draft_prompt = f"""
+        You are the Proposer. The user has requested a codebase modification:
+        FILE TO MODIFY: {file_path}
+        USER INSTRUCTIONS: {instructions}
+        CURRENT FILE CONTENT: {current_content if current_content else "(File is new or empty)"}
+        Generate the COMPLETE updated source code for the file '{file_path}'.
+        CRITICAL RULES:
+        1. Output ONLY the raw source code of the file.
+        2. Do NOT wrap the output in markdown code blocks.
+        """
+        try:
+            proposed_code = await asyncio.to_thread(query_agent, "proposer", draft_prompt)
+            if proposed_code.strip().startswith("```"):
+                lines = proposed_code.strip().splitlines()
+                if lines[0].startswith("```"):
+                    lines = lines[1:]
+                if lines and lines[-1].strip() == "```":
+                    lines = lines[:-1]
+                proposed_code = "\n".join(lines) + "\n"
+        except Exception as e:
+            return f"[Error] Failed to generate code modifications: {e}"
+            
+        audit_prompt = f"""
+        You are the Critic. Audit the proposed code modification to '{file_path}':
+        {proposed_code}
+        Output: CRITIC_DECISION: APPROVED | Justification: reasoning OR CRITIC_DECISION: VETOED | Justification: reasoning
+        """
+        try:
+            critic_resp = await asyncio.to_thread(query_agent, "critic", audit_prompt)
+            critic_decision = 1
+            critic_justification = "Automatic approval"
+            decision_match = re.search(r"CRITIC_DECISION:\s*(APPROVED|VETOED)", critic_resp, re.IGNORECASE)
+            justification_match = re.search(r"Justification:\s*(.*)", critic_resp, re.IGNORECASE)
+            if decision_match and decision_match.group(1).upper() == "VETOED":
+                critic_decision = 0
+            if justification_match:
+                critic_justification = justification_match.group(1).strip()
+                
+            log_deliberation(
+                proposed_action=f"modify_code: {file_path}",
+                debate_json={"proposer_output": proposed_code, "critic_output": critic_resp},
+                critic_decision=critic_decision,
+                utility_score=1.0 if critic_decision == 1 else 0.0,
+                justification=critic_justification
+            )
+            if critic_decision == 0:
+                return f"❌ [Audit Vetoed] Critic rejected changes for '{file_path}':\n{critic_justification}"
+        except Exception as e:
+            return f"[Error] Critic audit failed: {e}"
+            
+        from src.self_modification import stage_and_test, generate_diff
+        passed, logs, temp_dir = await asyncio.to_thread(stage_and_test, file_path, proposed_code)
+        diff = generate_diff(file_path, proposed_code)
+        
+        from src.database import stage_modification_in_db
+        stage_modification_in_db(file_path, temp_dir, diff, "passed" if passed else "failed")
+        
+        try:
+            with open(Path(temp_dir) / "staging_test.log", "w", encoding="utf-8") as f:
+                f.write(logs)
+        except Exception:
+            pass
+            
+        return (
+            f"Janus >> Staged modifications for '{file_path}'.\n"
+            f"* Staged unit tests status: {'PASSED' if passed else 'FAILED'}\n"
+            f"Review the staging diff and logs in the Staging Workspace tab to approve/reject."
+        )
+        
+    # 4. /amend commands
+    elif user_msg.lower().startswith("/amend"):
+        amend_match = re.match(r"^/amend\s+([a-z0-9_-]+)\s*\|\s*(.*)", user_msg, re.IGNORECASE)
+        if amend_match:
+            rule_key = amend_match.group(1).strip()
+            rule_text = amend_match.group(2).strip()
+            from src.database import add_constitution_rule
+            add_constitution_rule(rule_key, rule_text)
+            log_episodic_memory("system", f"User sealed constitutional rule: '{rule_key}' = '{rule_text}'", "user_visible")
+            return f"[✔] Rule '{rule_key}' successfully sealed in the core constitution."
+        else:
+            return "[Error] Invalid format. Please use: /amend <rule_key> | <rule_text>"
+            
+    return "[Error] Unknown slash command."
+
+
+

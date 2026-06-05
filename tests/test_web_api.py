@@ -1,0 +1,162 @@
+import json
+import socket
+import threading
+import urllib.request
+import urllib.error
+import pytest
+from unittest.mock import patch, MagicMock
+from http.server import ThreadingHTTPServer
+
+import src.config
+from src.database import init_db
+from src.web_server import JanusRequestHandler
+
+def get_free_port():
+    s = socket.socket()
+    s.bind(("", 0))
+    port = s.getsockname()[1]
+    s.close()
+    return port
+
+@pytest.fixture(scope="module")
+def web_server():
+    # Setup test DB path config
+    import tempfile
+    from pathlib import Path
+    temp_db_dir = tempfile.mkdtemp()
+    temp_db = Path(temp_db_dir) / "test_janus_web.db"
+    orig_db_path = src.config.DB_PATH
+    src.config.DB_PATH = str(temp_db)
+    
+    init_db()
+    
+    port = get_free_port()
+    server = ThreadingHTTPServer(("localhost", port), JanusRequestHandler)
+    
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    
+    yield f"http://localhost:{port}"
+    
+    server.shutdown()
+    server.server_close()
+    thread.join()
+    
+    src.config.DB_PATH = orig_db_path
+    import shutil
+    shutil.rmtree(temp_db_dir, ignore_errors=True)
+
+def test_get_history(web_server):
+    url = f"{web_server}/api/history"
+    req = urllib.request.Request(url, method="GET")
+    with urllib.request.urlopen(req) as resp:
+        assert resp.status == 200
+        data = json.loads(resp.read().decode("utf-8"))
+        assert isinstance(data, list)
+
+def test_get_deliberations(web_server):
+    url = f"{web_server}/api/deliberations"
+    req = urllib.request.Request(url, method="GET")
+    with urllib.request.urlopen(req) as resp:
+        assert resp.status == 200
+        data = json.loads(resp.read().decode("utf-8"))
+        assert isinstance(data, list)
+
+@patch("src.sandbox_session.get_active_sandbox")
+@patch("src.sandbox_session.get_sandbox_modified_files")
+def test_sandbox_status(mock_mod, mock_sb, web_server):
+    mock_sb.return_value = {
+        "active_sandbox_path": "/path/to/sb",
+        "active_sandbox_branch": "janus/sandbox-test",
+        "active_sandbox_status": "passed",
+        "active_sandbox_test_logs": "all passed"
+    }
+    mock_mod.return_value = ["src/config.py"]
+    
+    url = f"{web_server}/api/sandbox/status"
+    req = urllib.request.Request(url, method="GET")
+    with urllib.request.urlopen(req) as resp:
+        assert resp.status == 200
+        data = json.loads(resp.read().decode("utf-8"))
+        assert data["active"] is True
+        assert data["branch"] == "janus/sandbox-test"
+        assert data["modified"] == ["src/config.py"]
+
+@patch("src.database.get_pending_modification")
+def test_stage_status(mock_pending, web_server):
+    mock_pending.return_value = {
+        "pending_mod_file": "src/main.py",
+        "pending_mod_dir": "/path/to/dir",
+        "pending_mod_diff": "diff goes here",
+        "pending_mod_status": "passed"
+    }
+    
+    url = f"{web_server}/api/stage/status"
+    req = urllib.request.Request(url, method="GET")
+    with urllib.request.urlopen(req) as resp:
+        assert resp.status == 200
+        data = json.loads(resp.read().decode("utf-8"))
+        assert data["active"] is True
+        assert data["file_path"] == "src/main.py"
+        assert data["diff"] == "diff goes here"
+
+def test_get_constitution(web_server):
+    url = f"{web_server}/api/constitution"
+    req = urllib.request.Request(url, method="GET")
+    with urllib.request.urlopen(req) as resp:
+        assert resp.status == 200
+        data = json.loads(resp.read().decode("utf-8"))
+        assert isinstance(data, list)
+
+def test_get_registry(web_server):
+    url = f"{web_server}/api/registry"
+    req = urllib.request.Request(url, method="GET")
+    with urllib.request.urlopen(req) as resp:
+        assert resp.status == 200
+        data = json.loads(resp.read().decode("utf-8"))
+        assert isinstance(data, list)
+        assert len(data) > 0
+        assert any(agent["id"] == "proposer" for agent in data)
+
+def test_constitution_amend(web_server):
+    url = f"{web_server}/api/constitution/amend"
+    payload = json.dumps({"key": "TEST_RULE", "text": "This is a web api boundary rule."}).encode("utf-8")
+    req = urllib.request.Request(url, data=payload, method="POST", headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req) as resp:
+        assert resp.status == 200
+        data = json.loads(resp.read().decode("utf-8"))
+        assert data["success"] is True
+
+def test_registry_update(web_server):
+    url = f"{web_server}/api/registry/update"
+    payload = json.dumps({"agent_id": "proposer", "model": "qwen2.5-coder:1.5b"}).encode("utf-8")
+    req = urllib.request.Request(url, data=payload, method="POST", headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req) as resp:
+        assert resp.status == 200
+        data = json.loads(resp.read().decode("utf-8"))
+        assert data["success"] is True
+
+@patch("src.web_server.generate_persona_response")
+def test_post_chat_normal(mock_persona, web_server):
+    mock_persona.return_value = "Hello from persona"
+    url = f"{web_server}/api/chat"
+    payload = json.dumps({"message": "Hello"}).encode("utf-8")
+    req = urllib.request.Request(url, data=payload, method="POST", headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req) as resp:
+        assert resp.status == 200
+        data = json.loads(resp.read().decode("utf-8"))
+        assert data["response"] == "Hello from persona"
+
+@patch("src.persona.handle_web_slash_command")
+def test_post_chat_slash_command(mock_slash, web_server):
+    async def mock_async_resp(user_msg):
+        return "Command completed successfully"
+    mock_slash.side_effect = mock_async_resp
+    
+    url = f"{web_server}/api/chat"
+    payload = json.dumps({"message": "/sandbox status"}).encode("utf-8")
+    req = urllib.request.Request(url, data=payload, method="POST", headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req) as resp:
+        assert resp.status == 200
+        data = json.loads(resp.read().decode("utf-8"))
+        assert data["response"] == "Command completed successfully"

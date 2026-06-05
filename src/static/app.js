@@ -25,17 +25,39 @@ document.addEventListener("DOMContentLoaded", () => {
     init();
 
     function init() {
+        // Init Tab Switching
+        initTabs();
+
         // Load initial chat history
         loadChatHistory();
 
         // Load initial deliberations and start polling
         loadDeliberations();
-        setInterval(loadDeliberations, 4000); // Poll every 4 seconds
+        setInterval(loadDeliberations, 4000); // Poll deliberations every 4s
+
+        // Poll Sandbox and Staging statuses every 4 seconds to sync widgets
+        setInterval(loadSandboxStatus, 4000);
+        setInterval(loadStagingStatus, 4000);
 
         // Event Listeners
         chatForm.addEventListener("submit", handleChatSubmit);
         closeModalBtn.addEventListener("click", () => closeModal());
         
+        // Sandbox controls
+        document.getElementById("btn-sandbox-start").addEventListener("click", handleSandboxStart);
+        document.getElementById("btn-sandbox-test").addEventListener("click", handleSandboxTest);
+        document.getElementById("btn-sandbox-ship").addEventListener("click", handleSandboxShip);
+        document.getElementById("btn-sandbox-abort").addEventListener("click", handleSandboxAbort);
+
+        // Staging controls
+        document.getElementById("btn-stage-apply").addEventListener("click", handleStageApply);
+        document.getElementById("btn-stage-heal").addEventListener("click", handleStageHeal);
+        document.getElementById("btn-stage-cancel").addEventListener("click", handleStageCancel);
+        document.getElementById("btn-stage-refine").addEventListener("click", handleStageRefine);
+
+        // Config controls
+        document.getElementById("btn-constitution-add").addEventListener("click", handleConstitutionAdd);
+
         // Close modal when clicking overlay
         auditModal.addEventListener("click", (e) => {
             if (e.target === auditModal) {
@@ -48,6 +70,43 @@ document.addEventListener("DOMContentLoaded", () => {
             if (e.key === "Escape" && auditModal.classList.contains("active")) {
                 closeModal();
             }
+        });
+    }
+
+    // --- Navigation Tabs ---
+    function initTabs() {
+        const navBtns = document.querySelectorAll(".nav-btn");
+        const tabContents = document.querySelectorAll(".tab-content");
+
+        navBtns.forEach(btn => {
+            btn.addEventListener("click", () => {
+                const targetTab = btn.getAttribute("data-tab");
+                
+                // Toggle nav button active state
+                navBtns.forEach(b => b.classList.remove("active"));
+                btn.classList.add("active");
+
+                // Toggle tab content visibility
+                tabContents.forEach(tab => {
+                    if (tab.id === targetTab) {
+                        tab.style.display = targetTab === "chat-tab" ? "grid" : "flex";
+                        tab.classList.add("active");
+                    } else {
+                        tab.style.display = "none";
+                        tab.classList.remove("active");
+                    }
+                });
+
+                // Load config views when config tab is selected
+                if (targetTab === "config-tab") {
+                    loadConstitution();
+                    loadAgentRegistry();
+                } else if (targetTab === "sandbox-tab") {
+                    loadSandboxStatus();
+                } else if (targetTab === "staging-tab") {
+                    loadStagingStatus();
+                }
+            });
         });
     }
 
@@ -138,17 +197,13 @@ document.addEventListener("DOMContentLoaded", () => {
     }
 
     function formatMessageText(text) {
-        // Escaped HTML to prevent XSS injection
         let escaped = text
             .replace(/&/g, "&amp;")
             .replace(/</g, "&lt;")
             .replace(/>/g, "&gt;");
 
-        // Format code blocks: `code`
         escaped = escaped.replace(/`([^`]+)`/g, "<code>$1</code>");
 
-        // Format bullet points (simple markdown conversion)
-        // Match "- " or "* " at the start of a line and group
         const lines = escaped.split("\n");
         let inList = false;
         const formattedLines = [];
@@ -187,7 +242,6 @@ document.addEventListener("DOMContentLoaded", () => {
                 return;
             }
 
-            // Check if we actually have any new elements to redraw
             const currentIds = new Set(deliberations.map(d => d.id));
             const hasNew = [...currentIds].some(id => !cachedDelibIds.has(id));
             
@@ -210,10 +264,8 @@ document.addEventListener("DOMContentLoaded", () => {
 
             card.className = `delib-card ${decisionClass}`;
             
-            // Format Timestamp (just get local HH:MM:SS)
             let timeStr = d.timestamp;
             try {
-                // If timestamp contains space, split to get time part
                 if (timeStr.includes(" ")) {
                     timeStr = timeStr.split(" ")[1];
                 }
@@ -228,11 +280,400 @@ document.addEventListener("DOMContentLoaded", () => {
                 <p class="delib-justification">${d.justification}</p>
             `;
 
-            // Click listener to inspect details
             card.addEventListener("click", () => openModal(d));
 
             deliberationsTimeline.appendChild(card);
         });
+    }
+
+    // --- Git Sandbox Functions ---
+    async function loadSandboxStatus() {
+        try {
+            const res = await fetch("/api/sandbox/status");
+            const data = await res.json();
+            
+            const inactiveArea = document.getElementById("sandbox-inactive-controls");
+            const activeArea = document.getElementById("sandbox-active-controls");
+            const detailsArea = document.getElementById("sandbox-details-area");
+            const diffArea = document.getElementById("sandbox-diff-area");
+            const emptyState = document.getElementById("sandbox-empty-state");
+            
+            if (data.active) {
+                inactiveArea.style.display = "none";
+                activeArea.style.display = "flex";
+                detailsArea.style.display = "grid";
+                emptyState.style.display = "none";
+                
+                document.getElementById("sandbox-status-badge").textContent = data.status;
+                document.getElementById("sandbox-val-path").textContent = data.path;
+                document.getElementById("sandbox-val-branch").textContent = data.branch;
+                
+                const filesList = document.getElementById("sandbox-val-files");
+                filesList.innerHTML = "";
+                if (data.modified && data.modified.length > 0) {
+                    data.modified.forEach(f => {
+                        const li = document.createElement("li");
+                        li.textContent = f;
+                        filesList.appendChild(li);
+                    });
+                } else {
+                    const li = document.createElement("li");
+                    li.textContent = "None";
+                    filesList.appendChild(li);
+                }
+                
+                document.getElementById("sandbox-val-logs").textContent = data.test_logs || "Waiting for test execution...";
+                
+                loadSandboxDiff();
+            } else {
+                inactiveArea.style.display = "flex";
+                activeArea.style.display = "none";
+                detailsArea.style.display = "none";
+                diffArea.style.display = "none";
+                emptyState.style.display = "block";
+            }
+        } catch (err) {
+            console.error("Error loading sandbox status:", err);
+        }
+    }
+
+    async function loadSandboxDiff() {
+        try {
+            const res = await fetch("/api/sandbox/diff");
+            const data = await res.json();
+            const diffArea = document.getElementById("sandbox-diff-area");
+            const diffCode = document.getElementById("sandbox-diff-code");
+            
+            if (data.diff && data.diff.trim()) {
+                diffArea.style.display = "block";
+                diffCode.textContent = data.diff;
+            } else {
+                diffArea.style.display = "none";
+            }
+        } catch (err) {
+            console.error("Error loading sandbox diff:", err);
+        }
+    }
+
+    async function handleSandboxStart() {
+        const nameInput = document.getElementById("sandbox-name-input");
+        const name = nameInput.value.trim();
+        if (!name) return;
+        
+        nameInput.value = "";
+        try {
+            const res = await fetch("/api/sandbox/action", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ action: "start", name: name })
+            });
+            const data = await res.json();
+            if (data.success) {
+                loadSandboxStatus();
+            } else {
+                alert(`Error: ${data.error || "Failed to start sandbox"}`);
+            }
+        } catch (err) {
+            console.error(err);
+        }
+    }
+
+    async function handleSandboxTest() {
+        const logsBox = document.getElementById("sandbox-val-logs");
+        logsBox.textContent = "Executing Pytests inside Git Sandbox Worktree...\n(This might take several seconds)";
+        try {
+            const res = await fetch("/api/sandbox/action", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ action: "test" })
+            });
+            const data = await res.json();
+            if (data.success) {
+                loadSandboxStatus();
+            } else {
+                alert(`Error: ${data.error}`);
+            }
+        } catch (err) {
+            console.error(err);
+        }
+    }
+
+    async function handleSandboxShip() {
+        if (!confirm("Are you sure you want to merge and ship all sandbox changes to the active workspace?")) return;
+        try {
+            const res = await fetch("/api/sandbox/action", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ action: "ship" })
+            });
+            const data = await res.json();
+            if (data.success) {
+                loadSandboxStatus();
+                appendMessage("system", `Sandbox shipped successfully. Modified files: ${data.copied.join(", ")}`);
+            } else {
+                alert(`Error: ${data.error}`);
+            }
+        } catch (err) {
+            console.error(err);
+        }
+    }
+
+    async function handleSandboxAbort() {
+        if (!confirm("Are you sure you want to abort this sandbox session? All changes will be lost permanently.")) return;
+        try {
+            const res = await fetch("/api/sandbox/action", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ action: "abort" })
+            });
+            const data = await res.json();
+            if (data.success) {
+                loadSandboxStatus();
+                appendMessage("system", "Sandbox session aborted and deleted.");
+            } else {
+                alert(`Error: ${data.error}`);
+            }
+        } catch (err) {
+            console.error(err);
+        }
+    }
+
+    // --- Staging Area Functions ---
+    async function loadStagingStatus() {
+        try {
+            const res = await fetch("/api/stage/status");
+            const data = await res.json();
+            
+            const activeControls = document.getElementById("staging-active-controls");
+            const detailsArea = document.getElementById("staging-details-area");
+            const diffArea = document.getElementById("staging-diff-area");
+            const emptyState = document.getElementById("staging-empty-state");
+            
+            if (data.active) {
+                activeControls.style.display = "flex";
+                detailsArea.style.display = "grid";
+                emptyState.style.display = "none";
+                
+                document.getElementById("staging-status-badge").textContent = `STAGED (${data.status.toUpperCase()})`;
+                document.getElementById("stage-val-files").textContent = data.file_path;
+                document.getElementById("stage-val-path").textContent = data.dir;
+                document.getElementById("stage-val-logs").textContent = data.test_logs || "No test run failure logs.";
+                
+                if (data.diff) {
+                    diffArea.style.display = "block";
+                    document.getElementById("staging-diff-code").textContent = data.diff;
+                } else {
+                    diffArea.style.display = "none";
+                }
+                
+                const select = document.getElementById("stage-refine-file-select");
+                select.innerHTML = "";
+                const files = data.file_path.split(",");
+                files.forEach(f => {
+                    const option = document.createElement("option");
+                    option.value = f;
+                    option.textContent = f;
+                    select.appendChild(option);
+                });
+            } else {
+                activeControls.style.display = "none";
+                detailsArea.style.display = "none";
+                diffArea.style.display = "none";
+                emptyState.style.display = "block";
+            }
+        } catch (err) {
+            console.error("Error loading staging status:", err);
+        }
+    }
+
+    async function handleStageApply() {
+        try {
+            const res = await fetch("/api/stage/action", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ action: "apply" })
+            });
+            const data = await res.json();
+            if (data.success) {
+                loadStagingStatus();
+                appendMessage("system", "Staged changes successfully applied to active codebase.");
+            } else {
+                alert(`Error: ${data.error}`);
+            }
+        } catch (err) {
+            console.error(err);
+        }
+    }
+
+    async function handleStageCancel() {
+        if (!confirm("Are you sure you want to discard these staged modifications?")) return;
+        try {
+            const res = await fetch("/api/stage/action", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ action: "cancel" })
+            });
+            const data = await res.json();
+            if (data.success) {
+                loadStagingStatus();
+                appendMessage("system", "Staging workspace cleaned and discarded.");
+            } else {
+                alert(`Error: ${data.error}`);
+            }
+        } catch (err) {
+            console.error(err);
+        }
+    }
+
+    async function handleStageHeal() {
+        const logsBox = document.getElementById("stage-val-logs");
+        logsBox.textContent = "Janus is self-healing pre-existing test failures asynchronously...\n(This might take several seconds)";
+        try {
+            const res = await fetch("/api/stage/action", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ action: "heal" })
+            });
+            const data = await res.json();
+            if (data.success) {
+                loadStagingStatus();
+                alert(data.passed ? "Self-healing PASSED all tests!" : "Self-healing completed, but tests still failing. Check logs.");
+            } else {
+                alert(`Error: ${data.error}`);
+            }
+        } catch (err) {
+            console.error(err);
+        }
+    }
+
+    async function handleStageRefine() {
+        const fileSelect = document.getElementById("stage-refine-file-select");
+        const file_path = fileSelect.value;
+        const instInput = document.getElementById("stage-refine-instructions");
+        const instructions = instInput.value.trim();
+        if (!file_path || !instructions) return;
+        
+        instInput.value = "";
+        const logsBox = document.getElementById("stage-val-logs");
+        logsBox.textContent = `Regenerating modifications for '${file_path}' asynchronously...\n(This might take several seconds)`;
+        
+        try {
+            const res = await fetch("/api/stage/action", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ action: "refine", file_path: file_path, instructions: instructions })
+            });
+            const data = await res.json();
+            if (data.success) {
+                loadStagingStatus();
+            } else {
+                alert(`Error: ${data.error}`);
+            }
+        } catch (err) {
+            console.error(err);
+        }
+    }
+
+    // --- Configuration Functions ---
+    async function loadConstitution() {
+        try {
+            const res = await fetch("/api/constitution");
+            const data = await res.json();
+            const tbody = document.querySelector("#constitution-table tbody");
+            tbody.innerHTML = "";
+            
+            data.forEach(r => {
+                const tr = document.createElement("tr");
+                tr.innerHTML = `
+                    <td><strong>${r.key}</strong></td>
+                    <td>${r.text}</td>
+                `;
+                tbody.appendChild(tr);
+            });
+        } catch (err) {
+            console.error("Error loading constitution:", err);
+        }
+    }
+
+    async function handleConstitutionAdd() {
+        const keyInput = document.getElementById("constitution-key-input");
+        const textInput = document.getElementById("constitution-text-input");
+        const key = keyInput.value.trim().toUpperCase();
+        const text = textInput.value.trim();
+        
+        if (!key || !text) return;
+        keyInput.value = "";
+        textInput.value = "";
+        
+        try {
+            const res = await fetch("/api/constitution/amend", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ key: key, text: text })
+            });
+            const data = await res.json();
+            if (data.success) {
+                loadConstitution();
+                appendMessage("system", `Amended constitution: Sealed rule '${key}'`);
+            } else {
+                alert(`Error: ${data.error}`);
+            }
+        } catch (err) {
+            console.error(err);
+        }
+    }
+
+    async function loadAgentRegistry() {
+        try {
+            const res = await fetch("/api/registry");
+            const data = await res.json();
+            const tbody = document.querySelector("#registry-table tbody");
+            tbody.innerHTML = "";
+            
+            data.forEach(agent => {
+                const tr = document.createElement("tr");
+                tr.innerHTML = `
+                    <td><strong>${agent.name}</strong></td>
+                    <td><code>${agent.id}</code></td>
+                    <td>
+                        <input type="text" class="agent-model-input" data-agent="${agent.id}" value="${agent.model}" placeholder="Default global model">
+                    </td>
+                    <td>
+                        <button class="btn btn-primary btn-save-model" data-agent="${agent.id}">Save</button>
+                    </td>
+                `;
+                tbody.appendChild(tr);
+            });
+            
+            document.querySelectorAll(".btn-save-model").forEach(btn => {
+                btn.addEventListener("click", () => {
+                    const agentId = btn.getAttribute("data-agent");
+                    const input = document.querySelector(`.agent-model-input[data-agent="${agentId}"]`);
+                    handleAgentModelUpdate(agentId, input.value.trim());
+                });
+            });
+        } catch (err) {
+            console.error("Error loading agent registry:", err);
+        }
+    }
+
+    async function handleAgentModelUpdate(agentId, model) {
+        try {
+            const res = await fetch("/api/registry/update", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ agent_id: agentId, model: model })
+            });
+            const data = await res.json();
+            if (data.success) {
+                loadAgentRegistry();
+                appendMessage("system", `Updated agent override: Set '${agentId}' model to '${model || 'DEFAULT'}'`);
+            } else {
+                alert(`Error: ${data.error}`);
+            }
+        } catch (err) {
+            console.error(err);
+        }
     }
 
     // --- Modal Functions ---
@@ -248,7 +689,6 @@ document.addEventListener("DOMContentLoaded", () => {
         modalUtilityScore.textContent = delib.utility;
         modalCriticJustification.textContent = delib.justification;
         
-        // Render pretty formatted raw deliberation debate JSON
         modalRawJson.textContent = JSON.stringify(delib.debate, null, 2);
 
         auditModal.classList.add("active");
