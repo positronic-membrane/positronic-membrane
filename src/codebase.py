@@ -90,7 +90,7 @@ def index_codebase(workspace_dir: Path = None):
         
     logger.info(f"Scanning and indexing codebase at: {workspace_dir} ...")
     
-    ignored_dirs = {".git", ".venv", "venv", "__pycache__", "data", ".pytest_cache"}
+    ignored_dirs = {".git", ".venv", "venv", "__pycache__", "data", ".pytest_cache", ".janus_sandboxes", ".janus_snapshots"}
     ignored_files = {".DS_Store", "janus.db", "janus.db-journal", "janus.db-wal", "janus.db-shm"}
     
     indexed_count = 0

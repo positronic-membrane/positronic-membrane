@@ -234,3 +234,6 @@ janus.db-shm
 data/
 .janus_sandboxes/
 .janus_snapshots/
+
+# Manual Additions
+temp_reference/
