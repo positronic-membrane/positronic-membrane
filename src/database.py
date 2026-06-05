@@ -128,6 +128,18 @@ def init_db():
     );
     """)
 
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS agent_rules (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        agent_id TEXT NOT NULL,
+        rule_key TEXT UNIQUE NOT NULL,
+        rule_text TEXT NOT NULL,
+        is_active INTEGER DEFAULT 1,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY(agent_id) REFERENCES agent_registry(agent_id) ON DELETE CASCADE
+    );
+    """)
+
     # Populate drive state if empty
     cursor.execute("SELECT COUNT(*) FROM drive_state;")
     if cursor.fetchone()[0] == 0:
@@ -159,6 +171,14 @@ def init_db():
         INSERT OR IGNORE INTO agent_registry (agent_id, agent_name, system_prompt, target_model)
         VALUES (?, ?, ?, ?);
         """, (agent_id, name, prompt, model))
+
+    # Populate default agent rules if empty
+    cursor.execute("SELECT COUNT(*) FROM agent_rules;")
+    if cursor.fetchone()[0] == 0:
+        cursor.execute("""
+        INSERT OR IGNORE INTO agent_rules (agent_id, rule_key, rule_text)
+        VALUES ('persona', 'verify_live_codebase', 'Always check the live code base before answering questions about it. Don''t assume knowledge of the code base based on chat history.');
+        """)
 
     conn.commit()
     conn.close()
@@ -457,6 +477,65 @@ def get_sandbox_session() -> dict:
     if "active_sandbox_path" in data and data["active_sandbox_path"]:
         return data
     return {}
+
+# Helper functions for Agent Rules & Guidelines
+def get_agent_rules(agent_id: str) -> list:
+    """Retrieves all active rules for a given agent_id."""
+    conn = get_connection(read_only_constitution=True)
+    cursor = conn.cursor()
+    cursor.execute("""
+    SELECT rule_key, rule_text 
+    FROM agent_rules 
+    WHERE agent_id = ? AND is_active = 1 
+    ORDER BY id ASC;
+    """, (agent_id,))
+    rows = cursor.fetchall()
+    conn.close()
+    return [{"key": r[0], "text": r[1]} for r in rows]
+
+def get_all_agent_rules() -> list:
+    """Retrieves all agent rules for all agents, active or inactive."""
+    conn = get_connection(read_only_constitution=True)
+    cursor = conn.cursor()
+    cursor.execute("""
+    SELECT agent_id, rule_key, rule_text, is_active 
+    FROM agent_rules 
+    ORDER BY agent_id ASC, id ASC;
+    """)
+    rows = cursor.fetchall()
+    conn.close()
+    return [{"agent_id": r[0], "key": r[1], "text": r[2], "is_active": bool(r[3])} for r in rows]
+
+def add_agent_rule(agent_id: str, rule_key: str, rule_text: str):
+    """Adds or updates a rule for a specific agent."""
+    conn = get_connection(read_only_constitution=True)
+    cursor = conn.cursor()
+    cursor.execute("""
+    INSERT OR REPLACE INTO agent_rules (agent_id, rule_key, rule_text, is_active)
+    VALUES (?, ?, ?, 1);
+    """, (agent_id, rule_key, rule_text))
+    conn.commit()
+    conn.close()
+
+def toggle_agent_rule(rule_key: str, is_active: bool):
+    """Enables or disables an agent rule."""
+    conn = get_connection(read_only_constitution=True)
+    cursor = conn.cursor()
+    cursor.execute("""
+    UPDATE agent_rules 
+    SET is_active = ?, created_at = CURRENT_TIMESTAMP 
+    WHERE rule_key = ?;
+    """, (1 if is_active else 0, rule_key))
+    conn.commit()
+    conn.close()
+
+def delete_agent_rule(rule_key: str):
+    """Deletes an agent rule from the database."""
+    conn = get_connection(read_only_constitution=True)
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM agent_rules WHERE rule_key = ?;", (rule_key,))
+    conn.commit()
+    conn.close()
 
 
 

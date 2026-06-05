@@ -45,6 +45,8 @@ class JanusRequestHandler(BaseHTTPRequestHandler):
             self.handle_get_constitution()
         elif path == "/api/registry":
             self.handle_get_registry()
+        elif path == "/api/registry/rules":
+            self.handle_get_registry_rules()
         # Static file routing
         else:
             self.handle_serve_static(path)
@@ -64,6 +66,8 @@ class JanusRequestHandler(BaseHTTPRequestHandler):
             self.handle_post_constitution_amend()
         elif path == "/api/registry/update":
             self.handle_post_registry_update()
+        elif path == "/api/registry/rules/update":
+            self.handle_post_registry_rules_update()
         else:
             self.send_error(404, "Endpoint not found")
 
@@ -249,6 +253,14 @@ class JanusRequestHandler(BaseHTTPRequestHandler):
             self.send_json_response(200, json.dumps(data).encode("utf-8"))
         except Exception as e:
             self.send_json_error(500, f"Error getting agent registry: {e}")
+
+    def handle_get_registry_rules(self):
+        try:
+            from src.database import get_all_agent_rules
+            rules = get_all_agent_rules()
+            self.send_json_response(200, json.dumps(rules).encode("utf-8"))
+        except Exception as e:
+            self.send_json_error(500, f"Error getting agent rules: {e}")
 
     def handle_post_sandbox_action(self):
         try:
@@ -523,6 +535,48 @@ class JanusRequestHandler(BaseHTTPRequestHandler):
             self.send_json_response(200, json.dumps({"success": True}).encode("utf-8"))
         except Exception as e:
             self.send_json_error(500, f"Error updating agent registry: {e}")
+
+    def handle_post_registry_rules_update(self):
+        try:
+            content_length = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(content_length)
+            data = json.loads(body.decode("utf-8"))
+            action = data.get("action", "").strip()
+
+            from src.database import add_agent_rule, toggle_agent_rule, delete_agent_rule
+
+            if action == "add":
+                agent_id = data.get("agent_id", "").strip()
+                rule_key = data.get("rule_key", "").strip()
+                rule_text = data.get("rule_text", "").strip()
+                if not agent_id or not rule_key or not rule_text:
+                    self.send_json_error(400, "Missing required fields: agent_id, rule_key, rule_text")
+                    return
+                add_agent_rule(agent_id, rule_key, rule_text)
+                log_episodic_memory("system", f"User added agent rule via Web UI: [{agent_id}] '{rule_key}' = '{rule_text}'", "user_visible")
+            elif action == "toggle":
+                rule_key = data.get("rule_key", "").strip()
+                is_active = data.get("is_active", True)
+                if not rule_key:
+                    self.send_json_error(400, "Missing rule_key")
+                    return
+                toggle_agent_rule(rule_key, is_active)
+                status_str = "enabled" if is_active else "disabled"
+                log_episodic_memory("system", f"User {status_str} agent rule via Web UI: '{rule_key}'", "user_visible")
+            elif action == "delete":
+                rule_key = data.get("rule_key", "").strip()
+                if not rule_key:
+                    self.send_json_error(400, "Missing rule_key")
+                    return
+                delete_agent_rule(rule_key)
+                log_episodic_memory("system", f"User deleted agent rule via Web UI: '{rule_key}'", "user_visible")
+            else:
+                self.send_json_error(400, f"Invalid rule update action: {action}")
+                return
+
+            self.send_json_response(200, json.dumps({"success": True}).encode("utf-8"))
+        except Exception as e:
+            self.send_json_error(500, f"Error updating agent rules: {e}")
 
     def handle_post_chat(self):
         try:

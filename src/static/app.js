@@ -57,6 +57,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
         // Config controls
         document.getElementById("btn-constitution-add").addEventListener("click", handleConstitutionAdd);
+        document.getElementById("btn-rule-add").addEventListener("click", handleAgentRuleAdd);
 
         // Close modal when clicking overlay
         auditModal.addEventListener("click", (e) => {
@@ -101,6 +102,7 @@ document.addEventListener("DOMContentLoaded", () => {
                 if (targetTab === "config-tab") {
                     loadConstitution();
                     loadAgentRegistry();
+                    loadAgentRules();
                 } else if (targetTab === "sandbox-tab") {
                     loadSandboxStatus();
                 } else if (targetTab === "staging-tab") {
@@ -668,6 +670,122 @@ document.addEventListener("DOMContentLoaded", () => {
             if (data.success) {
                 loadAgentRegistry();
                 appendMessage("system", `Updated agent override: Set '${agentId}' model to '${model || 'DEFAULT'}'`);
+            } else {
+                alert(`Error: ${data.error}`);
+            }
+        } catch (err) {
+            console.error(err);
+        }
+    }
+
+    async function loadAgentRules() {
+        try {
+            const res = await fetch("/api/registry/rules");
+            const data = await res.json();
+            const tbody = document.querySelector("#rules-table tbody");
+            if (!tbody) return;
+            tbody.innerHTML = "";
+
+            data.forEach(rule => {
+                const tr = document.createElement("tr");
+                tr.innerHTML = `
+                    <td><code>${rule.agent_id}</code></td>
+                    <td><strong>${rule.key}</strong></td>
+                    <td>${rule.text}</td>
+                    <td>
+                        <input type="checkbox" class="rule-active-toggle" data-key="${rule.key}" ${rule.is_active ? "checked" : ""}>
+                    </td>
+                    <td>
+                        <button class="btn btn-secondary btn-delete-rule" data-key="${rule.key}">&times;</button>
+                    </td>
+                `;
+                tbody.appendChild(tr);
+            });
+
+            // Bind toggle change event
+            document.querySelectorAll(".rule-active-toggle").forEach(cb => {
+                cb.addEventListener("change", (e) => {
+                    const ruleKey = cb.getAttribute("data-key");
+                    handleAgentRuleToggle(ruleKey, cb.checked);
+                });
+            });
+
+            // Bind delete rule event
+            document.querySelectorAll(".btn-delete-rule").forEach(btn => {
+                btn.addEventListener("click", () => {
+                    const ruleKey = btn.getAttribute("data-key");
+                    if (confirm(`Are you sure you want to delete rule '${ruleKey}'?`)) {
+                        handleAgentRuleDelete(ruleKey);
+                    }
+                });
+            });
+        } catch (err) {
+            console.error("Error loading agent rules:", err);
+        }
+    }
+
+    async function handleAgentRuleAdd() {
+        const agentSelect = document.getElementById("rule-agent-select");
+        const keyInput = document.getElementById("rule-key-input");
+        const textInput = document.getElementById("rule-text-input");
+
+        const agent_id = agentSelect.value;
+        const rule_key = keyInput.value.trim().toLowerCase();
+        const rule_text = textInput.value.trim();
+
+        if (!rule_key || !rule_text) return;
+        keyInput.value = "";
+        textInput.value = "";
+
+        try {
+            const res = await fetch("/api/registry/rules/update", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ action: "add", agent_id: agent_id, rule_key: rule_key, rule_text: rule_text })
+            });
+            const data = await res.json();
+            if (data.success) {
+                loadAgentRules();
+                appendMessage("system", `Added agent rule: [${agent_id}] '${rule_key}'`);
+            } else {
+                alert(`Error: ${data.error}`);
+            }
+        } catch (err) {
+            console.error(err);
+        }
+    }
+
+    async function handleAgentRuleToggle(ruleKey, isActive) {
+        try {
+            const res = await fetch("/api/registry/rules/update", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ action: "toggle", rule_key: ruleKey, is_active: isActive })
+            });
+            const data = await res.json();
+            if (data.success) {
+                loadAgentRules();
+                const status = isActive ? "enabled" : "disabled";
+                appendMessage("system", `Agent rule '${ruleKey}' ${status}`);
+            } else {
+                alert(`Error: ${data.error}`);
+            }
+        } catch (err) {
+            console.error(err);
+        }
+    }
+
+    async function handleAgentRuleDelete(ruleKey) {
+        try {
+            const res = await fetch("/api/registry/rules/update", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ action: "delete", rule_key: ruleKey })
+            });
+            const data = await res.json();
+            if (data.success) {
+                loadAgentRules();
+                appendMessage("system", `Deleted agent rule '${ruleKey}'`);
             } else {
                 alert(`Error: ${data.error}`);
             }

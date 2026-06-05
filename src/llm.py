@@ -1,7 +1,7 @@
 import logging
 from openai import OpenAI
 import src.config
-from src.database import get_connection
+from src.database import get_connection, get_agent_rules
 
 logger = logging.getLogger("JanusLLM")
 
@@ -69,6 +69,12 @@ def query_agent(agent_id: str, prompt_content: str, system_override: str = None)
     name, system_prompt, db_model = settings
     model = resolve_agent_model(agent_id, db_model)
     system = system_override if system_override is not None else system_prompt
+
+    # Dynamically query and append active agent rules
+    rules = get_agent_rules(agent_id)
+    if rules:
+        rules_text = "\n\n### Rules & Guidelines:\n" + "\n".join(f"- {r['text']}" for r in rules)
+        system += rules_text
 
     base_url, api_key = resolve_agent_client_params(agent_id, model)
 

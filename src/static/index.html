@@ -226,6 +226,39 @@
                                 </tbody>
                             </table>
                         </div>
+                        <div class="config-card">
+                            <h3>Agent Rules & Guidelines</h3>
+                            <p class="config-desc">Manage modular guidelines and constraints for individual agents. Active rules are compiled and appended to the agent's system prompt at runtime.</p>
+                            <table class="config-table" id="rules-table">
+                                <thead>
+                                    <tr>
+                                        <th>Agent</th>
+                                        <th>Rule Key</th>
+                                        <th>Rule Text</th>
+                                        <th>Active</th>
+                                        <th>Actions</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <!-- Dynamic rows -->
+                                </tbody>
+                            </table>
+                            <div class="config-form">
+                                <h4>Add Agent Rule</h4>
+                                <div class="config-fields">
+                                    <select id="rule-agent-select">
+                                        <option value="persona">Persona</option>
+                                        <option value="proposer">Proposer</option>
+                                        <option value="critic">Critic</option>
+                                        <option value="explorer">Explorer</option>
+                                        <option value="archivist">Archivist</option>
+                                    </select>
+                                    <input type="text" id="rule-key-input" placeholder="Rule Key (e.g. check_docs)...">
+                                    <input type="text" id="rule-text-input" placeholder="Describe the agent rule/guideline...">
+                                    <button class="btn btn-primary" id="btn-rule-add">Add Rule</button>
+                                </div>
+                            </div>
+                        </div>
                     </div>
                 </section>
             </main>
