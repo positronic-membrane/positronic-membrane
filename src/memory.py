@@ -1,8 +1,10 @@
 import time
 import logging
+import uuid
 import chromadb
 from openai import OpenAI
 import src.config
+from src.llm import query_agent
 
 logger = logging.getLogger("JanusMemory")
 
@@ -128,7 +130,6 @@ def consolidate_memories(batch_size: int = 5):
         logger.info(f"Consolidating batch of {len(batch_ids)} detailed memories...")
         memories_summary = "\n".join([f"- {doc}" for doc in batch_docs])
         
-        from src.llm import query_agent
         archivist_prompt = f"""
         You are the Archivist. Synthesize the following granular background memory entries into a single, cohesive, high-level Primary Concept (under 2 sentences).
         
@@ -142,7 +143,7 @@ def consolidate_memories(batch_size: int = 5):
             primary_concept = query_agent("archivist", archivist_prompt).strip()
             
             # Save Primary Concept to janus_long_term
-            concept_id = f"concept_{int(time.time())}_{i}"
+            concept_id = f"concept_{uuid.uuid4()}"
             concept_metadata = {
                 "type": "primary_concept",
                 "detail_ids": ",".join(batch_ids),
@@ -215,7 +216,7 @@ def update_curiosity_topics(new_topics: list, similarity_threshold: float = 0.8)
             
         if not similar_found:
             # Add as a new curiosity topic
-            topic_id = f"cur_{int(time.time())}_{i}"
+            topic_id = f"cur_{uuid.uuid4()}"
             metadata = {
                 "relevance_count": 1,
                 "timestamp": time.time(),
@@ -264,5 +265,3 @@ def get_active_curiosity_topics(limit: int = 5) -> list:
     packed.sort(key=lambda x: (x["relevance_count"], x["timestamp"]), reverse=True)
     
     return [item["document"] for item in packed[:limit]]
-
-

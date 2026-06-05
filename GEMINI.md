@@ -27,6 +27,7 @@ This section documents the non-negotiable architectural boundaries, performance 
 * **Constitutional Immutability:** Under no circumstances may autonomous agents modify, delete, or overwrite rows in the `core_constitution` database table. The database connection used by the agent swarm must enforce this restriction programmatically, or it must be validated by hard-coded Python middleware intercepting SQL statements.
 * **Veto Gate for Swarm Alterations:** Any self-modification proposals—such as registering a new agent, altering an existing agent's prompt, or swapping an active model in `agent_registry`—must be logged in `internal_deliberations` and submitted to the Critic agent for an audit. The Critic must evaluate if the modification introduces cognitive bias, bypasses safety valves, or violates the core constitution.
 * **Safe Configuration Mutation:** Agents can only modify configuration values in `system_config` where `is_agent_modifiable = 1`. Any modification to non-modifiable keys must trigger an immediate safety halt.
+- **Automated Memory Retention**: The codebase utilizes a polling-based `FileWatcher` (`src/watcher.py`) coupled with a `MemoryOrchestrator` (`src/memory.py`). Any structural or logical modifications to the workspace must be intercepted by this orchestrator to generate point-in-time JSON snapshots in `.janus_snapshots/`, ensuring no contextual drift occurs during asynchronous development cycles.
 
 ---
 

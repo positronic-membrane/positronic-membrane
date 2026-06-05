@@ -2,7 +2,18 @@ import pytest
 from unittest.mock import patch
 import src.config
 import src.memory
+from src.database import init_db
 from src.memory import add_memory, query_memories, get_collection
+
+@pytest.fixture(autouse=True)
+def setup_test_db(tmp_path):
+    """Isolate DB settings for testing."""
+    temp_db = tmp_path / "test_janus.db"
+    orig_db_path = src.config.DB_PATH
+    src.config.DB_PATH = str(temp_db)
+    init_db()
+    yield
+    src.config.DB_PATH = orig_db_path
 
 @pytest.fixture(autouse=True)
 def setup_test_vector_db(tmp_path):
@@ -67,7 +78,7 @@ def test_memory_threshold_filtering(mock_embeddings):
     finally:
         src.config.MEMORY_RELEVANCE_THRESHOLD = orig_threshold
 
-@patch("src.llm.query_agent")
+@patch("src.memory.query_agent")
 def test_memory_consolidation(mock_query_agent, mock_embeddings):
     """Verify detailed memories are consolidated into a high-level concept."""
     mock_query_agent.return_value = "Swarm researched database configurations."
