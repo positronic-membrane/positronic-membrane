@@ -27,6 +27,8 @@ When running Project Janus in CLI mode (`python -m src.main --cli`), the interac
 
 *   `/exit`: Gracefully shuts down the active conversation console and cancels the background daemon loops.
 *   `/amend <rule_key> | <rule_text>`: Proposes a new rule or amendment to be sealed in the read-only core constitution table (requires interactive `y/n` confirmation).
+*   `/modify <relative_file_path> | <instructions>`: Synchronously drafts, audits, stages, and runs tests for a single file modification, prompting you to commit or reject it immediately.
+*   `/stage`: Automatically parses proposed codebase changes from the most recent message in the conversation, presenting an interactive menu to confirm, remove, or edit changes before running a combined staging, auditing, and test validation transaction.
 
 ### Staged Self-Modification Interactive Prompts
 When the background agent swarm stages a code modification, the console intercepts execution prior to the next user prompt to display the unified diff and unit test execution logs. It then prompts for confirmation:
