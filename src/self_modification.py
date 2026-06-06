@@ -67,6 +67,13 @@ def stage_and_test(rel_path: str, proposed_code: str) -> tuple:
     """
     logger.info(f"Staging code changes for '{rel_path}'...")
     
+    # Pre-flight AST validation for Python files
+    if rel_path.endswith(".py"):
+        valid, err_msg = validate_python_ast(proposed_code)
+        if not valid:
+            logger.info(f"Pre-flight AST validation failed for '{rel_path}': {err_msg}")
+            return False, f"AST Verification Failed:\n{err_msg}", ""
+    
     # 1. Create a persistent temporary directory for this staged change
     temp_dir = tempfile.mkdtemp(prefix="janus_stage_")
     temp_dir_path = Path(temp_dir)
@@ -153,6 +160,19 @@ def stage_and_test_multi(modifications: dict) -> tuple:
     Returns: (tests_passed: bool, test_logs: str, temp_dir_path: str)
     """
     logger.info(f"Staging multi-file changes: {list(modifications.keys())}...")
+    
+    # Pre-flight AST validation for Python files
+    ast_errors = []
+    for rel_path, proposed_code in modifications.items():
+        if rel_path.endswith(".py"):
+            valid, err_msg = validate_python_ast(proposed_code)
+            if not valid:
+                ast_errors.append(f"File: {rel_path}\n{err_msg}")
+                
+    if ast_errors:
+        combined_err = "AST Verification Failed:\n" + "\n\n".join(ast_errors)
+        logger.info(f"Pre-flight AST verification failed for multi-file stage: {combined_err}")
+        return False, combined_err, ""
     
     # 1. Create a persistent temporary directory for this staged change
     temp_dir = tempfile.mkdtemp(prefix="janus_stage_multi_")
@@ -361,4 +381,25 @@ def summarize_pytest_logs(logs: str) -> str:
         return f"RAW TEST LOGS (TRUNCATED):\n{truncated_raw}"
         
     return "\n\n".join(final_parts)
+
+
+def validate_python_ast(proposed_code: str) -> tuple[bool, str | None]:
+    """
+    Validates that the proposed code compiles to a valid Python AST.
+    Returns (True, None) if valid, or (False, error_message) if syntax validation fails.
+    """
+    import ast
+    try:
+        ast.parse(proposed_code)
+        return True, None
+    except SyntaxError as e:
+        error_msg = f"SyntaxError: {e.msg} on line {e.lineno}"
+        if e.text:
+            error_msg += f"\nCode: {e.text.strip()}"
+            if e.offset is not None:
+                pointer = " " * (e.offset - 1) + "^"
+                error_msg += f"\n      {pointer}"
+        return False, error_msg
+    except Exception as e:
+        return False, f"AST compilation failed: {e}"
 
