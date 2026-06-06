@@ -51,12 +51,8 @@ def db_conn():
 
     db_module.get_connection = mock_get_connection
 
-    # Initialize core schema (creates episodic_memory, etc.)
+    # Initialize core schema (creates episodic_memory, etc.) and automatically applies migrations
     init_db()
-
-    # Apply migration
-    main_conn.executescript(MIGRATION_SQL)
-    main_conn.commit()
 
     # Store mock connection builder for downstream fixtures
     _shared_state['mock_get_connection'] = mock_get_connection
@@ -572,3 +568,58 @@ class TestWebServerEndpoints:
         )
         assert resp['status'] == 200
         assert resp['data']['value'] == 'api_value'
+
+    def test_register_party_with_metadata(self, server_handler, db_conn):
+        """Test registering a party with metadata and retrieving it."""
+        admin_id = str(uuid.uuid4())
+        now = datetime.utcnow().isoformat()
+        db_conn.execute(
+            'INSERT INTO parties (id, name, role, created_at) VALUES (?, ?, ?, ?)',
+            (admin_id, 'AdminUser2', 'admin', now)
+        )
+        db_conn.commit()
+
+        metadata = {'key': 'val', 'nested': {'num': 42}}
+        body = json.dumps({'name': 'PartyWithMeta', 'role': 'user', 'metadata': metadata}).encode('utf-8')
+        handler, resp = self.create_mock_request(
+            server_handler, 'POST', '/api/v1/party/register',
+            body=body,
+            headers={'X-Party-ID': admin_id}
+        )
+        assert resp['status'] == 201
+        assert resp['data']['name'] == 'PartyWithMeta'
+        assert resp['data']['metadata'] == metadata
+        assert 'last_seen' in resp['data']
+
+        party_id = resp['data']['party_id']
+
+        # Now query the party
+        handler, resp = self.create_mock_request(
+            server_handler, 'GET', f'/api/v1/party/{party_id}',
+            headers={'X-Party-ID': admin_id}
+        )
+        assert resp['status'] == 200
+        assert resp['data']['metadata'] == metadata
+        assert 'last_seen' in resp['data']
+
+    def test_last_seen_updates_on_auth(self, server_handler, db_conn):
+        """Test that last_seen updates when requests are authenticated."""
+        party_id = str(uuid.uuid4())
+        past_time = "2020-01-01T00:00:00"
+        db_conn.execute(
+            'INSERT INTO parties (id, name, role, created_at, last_seen) VALUES (?, ?, ?, ?, ?)',
+            (party_id, 'ActiveUser', 'user', past_time, past_time)
+        )
+        db_conn.commit()
+
+        # Perform a request that uses require_role
+        handler, resp = self.create_mock_request(
+            server_handler, 'GET', f'/api/v1/party/{party_id}',
+            headers={'X-Party-ID': party_id}
+        )
+        assert resp['status'] == 200
+
+        # Verify last_seen was updated in DB
+        row = db_conn.execute('SELECT last_seen FROM parties WHERE id = ?', (party_id,)).fetchone()
+        assert row['last_seen'] != past_time
+        assert row['last_seen'] > past_time

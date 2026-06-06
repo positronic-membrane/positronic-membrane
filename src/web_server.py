@@ -49,6 +49,9 @@ def check_role(party_id, minimum_role):
             return False, None
         role = row['role']
         if ROLE_HIERARCHY.get(role, -1) >= ROLE_HIERARCHY.get(minimum_role, 0):
+            now = datetime.utcnow().isoformat()
+            conn.execute('UPDATE parties SET last_seen = ? WHERE id = ?', (now, party_id))
+            conn.commit()
             return True, role
         return False, role
     finally:
@@ -767,13 +770,18 @@ class JanusRequestHandler(BaseHTTPRequestHandler):
             conn.row_factory = sqlite3.Row
             try:
                 row = conn.execute(
-                    'SELECT id, name, role, created_at FROM parties WHERE id = ?',
+                    'SELECT id, name, role, created_at, last_seen, metadata FROM parties WHERE id = ?',
                     (target_party_id,)
                 ).fetchone()
                 if not row:
                     self._send_json(404, {"error": "Party not found"})
                     return
-                self._send_json(200, dict(row))
+                res_dict = dict(row)
+                try:
+                    res_dict['metadata'] = json.loads(res_dict['metadata'])
+                except Exception:
+                    pass
+                self._send_json(200, res_dict)
             finally:
                 conn.close()
             return
@@ -845,14 +853,16 @@ class JanusRequestHandler(BaseHTTPRequestHandler):
             new_party_id = str(uuid.uuid4())
             now = datetime.utcnow().isoformat()
             public_key = data.get('public_key')
+            metadata = data.get('metadata', {})
+            metadata_str = json.dumps(metadata)
             conn = get_connection()
             try:
                 conn.execute(
-                    'INSERT INTO parties (id, name, role, created_at, public_key) VALUES (?, ?, ?, ?, ?)',
-                    (new_party_id, name, role, now, public_key)
+                    'INSERT INTO parties (id, name, role, created_at, last_seen, public_key, metadata) VALUES (?, ?, ?, ?, ?, ?, ?)',
+                    (new_party_id, name, role, now, now, public_key, metadata_str)
                 )
                 conn.commit()
-                self._send_json(201, {"party_id": new_party_id, "name": name, "role": role})
+                self._send_json(201, {"party_id": new_party_id, "name": name, "role": role, "last_seen": now, "metadata": metadata})
             except Exception as e:
                 self._send_json(400, {"error": f"Failed to create party: {str(e)}"})
             finally:

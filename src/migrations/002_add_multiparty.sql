@@ -10,7 +10,9 @@ CREATE TABLE IF NOT EXISTS parties (
     name TEXT UNIQUE NOT NULL,
     role TEXT NOT NULL CHECK(role IN ('user', 'contributor', 'admin', 'observer')),
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
-    public_key TEXT
+    last_seen TEXT NOT NULL DEFAULT (datetime('now')),
+    public_key TEXT,
+    metadata TEXT NOT NULL DEFAULT '{}'
 );
 
 -- 2. Create sessions table

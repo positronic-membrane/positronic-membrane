@@ -185,6 +185,23 @@ def init_db():
         VALUES (?, ?, ?);
         """, (agent_id, rule_key, rule_text))
 
+    # Check if parties table exists; if not, apply multi-party migrations
+    cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='parties';")
+    if not cursor.fetchone():
+        from pathlib import Path
+        migration_path = Path(__file__).resolve().parent / "migrations" / "002_add_multiparty.sql"
+        if migration_path.exists():
+            with open(migration_path, "r", encoding="utf-8") as f:
+                migration_sql = f.read()
+            cursor.executescript(migration_sql)
+    else:
+        cursor.execute("PRAGMA table_info(parties);")
+        columns = [row[1] for row in cursor.fetchall()]
+        if "last_seen" not in columns:
+            cursor.execute("ALTER TABLE parties ADD COLUMN last_seen TEXT NOT NULL DEFAULT (datetime('now'));")
+        if "metadata" not in columns:
+            cursor.execute("ALTER TABLE parties ADD COLUMN metadata TEXT NOT NULL DEFAULT '{}';")
+
     conn.commit()
     conn.close()
 

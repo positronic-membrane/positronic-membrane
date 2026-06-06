@@ -59,6 +59,14 @@ def require_role(minimum_role: str):
 
                 if role_hierarchy.get(party['role'], -1) < role_hierarchy.get(minimum_role, 0):
                     return jsonify({'error': 'Insufficient permissions'}), 403
+
+                # Update last_seen timestamp
+                now = datetime.utcnow().isoformat()
+                conn.execute(
+                    'UPDATE parties SET last_seen = ? WHERE id = ?',
+                    (now, party_id)
+                )
+                conn.commit()
             finally:
                 conn.close()
 
@@ -86,12 +94,14 @@ def register_party():
     party_id = str(uuid.uuid4())
     now = datetime.utcnow().isoformat()
     public_key = data.get('public_key')
+    metadata = data.get('metadata', {})
+    metadata_str = json.dumps(metadata)
 
     conn = get_db_connection()
     try:
         conn.execute(
-            'INSERT INTO parties (id, name, role, created_at, public_key) VALUES (?, ?, ?, ?, ?)',
-            (party_id, name, role, now, public_key)
+            'INSERT INTO parties (id, name, role, created_at, last_seen, public_key, metadata) VALUES (?, ?, ?, ?, ?, ?, ?)',
+            (party_id, name, role, now, now, public_key, metadata_str)
         )
         conn.commit()
     except Exception as e:
@@ -99,7 +109,7 @@ def register_party():
     finally:
         conn.close()
 
-    return jsonify({'party_id': party_id, 'name': name, 'role': role}), 201
+    return jsonify({'party_id': party_id, 'name': name, 'role': role, 'last_seen': now, 'metadata': metadata}), 201
 
 
 @multiparty_bp.route('/party/<party_id>', methods=['GET'])
@@ -109,12 +119,17 @@ def get_party(party_id):
     conn = get_db_connection()
     try:
         party = conn.execute(
-            'SELECT id, name, role, created_at FROM parties WHERE id = ?',
+            'SELECT id, name, role, created_at, last_seen, metadata FROM parties WHERE id = ?',
             (party_id,)
         ).fetchone()
         if not party:
             return jsonify({'error': 'Party not found'}), 404
-        return jsonify(dict(party))
+        res_dict = dict(party)
+        try:
+            res_dict['metadata'] = json.loads(res_dict['metadata'])
+        except Exception:
+            pass
+        return jsonify(res_dict)
     finally:
         conn.close()
 
