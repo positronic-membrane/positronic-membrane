@@ -23,10 +23,10 @@ class RoleBootstrap:
         return get_connection(self.db_path)
 
     def is_bootstrap_required(self) -> bool:
-        """Check if the parties table is empty (first-run state)."""
+        """Check if the parties table is empty of user/admin parties (first-run state)."""
         conn = self._get_connection()
         try:
-            count = conn.execute('SELECT COUNT(*) as cnt FROM parties').fetchone()
+            count = conn.execute("SELECT COUNT(*) as cnt FROM parties WHERE name != 'system'").fetchone()
             return count['cnt'] == 0
         finally:
             conn.close()

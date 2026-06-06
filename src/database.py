@@ -202,6 +202,29 @@ def init_db():
         if "metadata" not in columns:
             cursor.execute("ALTER TABLE parties ADD COLUMN metadata TEXT NOT NULL DEFAULT '{}';")
 
+    # Ensure preferences table exists
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS preferences (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        party_id TEXT NOT NULL REFERENCES parties(id) ON DELETE CASCADE,
+        preference_key TEXT NOT NULL,
+        preference_value TEXT NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(party_id, preference_key)
+    );
+    """)
+
+    # Seed system party if it doesn't exist
+    cursor.execute("SELECT id FROM parties WHERE name = 'system';")
+    if not cursor.fetchone():
+        now = datetime.utcnow().isoformat()
+        cursor.execute(
+            "INSERT INTO parties (id, name, role, created_at, last_seen, metadata) "
+            "VALUES ('system', 'system', 'observer', ?, ?, '{}');",
+            (now, now)
+        )
+
     conn.commit()
     conn.close()
 

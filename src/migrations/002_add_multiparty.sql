@@ -40,6 +40,17 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_party_memory_key ON memories(party_id, nam
 -- Covering index for global lookups (when party_id is irrelevant)
 CREATE INDEX IF NOT EXISTS idx_namespace_key ON memories(namespace, key);
 
+-- 3b. Create preferences table
+CREATE TABLE IF NOT EXISTS preferences (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    party_id TEXT NOT NULL REFERENCES parties(id) ON DELETE CASCADE,
+    preference_key TEXT NOT NULL,
+    preference_value TEXT NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(party_id, preference_key)
+);
+
 -- 4. Create modifications table (audit trail)
 CREATE TABLE IF NOT EXISTS modifications (
     id TEXT PRIMARY KEY,
@@ -73,5 +84,9 @@ ALTER TABLE episodic_memory ADD COLUMN session_id TEXT REFERENCES sessions(id) O
 -- 7. Create index for efficient party-scoped episodic memory queries
 CREATE INDEX IF NOT EXISTS idx_episodic_memory_party ON episodic_memory(party_id);
 CREATE INDEX IF NOT EXISTS idx_episodic_memory_session ON episodic_memory(session_id);
+
+-- 8. Seed system party if it doesn't exist
+INSERT OR IGNORE INTO parties (id, name, role, created_at, last_seen, metadata)
+VALUES ('system', 'system', 'observer', datetime('now'), datetime('now'), '{}');
 
 COMMIT;

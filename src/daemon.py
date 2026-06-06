@@ -85,6 +85,45 @@ def parse_critic_response(text: str) -> tuple:
         
     return decision, justification
 
+def run_background_maintenance():
+    """
+    Performs low-priority background maintenance tasks:
+    1. Update the 'system' party last_seen to mark the daemon's presence.
+    2. Auto-close inactive sessions (sessions with no ended_at whose associated party last_seen is older than 30 minutes).
+    """
+    from datetime import datetime
+    from src.database import get_connection
+    
+    logger.debug("Executing background maintenance...")
+    conn = get_connection()
+    try:
+        cursor = conn.cursor()
+        now = datetime.utcnow().isoformat()
+        
+        # 1. Update the 'system' party last_seen timestamp
+        cursor.execute(
+            "UPDATE parties SET last_seen = ? WHERE name = 'system';",
+            (now,)
+        )
+        
+        # 2. Auto-close sessions inactive for > 30 minutes (1800 seconds)
+        cursor.execute("""
+            UPDATE sessions
+            SET ended_at = (SELECT last_seen FROM parties WHERE parties.id = sessions.party_id)
+            WHERE ended_at IS NULL
+              AND party_id IN (
+                  SELECT id FROM parties 
+                  WHERE datetime(last_seen) < datetime('now', '-30 minutes')
+              );
+        """)
+        
+        conn.commit()
+        logger.debug("Background maintenance completed successfully.")
+    except Exception as e:
+        logger.error(f"Error during background maintenance: {e}")
+    finally:
+        conn.close()
+
 async def run_heartbeat_loop():
     """
     Infinite async heartbeat loop managing dynamic pacing, boredom incrementing,
@@ -154,6 +193,12 @@ async def run_heartbeat_loop():
 
             # --- HEARTBEAT TICK EXECUTION ---
             logger.info("Heartbeat tick processing...")
+            
+            # Run background maintenance
+            try:
+                run_background_maintenance()
+            except Exception as e:
+                logger.error(f"Failed to run background maintenance: {e}")
 
             if not user_active:
                 consecutive_background_loops += 1

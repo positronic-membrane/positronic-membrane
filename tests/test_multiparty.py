@@ -426,6 +426,34 @@ class TestDatabaseSchema:
         ).fetchone()
         assert row['cnt'] == 0
 
+    def test_preferences_table_exists(self, db_conn):
+        """Verify preferences table has correct columns."""
+        cursor = db_conn.execute("PRAGMA table_info(preferences)")
+        columns = {row['name']: row for row in cursor.fetchall()}
+
+        assert 'id' in columns
+        assert 'party_id' in columns
+        assert 'preference_key' in columns
+        assert 'preference_value' in columns
+        assert 'created_at' in columns
+        assert 'updated_at' in columns
+
+    def test_preferences_uniqueness(self, db_conn, sample_party):
+        """Verify unique constraint on (party_id, preference_key)."""
+        db_conn.execute(
+            'INSERT INTO preferences (party_id, preference_key, preference_value) VALUES (?, ?, ?)',
+            (sample_party, 'theme', 'dark')
+        )
+        db_conn.commit()
+
+        # Duplicate should fail
+        with pytest.raises(sqlite3.IntegrityError):
+            db_conn.execute(
+                'INSERT INTO preferences (party_id, preference_key, preference_value) VALUES (?, ?, ?)',
+                (sample_party, 'theme', 'light')
+            )
+            db_conn.commit()
+
 
 # --- Web Server Integration Tests ---
 
@@ -623,3 +651,50 @@ class TestWebServerEndpoints:
         row = db_conn.execute('SELECT last_seen FROM parties WHERE id = ?', (party_id,)).fetchone()
         assert row['last_seen'] != past_time
         assert row['last_seen'] > past_time
+
+
+class TestHeartbeatMaintenance:
+    """Tests for low-priority background maintenance tasks."""
+
+    def test_maintenance_updates_system_party(self, db_conn):
+        """Verify run_background_maintenance updates last_seen for system party."""
+        from src.daemon import run_background_maintenance
+        
+        # Ensure system party exists in the test DB
+        row = db_conn.execute("SELECT last_seen FROM parties WHERE name = 'system'").fetchone()
+        assert row is not None
+        initial_seen = row['last_seen']
+
+        import time
+        time.sleep(0.1) # small delay to guarantee timestamp progression
+        
+        run_background_maintenance()
+
+        row_after = db_conn.execute("SELECT last_seen FROM parties WHERE name = 'system'").fetchone()
+        assert row_after['last_seen'] > initial_seen
+
+    def test_maintenance_closes_inactive_sessions(self, db_conn, sample_party):
+        """Verify sessions inactive for > 30 minutes are closed."""
+        from src.daemon import run_background_maintenance
+        
+        session_id = str(uuid.uuid4())
+        
+        # Insert a session that has been inactive:
+        # Party was last seen 45 minutes ago
+        past_time = "2020-01-01T00:00:00"
+        db_conn.execute(
+            "UPDATE parties SET last_seen = ? WHERE id = ?",
+            (past_time, sample_party)
+        )
+        db_conn.execute(
+            "INSERT INTO sessions (id, party_id, started_at, ended_at) VALUES (?, ?, ?, NULL)",
+            (session_id, sample_party, past_time)
+        )
+        db_conn.commit()
+
+        # Run maintenance
+        run_background_maintenance()
+
+        # Verify session has been closed with ended_at set to the party's last_seen (past_time)
+        row = db_conn.execute("SELECT ended_at FROM sessions WHERE id = ?", (session_id,)).fetchone()
+        assert row['ended_at'] == past_time
