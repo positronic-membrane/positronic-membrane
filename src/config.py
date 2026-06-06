@@ -32,6 +32,9 @@ T_ACTIVE = int(os.getenv("T_ACTIVE", "1"))  # Default 1 minute
 BOREDOM_THRESHOLD = int(os.getenv("BOREDOM_THRESHOLD", "5"))
 N_LOOP_LIMIT = int(os.getenv("N_LOOP_LIMIT", "5"))
 
+# Sandbox execution configs
+SANDBOX_TEST_TIMEOUT = int(os.getenv("SANDBOX_TEST_TIMEOUT", "60"))
+
 # OpenRouter Configuration
 OPENROUTER_BASE_URL = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")

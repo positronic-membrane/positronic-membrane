@@ -116,6 +116,31 @@ def test_run_sandbox_tests(mock_save, mock_run, mock_get_session, tmp_path):
 
 @patch("src.sandbox_session.get_sandbox_session")
 @patch("src.sandbox_session.subprocess.run")
+@patch("src.sandbox_session.save_sandbox_session")
+def test_run_sandbox_tests_timeout(mock_save, mock_run, mock_get_session, tmp_path):
+    """Verify run_sandbox_tests handles subprocess.TimeoutExpired correctly."""
+    sandbox_path = tmp_path / "sandbox_folder"
+    sandbox_path.mkdir()
+    
+    mock_get_session.return_value = {
+        "active_sandbox_path": str(sandbox_path),
+        "active_sandbox_branch": "janus/sandbox-feat",
+        "active_sandbox_status": "active"
+    }
+    
+    import subprocess
+    mock_run.side_effect = subprocess.TimeoutExpired(cmd=["pytest"], timeout=src.config.SANDBOX_TEST_TIMEOUT)
+    
+    passed, logs = run_sandbox_tests()
+    
+    assert passed is False
+    assert f"timed out after {src.config.SANDBOX_TEST_TIMEOUT} seconds" in logs
+    
+    # Verify DB was updated to "failed" with timeout logs
+    mock_save.assert_called_once_with(str(sandbox_path), "janus/sandbox-feat", "failed", test_logs=logs)
+
+@patch("src.sandbox_session.get_sandbox_session")
+@patch("src.sandbox_session.subprocess.run")
 def test_get_sandbox_diff(mock_run, mock_get_session):
     """Verify get_sandbox_diff runs git add and diff."""
     mock_get_session.return_value = {

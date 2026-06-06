@@ -143,13 +143,13 @@ def run_sandbox_tests() -> tuple:
             env=env,
             capture_output=True,
             text=True,
-            timeout=30
+            timeout=src.config.SANDBOX_TEST_TIMEOUT
         )
         passed = (res.returncode == 0)
         logs = res.stdout + "\n" + res.stderr
     except subprocess.TimeoutExpired:
         passed = False
-        logs = "Error: Test run timed out after 30 seconds."
+        logs = f"Error: Test run timed out after {src.config.SANDBOX_TEST_TIMEOUT} seconds."
     except Exception as e:
         passed = False
         logs = f"Error executing tests: {e}"
