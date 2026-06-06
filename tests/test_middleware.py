@@ -74,3 +74,46 @@ def test_action_boundary_violations():
     # Allow safe actions
     assert validate_action("Scan src/main.py for configuration files")
     assert validate_action("Index the documentation in docs/manifesto.md")
+
+def test_loop_safety_valve():
+    """Verify that the Loop Safety Valve triggers when limit is exceeded."""
+    from src.middleware import check_loop_safety
+    from src.database import get_connection
+    
+    conn = get_connection(read_only_constitution=True)
+    cursor = conn.cursor()
+    
+    # 1. Loop counter (3) <= Loop limit (5) -> Should not raise exception
+    cursor.execute("UPDATE system_config SET config_value = '3' WHERE config_key = 'consecutive_background_loops';")
+    cursor.execute("UPDATE system_config SET config_value = '5' WHERE config_key = 'n_loop_limit';")
+    conn.commit()
+    conn.close()
+    
+    # Should not raise exception
+    check_loop_safety()
+    
+    # 2. Loop counter (6) > Loop limit (5) -> Should raise SafetyViolationError
+    conn = get_connection(read_only_constitution=True)
+    cursor = conn.cursor()
+    cursor.execute("UPDATE system_config SET config_value = '6' WHERE config_key = 'consecutive_background_loops';")
+    conn.commit()
+    conn.close()
+    
+    with pytest.raises(SafetyViolationError) as exc_info:
+        check_loop_safety()
+    assert "consecutive background loops" in str(exc_info.value)
+
+def test_set_system_config_value_safety():
+    """Verify that writing non-agent-modifiable configurations is blocked via set_system_config_value."""
+    from src.database import set_system_config_value
+    
+    # Allow agent to write agent-modifiable keys
+    set_system_config_value("boredom_threshold", "10", is_agent=True)
+    
+    # Block agent writing locked keys
+    with pytest.raises(SafetyViolationError):
+        set_system_config_value("setup_complete", "1", is_agent=True)
+        
+    # Allow system (is_agent=False) to write locked keys
+    set_system_config_value("setup_complete", "1", is_agent=False)
+

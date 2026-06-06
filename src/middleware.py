@@ -85,3 +85,30 @@ def validate_action(proposed_action: str) -> bool:
                     
     logger.info("Middleware validation passed.")
     return True
+
+def check_loop_safety():
+    """
+    Enforces the Loop Safety Valve.
+    Reads consecutive_background_loops and n_loop_limit from SQLite.
+    If consecutive_background_loops > n_loop_limit, raises SafetyViolationError.
+    """
+    conn = get_connection(read_only_constitution=True)
+    cursor = conn.cursor()
+    
+    # Read loop counter
+    cursor.execute("SELECT config_value FROM system_config WHERE config_key = 'consecutive_background_loops';")
+    row = cursor.fetchone()
+    counter = int(row[0]) if row else 0
+    
+    # Read loop limit
+    cursor.execute("SELECT config_value FROM system_config WHERE config_key = 'n_loop_limit';")
+    row_limit = cursor.fetchone()
+    limit = int(row_limit[0]) if row_limit else 5
+    
+    conn.close()
+    
+    if counter > limit:
+        raise SafetyViolationError(
+            f"Loop Safety Valve triggered: consecutive background loops ({counter}) exceeded limit ({limit})."
+        )
+

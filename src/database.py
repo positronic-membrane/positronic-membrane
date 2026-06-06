@@ -149,7 +149,8 @@ def init_db():
     default_configs = [
         ("setup_complete", "0", 0),  # Strictly human-only modifiable
         ("boredom_threshold", "5", 1),
-        ("n_loop_limit", "5", 0)
+        ("n_loop_limit", "5", 0),
+        ("consecutive_background_loops", "0", 0)
     ]
     for key, value, modifiable in default_configs:
         cursor.execute("""
@@ -590,6 +591,69 @@ def delete_agent_rule(rule_key: str):
     cursor.execute("DELETE FROM agent_rules WHERE rule_key = ?;", (rule_key,))
     conn.commit()
     conn.close()
+
+def get_consecutive_background_loops() -> int:
+    """Retrieves the current consecutive_background_loops config value."""
+    conn = get_connection(read_only_constitution=True)
+    cursor = conn.cursor()
+    cursor.execute("SELECT config_value FROM system_config WHERE config_key = 'consecutive_background_loops';")
+    row = cursor.fetchone()
+    conn.close()
+    return int(row[0]) if row else 0
+
+def increment_consecutive_background_loops() -> int:
+    """Increments the consecutive_background_loops counter by 1 and returns the new value."""
+    conn = get_connection(read_only_constitution=True)
+    cursor = conn.cursor()
+    cursor.execute("""
+    UPDATE system_config 
+    SET config_value = CAST(CAST(config_value AS INTEGER) + 1 AS TEXT), updated_at = CURRENT_TIMESTAMP
+    WHERE config_key = 'consecutive_background_loops';
+    """)
+    conn.commit()
+    
+    # Retrieve the new value
+    cursor.execute("SELECT config_value FROM system_config WHERE config_key = 'consecutive_background_loops';")
+    row = cursor.fetchone()
+    conn.close()
+    return int(row[0]) if row else 0
+
+def reset_consecutive_background_loops():
+    """Resets the consecutive_background_loops counter to 0."""
+    conn = get_connection(read_only_constitution=True)
+    cursor = conn.cursor()
+    cursor.execute("""
+    UPDATE system_config 
+    SET config_value = '0', updated_at = CURRENT_TIMESTAMP 
+    WHERE config_key = 'consecutive_background_loops';
+    """)
+    conn.commit()
+    conn.close()
+
+def set_system_config_value(key: str, value: str, is_agent: bool = True):
+    """
+    Sets a config value in system_config.
+    If is_agent is True, checks validate_config_write(key) first.
+    """
+    if is_agent:
+        from src.middleware import validate_config_write
+        validate_config_write(key)
+        
+    conn = get_connection(read_only_constitution=True)
+    cursor = conn.cursor()
+    
+    # Check if key exists to keep its is_agent_modifiable status
+    cursor.execute("SELECT is_agent_modifiable FROM system_config WHERE config_key = ?;", (key,))
+    row = cursor.fetchone()
+    modifiable = row[0] if row is not None else 1
+    
+    cursor.execute("""
+    INSERT OR REPLACE INTO system_config (config_key, config_value, is_agent_modifiable, updated_at)
+    VALUES (?, ?, ?, CURRENT_TIMESTAMP);
+    """, (key, value, modifiable))
+    conn.commit()
+    conn.close()
+
 
 
 

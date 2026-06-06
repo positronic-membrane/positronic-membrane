@@ -6,7 +6,7 @@ import logging
 from pathlib import Path
 import src.config
 from src.llm import query_agent
-from src.middleware import validate_action, SafetyViolationError
+from src.middleware import validate_action, SafetyViolationError, check_loop_safety
 from src.memory import add_memory, query_memories
 from src.database import (
     increment_boredom,
@@ -17,7 +17,10 @@ from src.database import (
     get_recent_episodic_memories,
     get_constitution,
     get_curiosity_vector,
-    update_curiosity_vector
+    update_curiosity_vector,
+    get_consecutive_background_loops,
+    increment_consecutive_background_loops,
+    reset_consecutive_background_loops
 )
 
 # Setup logging
@@ -130,7 +133,7 @@ async def run_heartbeat_loop():
     and triggering automated LLM swarm deliberations under safe boundaries.
     """
     logger.info("Initializing Janus Heartbeat Loop...")
-    consecutive_background_loops = 0
+    reset_consecutive_background_loops()
     
     # Base configuration values
     idle_sleep_seconds = src.config.T_IDLE * 60
@@ -181,7 +184,7 @@ async def run_heartbeat_loop():
             
             if user_active:
                 # Reset consecutive background loop counter since human is present
-                consecutive_background_loops = 0
+                reset_consecutive_background_loops()
                 sleep_duration = active_sleep_seconds
                 logger.info(f"User active. Heartbeat sleeping for {src.config.T_ACTIVE}m (active pacing).")
             else:
@@ -201,26 +204,30 @@ async def run_heartbeat_loop():
                 logger.error(f"Failed to run background maintenance: {e}")
 
             if not user_active:
-                consecutive_background_loops += 1
-                logger.info(f"Background Loop Count: {consecutive_background_loops}/{src.config.N_LOOP_LIMIT}")
+                increment_consecutive_background_loops()
+                loop_count = get_consecutive_background_loops()
+                logger.info(f"Background Loop Count: {loop_count}/{src.config.N_LOOP_LIMIT}")
 
             # Enforce Loop Safety Valve
-            if not user_active and consecutive_background_loops > src.config.N_LOOP_LIMIT:
-                logger.warning(
-                    f"Loop Safety Valve triggered! Exceeded {src.config.N_LOOP_LIMIT} background loops "
-                    "without human interaction. Automations halted until human presence is detected."
-                )
-                log_episodic_memory(
-                    speaker="system",
-                    message_content="Loop Safety Valve triggered. Pausing background automations.",
-                    context_type="background_thought"
-                )
-                # Sleep in short bursts waiting for user presence
-                while not detect_user_presence(src.config.ROOT_DIR, max_age_seconds=60):
-                    await asyncio.sleep(1 if os.getenv("JANUS_TEST_MODE") == "1" else 15)
-                logger.info("User presence detected. Loop safety valve reset.")
-                consecutive_background_loops = 0
-                continue
+            if not user_active:
+                try:
+                    check_loop_safety()
+                except SafetyViolationError as sve:
+                    logger.warning(
+                        f"Loop Safety Valve triggered! {sve} "
+                        "Automations halted until human presence is detected."
+                    )
+                    log_episodic_memory(
+                        speaker="system",
+                        message_content=f"Loop Safety Valve triggered: {sve} Pausing background automations.",
+                        context_type="background_thought"
+                    )
+                    # Sleep in short bursts waiting for user presence
+                    while not detect_user_presence(src.config.ROOT_DIR, max_age_seconds=60):
+                        await asyncio.sleep(1 if os.getenv("JANUS_TEST_MODE") == "1" else 15)
+                    logger.info("User presence detected. Loop safety valve reset.")
+                    reset_consecutive_background_loops()
+                    continue
 
             # Increment Boredom
             b = increment_boredom()
