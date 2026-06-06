@@ -349,16 +349,25 @@ def log_deliberation(proposed_action: str, debate_json: dict, critic_decision: i
     conn.commit()
     conn.close()
 
-def get_recent_episodic_memories(limit: int = 10) -> list:
+def get_recent_episodic_memories(limit: int = 10, context_type: str = None) -> list:
     """Retrieves the most recent episodic memories."""
     conn = get_connection(read_only_constitution=True)
     cursor = conn.cursor()
-    cursor.execute("""
-    SELECT speaker, message_content, timestamp 
-    FROM episodic_memory 
-    ORDER BY id DESC 
-    LIMIT ?;
-    """, (limit,))
+    if context_type:
+        cursor.execute("""
+        SELECT speaker, message_content, timestamp 
+        FROM episodic_memory 
+        WHERE context_type = ?
+        ORDER BY id DESC 
+        LIMIT ?;
+        """, (context_type, limit))
+    else:
+        cursor.execute("""
+        SELECT speaker, message_content, timestamp 
+        FROM episodic_memory 
+        ORDER BY id DESC 
+        LIMIT ?;
+        """, (limit,))
     rows = cursor.fetchall()
     conn.close()
     return rows

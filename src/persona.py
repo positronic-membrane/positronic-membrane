@@ -384,6 +384,135 @@ def generate_persona_response(user_query: str) -> str:
         logger.error(f"Failed to generate persona response: {e}")
         raise
 
+def execute_chat_sandbox_commands(block: str) -> str:
+    """
+    Parses and executes commands inside a ```sandbox ``` block.
+    Supported commands:
+      - read <path> or read: <path>
+      - test or run_tests or run-tests
+      - diff
+    """
+    from src.config import get_effective_workspace_root
+    from src.sandbox_session import run_sandbox_tests, get_sandbox_diff
+    
+    workspace_root = get_effective_workspace_root()
+    results = []
+    
+    for line in block.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+            
+        read_match = re.match(r"^read(?:\s*:\s*|\s+)(.*)$", line, re.IGNORECASE)
+        if read_match:
+            rel_path = read_match.group(1).strip().rstrip(".,;!?`\"'")
+            try:
+                # Ensure path is clean and resolved within the effective workspace root
+                full_path = (workspace_root / rel_path).resolve()
+                if not str(full_path).startswith(str(workspace_root.resolve())):
+                    results.append(f"- read {rel_path}: Access denied (outside workspace).")
+                    continue
+                
+                if full_path.exists() and full_path.is_file():
+                    with open(full_path, "r", encoding="utf-8", errors="ignore") as f:
+                        content = f.read()
+                    results.append(f"- read {rel_path}:\n```\n{content}\n```")
+                else:
+                    results.append(f"- read {rel_path}: File not found.")
+            except Exception as e:
+                results.append(f"- read {rel_path}: Error reading file: {e}")
+                
+        elif line.lower() in ("test", "run_tests", "run-tests"):
+            try:
+                passed, logs = run_sandbox_tests()
+                status = "PASSED" if passed else "FAILED"
+                results.append(f"- test: {status}\nLogs:\n{logs}")
+            except Exception as e:
+                results.append(f"- test: Error running tests: {e}")
+                
+        elif line.lower() == "diff":
+            try:
+                diff = get_sandbox_diff()
+                results.append(f"- diff:\n```diff\n{diff}\n```")
+            except Exception as e:
+                results.append(f"- diff: Error getting diff: {e}")
+                
+        else:
+            results.append(f"- {line}: Unknown sandbox command.")
+            
+    return "\n".join(results)
+
+def generate_persona_response_autonomous(user_msg: str) -> str:
+    """
+    Autonomous ReAct loop for Persona chat. Resolves sandbox command blocks
+    by executing them, logging to episodic memory, and re-querying the Persona
+    up to 5 turns.
+    """
+    from src.sandbox_session import get_active_sandbox
+    active_sb = get_active_sandbox()
+    if not active_sb:
+        # No active sandbox, just generate normal response
+        return generate_persona_response(user_msg)
+        
+    current_query = user_msg
+    max_turns = 5
+    turn = 0
+    final_response = ""
+    
+    while turn < max_turns:
+        turn += 1
+        logger.info(f"Autonomous loop turn {turn}/{max_turns} for query: {current_query[:50]}")
+        
+        # 1. Generate Persona response
+        response = generate_persona_response(current_query)
+        final_response = response
+        
+        # 2. Check for proposed code modifications
+        proposed_mods = parse_proposed_changes(response)
+        if proposed_mods:
+            print(f"\n[Janus Daemon] Extracted proposed modifications for {len(proposed_mods)} file(s).")
+            print("Applying changes to sandbox...")
+            from src.sandbox_session import apply_changes_to_sandbox, run_sandbox_tests
+            apply_changes_to_sandbox(proposed_mods)
+            print("Executing unit tests in sandbox...")
+            passed, logs = run_sandbox_tests()
+            test_status = "PASSED" if passed else "FAILED"
+            print(f"[Janus Daemon] Sandbox unit tests: {test_status}")
+            
+            # Run tests automatically so the Persona receives feedback
+            log_episodic_memory(
+                speaker="sandbox_automation",
+                message_content=f"Auto-applied modifications to {list(proposed_mods.keys())}. Sandbox tests: {test_status}.\nLogs/Errors:\n{logs}",
+                context_type="background_thought"
+            )
+            
+        # 3. Check for sandbox command blocks (```sandbox ... ```)
+        sandbox_blocks = re.findall(r"```sandbox\s*\n(.*?)\n```", response, re.DOTALL)
+        if not sandbox_blocks:
+            # No sandbox commands to execute, return the response
+            break
+            
+        print(f"\n[Janus Daemon] Found {len(sandbox_blocks)} sandbox command block(s). Executing...")
+        # Execute sandbox commands
+        execution_results = []
+        for block in sandbox_blocks:
+            res = execute_chat_sandbox_commands(block)
+            execution_results.append(res)
+            
+        execution_summary = "\n\n".join(execution_results)
+        
+        # 4. Log execution results to SQLite as a background thought
+        log_episodic_memory(
+            speaker="sandbox_automation",
+            message_content=f"[Sandbox Commands Executed]\n{execution_summary}",
+            context_type="background_thought"
+        )
+        
+        # 5. Formulate next turn query to continue conversation
+        current_query = "Executed requested sandbox actions. Please review the background thought history and continue."
+        
+    return final_response
+
 def get_input(prompt: str) -> str:
     """Blocking console read, executed within event loop threadpool executor."""
     try:
@@ -1230,62 +1359,12 @@ async def run_persona_chat():
             if detect_metacognitive_intent(user_msg):
                 response = generate_metacognitive_narrative(user_msg)
             else:
-                response = generate_persona_response(user_msg)
+                response = await asyncio.to_thread(generate_persona_response_autonomous, user_msg)
 
             print(f"\nJanus >> {response}\n")
 
             # Log persona response to SQLite
             log_episodic_memory("persona", response, "user_visible")
-
-            # Check if there is an active sandbox session. If so, parse and apply changes in the background!
-            from src.sandbox_session import get_active_sandbox, apply_changes_to_sandbox, run_sandbox_tests
-            active_sb = get_active_sandbox()
-            if active_sb:
-                async def parse_and_apply_to_sandbox_async(msg_content):
-                    try:
-                        proposed = await asyncio.to_thread(parse_proposed_changes, msg_content)
-                        if proposed:
-                            print(f"\n[Janus Daemon] Extracted proposed modifications for {len(proposed)} file(s).")
-                            print("Applying changes to sandbox in background...")
-                            apply_changes_to_sandbox(proposed)
-                            print("[Janus Daemon] Sandbox files updated. Executing unit tests in sandbox...")
-                            passed, logs = await asyncio.to_thread(run_sandbox_tests)
-                            status_str = "PASSED" if passed else "FAILED"
-                            print(f"\n[Janus Daemon] Sandbox unit tests: {status_str}")
-                            
-                            # Log success or failure back to Janus as sandbox automation
-                            if passed:
-                                log_episodic_memory(
-                                    "sandbox_automation",
-                                    f"Sandbox testing completed successfully for branch '{active_sb['active_sandbox_branch']}'. All tests passed.",
-                                    "user_visible"
-                                )
-                            else:
-                                log_episodic_memory(
-                                    "sandbox_automation",
-                                    f"Sandbox testing FAILED for branch '{active_sb['active_sandbox_branch']}'. Errors/Logs:\n{logs}",
-                                    "user_visible"
-                                )
-                                
-                            if not passed:
-                                print("  (Tip: Run '/sandbox status' or '/sandbox ship' to view test failure logs)")
-                        else:
-                            has_path_mentions = bool(re.findall(
-                                r"\b((?:src|tests)/[a-zA-Z0-9_/.-]+|[a-zA-Z0-9_/.-]+\.md|[a-zA-Z0-9_/.-]+\.json|requirements\.txt)\b",
-                                msg_content
-                            ))
-                            has_code_blocks = "```" in msg_content
-                            if has_path_mentions and has_code_blocks:
-                                log_episodic_memory(
-                                    "sandbox_automation",
-                                    "[Warning] Found code blocks and file paths in response, but failed to auto-extract changes. "
-                                    "Ensure files are prefixed with 'Path: <relative_path>' or 'File: <relative_path>' immediately above their code blocks.",
-                                    "user_visible"
-                                )
-                    except Exception as e:
-                        logger.error(f"Error auto-applying to sandbox: {e}")
-                
-                asyncio.create_task(parse_and_apply_to_sandbox_async(response))
 
         except asyncio.CancelledError:
             break

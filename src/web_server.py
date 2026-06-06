@@ -16,7 +16,8 @@ from src.database import (
 from src.persona import (
     detect_metacognitive_intent,
     generate_persona_response,
-    generate_metacognitive_narrative
+    generate_metacognitive_narrative,
+    generate_persona_response_autonomous
 )
 from src.memory_orchestrator import MemoryOrchestrator
 from src.role_bootstrap import RoleBootstrap
@@ -184,7 +185,7 @@ class JanusRequestHandler(BaseHTTPRequestHandler):
     def handle_get_history(self):
         try:
             # Fetch last 50 user-persona memories
-            rows = get_recent_episodic_memories(limit=50)
+            rows = get_recent_episodic_memories(limit=50, context_type="user_visible")
             history = []
             # Rows are returned order by id DESC, so reverse them for chronological history
             for speaker, msg, ts in reversed(rows):
@@ -672,13 +673,10 @@ class JanusRequestHandler(BaseHTTPRequestHandler):
             elif detect_metacognitive_intent(user_msg):
                 response = generate_metacognitive_narrative(user_msg)
             else:
-                response = generate_persona_response(user_msg)
+                response = generate_persona_response_autonomous(user_msg)
 
             # 3. Log persona response to SQLite
             log_episodic_memory("persona", response, "user_visible")
-
-            # Check and apply sandbox changes in a background thread (same as CLI mode)
-            self.process_sandbox_updates(response)
 
             response_data = json.dumps({"response": response}).encode("utf-8")
             self.send_json_response(200, response_data)
