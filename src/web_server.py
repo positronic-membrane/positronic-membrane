@@ -2,6 +2,10 @@ import os
 import json
 import logging
 import urllib.parse
+import re
+import uuid
+import sqlite3
+from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from src.database import (
@@ -14,6 +18,41 @@ from src.persona import (
     generate_persona_response,
     generate_metacognitive_narrative
 )
+from src.memory_orchestrator import MemoryOrchestrator
+from src.role_bootstrap import RoleBootstrap
+
+# Role hierarchy for access control
+ROLE_HIERARCHY = {
+    'observer': 0,
+    'user': 1,
+    'contributor': 2,
+    'admin': 3
+}
+
+memory_orch = MemoryOrchestrator()
+bootstrap = RoleBootstrap()
+
+def get_party_from_request(headers):
+    """Extract party identity from request headers."""
+    return headers.get('X-Party-ID', None)
+
+
+def check_role(party_id, minimum_role):
+    """Check if a party has at least the minimum role. Returns (ok: bool, role: str or None)."""
+    if not party_id:
+        return False, None
+    conn = get_connection()
+    conn.row_factory = sqlite3.Row
+    try:
+        row = conn.execute('SELECT role FROM parties WHERE id = ?', (party_id,)).fetchone()
+        if not row:
+            return False, None
+        role = row['role']
+        if ROLE_HIERARCHY.get(role, -1) >= ROLE_HIERARCHY.get(minimum_role, 0):
+            return True, role
+        return False, role
+    finally:
+        conn.close()
 
 logger = logging.getLogger("JanusWebServer")
 
@@ -25,9 +64,23 @@ class JanusRequestHandler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         logger.debug(format % args)
 
+    def do_OPTIONS(self):
+        """Handle CORS preflight requests."""
+        self.send_response(200)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, X-Party-ID")
+        self.end_headers()
+
     def do_GET(self):
         parsed_url = urllib.parse.urlparse(self.path)
         path = parsed_url.path
+
+        # API: Multi-party GET endpoints
+        if path.startswith("/api/v1/"):
+            params = urllib.parse.parse_qs(parsed_url.query)
+            self._handle_api_get(path, params)
+            return
 
         # API: Get conversation history
         if path == "/api/history":
@@ -55,6 +108,11 @@ class JanusRequestHandler(BaseHTTPRequestHandler):
         parsed_url = urllib.parse.urlparse(self.path)
         path = parsed_url.path
 
+        # API: Multi-party POST endpoints
+        if path.startswith("/api/v1/"):
+            self._handle_api_post(path)
+            return
+
         # API: Send message to persona
         if path == "/api/chat":
             self.handle_post_chat()
@@ -68,6 +126,14 @@ class JanusRequestHandler(BaseHTTPRequestHandler):
             self.handle_post_registry_update()
         elif path == "/api/registry/rules/update":
             self.handle_post_registry_rules_update()
+        else:
+            self.send_error(404, "Endpoint not found")
+
+    def do_PUT(self):
+        parsed_url = urllib.parse.urlparse(self.path)
+        path = parsed_url.path
+        if path.startswith("/api/v1/"):
+            self._handle_api_put(path)
         else:
             self.send_error(404, "Endpoint not found")
 
@@ -676,6 +742,312 @@ class JanusRequestHandler(BaseHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Origin", "*")
         self.end_headers()
         self.write_body(binary_data)
+
+    def _send_json(self, status_code, data):
+        binary_data = json.dumps(data).encode("utf-8")
+        self.send_json_response(status_code, binary_data)
+
+    def _handle_api_get(self, path, params):
+        party_id = get_party_from_request(self.headers)
+
+        # Bootstrap status (no auth required)
+        if path == "/api/v1/bootstrap/status":
+            self._send_json(200, bootstrap.check_web_ui_bootstrap())
+            return
+
+        # GET /api/v1/party/{id}
+        match = re.match(r"^/api/v1/party/([^/]+)$", path)
+        if match:
+            target_party_id = match.group(1)
+            ok, _ = check_role(party_id, 'user')
+            if not ok:
+                self._send_json(401, {"error": "Unauthorized or missing party identification"})
+                return
+            conn = get_connection()
+            conn.row_factory = sqlite3.Row
+            try:
+                row = conn.execute(
+                    'SELECT id, name, role, created_at FROM parties WHERE id = ?',
+                    (target_party_id,)
+                ).fetchone()
+                if not row:
+                    self._send_json(404, {"error": "Party not found"})
+                    return
+                self._send_json(200, dict(row))
+            finally:
+                conn.close()
+            return
+
+        # GET /api/v1/memory/{key}
+        match = re.match(r"^/api/v1/memory/([^/]+)$", path)
+        if match:
+            key = match.group(1)
+            ok, _ = check_role(party_id, 'user')
+            if not ok:
+                self._send_json(401, {"error": "Unauthorized"})
+                return
+            namespace = params.get('namespace', ['global'])[0]
+            value = memory_orch.get_memory(party_id, key, namespace)
+            if value is None:
+                self._send_json(404, {"error": "Memory not found"})
+                return
+            self._send_json(200, {"key": key, "value": value, "namespace": namespace})
+            return
+
+        # GET /api/v1/feedback/aggregate
+        if path == "/api/v1/feedback/aggregate":
+            ok, _ = check_role(party_id, 'user')
+            if not ok:
+                self._send_json(401, {"error": "Unauthorized"})
+                return
+            feature = params.get('feature', [None])[0]
+            conn = get_connection()
+            conn.row_factory = sqlite3.Row
+            try:
+                if feature:
+                    rows = conn.execute(
+                        'SELECT * FROM feedback_aggregates WHERE feature = ?', (feature,)
+                    ).fetchall()
+                else:
+                    rows = conn.execute('SELECT * FROM feedback_aggregates').fetchall()
+                self._send_json(200, [dict(r) for r in rows])
+            finally:
+                conn.close()
+            return
+
+        self._send_json(404, {"error": "Not found"})
+
+    def _handle_api_post(self, path):
+        party_id = get_party_from_request(self.headers)
+        
+        try:
+            content_length = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(content_length) if content_length > 0 else b""
+            data = json.loads(body.decode("utf-8")) if body else {}
+        except Exception as e:
+            self._send_json(400, {"error": f"Invalid JSON body: {e}"})
+            return
+
+        # POST /api/v1/party/register (admin only)
+        if path == "/api/v1/party/register":
+            ok, role = check_role(party_id, 'admin')
+            if not ok:
+                self._send_json(403, {"error": "Insufficient permissions"})
+                return
+            if 'name' not in data:
+                self._send_json(400, {"error": "Party name is required"})
+                return
+            name = data['name']
+            role = data.get('role', 'user')
+            if role not in ('user', 'contributor', 'admin', 'observer'):
+                self._send_json(400, {"error": f"Invalid role: {role}"})
+                return
+            new_party_id = str(uuid.uuid4())
+            now = datetime.utcnow().isoformat()
+            public_key = data.get('public_key')
+            conn = get_connection()
+            try:
+                conn.execute(
+                    'INSERT INTO parties (id, name, role, created_at, public_key) VALUES (?, ?, ?, ?, ?)',
+                    (new_party_id, name, role, now, public_key)
+                )
+                conn.commit()
+                self._send_json(201, {"party_id": new_party_id, "name": name, "role": role})
+            except Exception as e:
+                self._send_json(400, {"error": f"Failed to create party: {str(e)}"})
+            finally:
+                conn.close()
+            return
+
+        # POST /api/v1/memory
+        if path == "/api/v1/memory":
+            ok, _ = check_role(party_id, 'user')
+            if not ok:
+                self._send_json(401, {"error": "Unauthorized"})
+                return
+            if 'key' not in data:
+                self._send_json(400, {"error": "Memory key is required"})
+                return
+            key = data['key']
+            value = data.get('value')
+            namespace = data.get('namespace', 'global')
+            mem_id = memory_orch.set_memory(party_id, key, value, namespace)
+            self._send_json(201, {"memory_id": mem_id})
+            return
+
+        # POST /api/v1/modification
+        if path == "/api/v1/modification":
+            ok, _ = check_role(party_id, 'contributor')
+            if not ok:
+                self._send_json(403, {"error": "Insufficient permissions (contributor or admin required)"})
+                return
+            if 'feature' not in data or 'diff' not in data:
+                self._send_json(400, {"error": "Feature and diff are required"})
+                return
+            mod_id = str(uuid.uuid4())
+            now = datetime.utcnow().isoformat()
+            change_type = data.get('change_type', 'modify')
+            change_resource = data.get('change_resource', 'code')
+            status = 'pending_self_review' if change_type in ('self_source', 'self_config') else 'pending'
+            conn = get_connection()
+            try:
+                conn.execute(
+                    'INSERT INTO modifications (id, initiated_by, feature, change_type, change_resource, diff, status, created_at) '
+                    'VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+                    (mod_id, party_id, data['feature'], change_type, change_resource, data['diff'], status, now)
+                )
+                conn.commit()
+                self._send_json(201, {"modification_id": mod_id, "status": status})
+            except Exception as e:
+                self._send_json(400, {"error": f"Failed to create modification: {str(e)}"})
+            finally:
+                conn.close()
+            return
+
+        self._send_json(404, {"error": "Not found"})
+
+    def _handle_api_put(self, path):
+        party_id = get_party_from_request(self.headers)
+        
+        try:
+            content_length = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(content_length) if content_length > 0 else b""
+            data = json.loads(body.decode("utf-8")) if body else {}
+        except Exception as e:
+            self._send_json(400, {"error": f"Invalid JSON body: {e}"})
+            return
+
+        # PUT /api/v1/party/{id}/role (admin only)
+        match = re.match(r"^/api/v1/party/([^/]+)/role$", path)
+        if match:
+            target_party_id = match.group(1)
+            ok, _ = check_role(party_id, 'admin')
+            if not ok:
+                self._send_json(403, {"error": "Insufficient permissions (admin required)"})
+                return
+            if 'role' not in data:
+                self._send_json(400, {"error": "Role is required"})
+                return
+            new_role = data['role']
+            if new_role not in ('user', 'contributor', 'admin', 'observer'):
+                self._send_json(400, {"error": f"Invalid role: {new_role}"})
+                return
+            conn = get_connection()
+            try:
+                conn.execute('UPDATE parties SET role = ? WHERE id = ?', (new_role, target_party_id))
+                conn.commit()
+                self._send_json(200, {"message": f"Party {target_party_id} role updated to {new_role}"})
+            finally:
+                conn.close()
+            return
+
+        # PUT /api/v1/modification/{id}/approve (admin only)
+        match = re.match(r"^/api/v1/modification/([^/]+)/approve$", path)
+        if match:
+            mod_id = match.group(1)
+            ok, _ = check_role(party_id, 'admin')
+            if not ok:
+                self._send_json(403, {"error": "Insufficient permissions (admin required)"})
+                return
+            now = datetime.utcnow().isoformat()
+            conn = get_connection()
+            conn.row_factory = sqlite3.Row
+            try:
+                mod = conn.execute(
+                    'SELECT status, change_type FROM modifications WHERE id = ?', (mod_id,)
+                ).fetchone()
+                if not mod:
+                    self._send_json(404, {"error": "Modification not found"})
+                    return
+                if mod['change_type'] in ('self_source', 'self_config') and mod['status'] == 'pending_self_review':
+                    self._send_json(400, {
+                        "error": "Self-modification requires Critic deliberation. "
+                                 "Please complete autonomous auditing before approval.",
+                        "status": "pending_self_review"
+                    })
+                    return
+                if mod['status'] not in ('pending', 'pending_self_review'):
+                    self._send_json(400, {"error": f"Cannot approve modification in status: {mod['status']}"})
+                    return
+                conn.execute(
+                    'UPDATE modifications SET status = ?, approved_by = ?, approved_at = ? WHERE id = ?',
+                    ('approved', party_id, now, mod_id)
+                )
+                conn.commit()
+                self._send_json(200, {"modification_id": mod_id, "status": "approved"})
+            finally:
+                conn.close()
+            return
+
+        # PUT /api/v1/modification/{id}/deploy (admin only)
+        match = re.match(r"^/api/v1/modification/([^/]+)/deploy$", path)
+        if match:
+            mod_id = match.group(1)
+            ok, _ = check_role(party_id, 'admin')
+            if not ok:
+                self._send_json(403, {"error": "Insufficient permissions (admin required)"})
+                return
+            now = datetime.utcnow().isoformat()
+            conn = get_connection()
+            conn.row_factory = sqlite3.Row
+            try:
+                mod = conn.execute(
+                    'SELECT status FROM modifications WHERE id = ?', (mod_id,)
+                ).fetchone()
+                if not mod:
+                    self._send_json(404, {"error": "Modification not found"})
+                    return
+                if mod['status'] != 'approved':
+                    self._send_json(400, {"error": f"Cannot deploy modification in status: {mod['status']}"})
+                    return
+                conn.execute(
+                    'UPDATE modifications SET status = ?, deployed_at = ? WHERE id = ?',
+                    ('deployed', now, mod_id)
+                )
+                conn.commit()
+                self._send_json(200, {"modification_id": mod_id, "status": "deployed"})
+            finally:
+                conn.close()
+            return
+
+        # PUT /api/v1/modification/{id}/rollback (admin only)
+        match = re.match(r"^/api/v1/modification/([^/]+)/rollback$", path)
+        if match:
+            mod_id = match.group(1)
+            ok, _ = check_role(party_id, 'admin')
+            if not ok:
+                self._send_json(403, {"error": "Insufficient permissions (admin required)"})
+                return
+            now = datetime.utcnow().isoformat()
+            conn = get_connection()
+            conn.row_factory = sqlite3.Row
+            try:
+                mod = conn.execute(
+                    'SELECT status, diff, change_resource FROM modifications WHERE id = ?', (mod_id,)
+                ).fetchone()
+                if not mod:
+                    self._send_json(404, {"error": "Modification not found"})
+                    return
+                if mod['status'] != 'deployed':
+                    self._send_json(400, {"error": f"Cannot rollback modification in status: {mod['status']}"})
+                    return
+                rollback_id = str(uuid.uuid4())
+                conn.execute(
+                    'INSERT INTO modifications (id, initiated_by, feature, change_type, change_resource, diff, status, created_at) '
+                    'VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+                    (rollback_id, party_id, 'rollback', 'rollback', mod['change_resource'], mod['diff'], 'rolled_back', now)
+                )
+                conn.execute(
+                    'UPDATE modifications SET status = ?, rolled_back_at = ? WHERE id = ?',
+                    ('rolled_back', now, mod_id)
+                )
+                conn.commit()
+                self._send_json(200, {"modification_id": mod_id, "status": "rolled_back", "rollback_id": rollback_id})
+            finally:
+                conn.close()
+            return
+
+        self._send_json(404, {"error": "Not found"})
 
     def send_json_error(self, status, error_message):
         resp = json.dumps({"error": error_message}).encode("utf-8")
