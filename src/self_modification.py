@@ -15,7 +15,8 @@ def generate_diff(rel_path: str, proposed_code: str) -> str:
     Generates a unified diff comparing the current file contents
     to the proposed code modifications.
     """
-    file_path = src.config.ROOT_DIR / rel_path
+    from src.config import get_effective_workspace_root
+    file_path = get_effective_workspace_root() / rel_path
     
     if file_path.exists():
         try:
@@ -72,7 +73,8 @@ def stage_and_test(rel_path: str, proposed_code: str) -> tuple:
     
     try:
         # 2. Copy code structure
-        copy_project_structure(src.config.ROOT_DIR, temp_dir_path)
+        from src.config import get_effective_workspace_root
+        copy_project_structure(get_effective_workspace_root(), temp_dir_path)
         
         # 3. Write proposed code to target staged file
         staged_file = temp_dir_path / rel_path
@@ -125,8 +127,9 @@ def apply_staged_change(temp_dir_path: str, rel_path: str):
     """
     Copies the validated file back from the staging directory to the active workspace.
     """
+    from src.config import get_effective_workspace_root
     src_file = Path(temp_dir_path) / rel_path
-    dest_file = src.config.ROOT_DIR / rel_path
+    dest_file = get_effective_workspace_root() / rel_path
     
     logger.info(f"Applying validated staged changes: copy '{src_file}' -> '{dest_file}'")
     os.makedirs(dest_file.parent, exist_ok=True)
@@ -148,7 +151,8 @@ def stage_and_test_multi(modifications: dict) -> tuple:
     
     try:
         # 2. Copy code structure
-        copy_project_structure(src.config.ROOT_DIR, temp_dir_path)
+        from src.config import get_effective_workspace_root
+        copy_project_structure(get_effective_workspace_root(), temp_dir_path)
         
         # 3. Write proposed code for each modified file
         for rel_path, proposed_code in modifications.items():
@@ -202,8 +206,9 @@ def generate_multi_diff(modifications: dict) -> str:
     to all proposed code modifications.
     """
     diff_parts = []
+    from src.config import get_effective_workspace_root
     for rel_path, proposed_code in modifications.items():
-        file_path = src.config.ROOT_DIR / rel_path
+        file_path = get_effective_workspace_root() / rel_path
         
         if file_path.exists():
             try:
@@ -231,9 +236,10 @@ def apply_staged_multi(temp_dir_path: str, modifications: dict):
     """
     Copies the validated files back from the staging directory to the active workspace.
     """
+    from src.config import get_effective_workspace_root
     for rel_path in modifications:
         src_file = Path(temp_dir_path) / rel_path
-        dest_file = src.config.ROOT_DIR / rel_path
+        dest_file = get_effective_workspace_root() / rel_path
         
         logger.info(f"Applying validated staged changes: copy '{src_file}' -> '{dest_file}'")
         os.makedirs(dest_file.parent, exist_ok=True)

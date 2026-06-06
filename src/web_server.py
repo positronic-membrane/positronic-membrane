@@ -437,7 +437,8 @@ class JanusRequestHandler(BaseHTTPRequestHandler):
                         with open(path, "r", encoding="utf-8") as file_io:
                             proposed_mods[f] = file_io.read()
 
-                full_path = src.config.ROOT_DIR / file_path
+                from src.config import get_effective_workspace_root
+                full_path = get_effective_workspace_root() / file_path
                 current_content = ""
                 if full_path.exists():
                     with open(full_path, "r", encoding="utf-8") as file_io:
@@ -507,8 +508,9 @@ class JanusRequestHandler(BaseHTTPRequestHandler):
                 from src.database import stage_modification_in_db
                 from src.self_modification import stage_and_test_multi, generate_multi_diff
 
+                from src.config import get_effective_workspace_root
                 for test_file in failing_tests:
-                    full_path = src.config.ROOT_DIR / test_file
+                    full_path = get_effective_workspace_root() / test_file
                     current_content = ""
                     if full_path.exists():
                         with open(full_path, "r", encoding="utf-8") as file_io:

@@ -66,7 +66,7 @@ def generate_file_summary(file_path: Path) -> str:
     except Exception as e:
         return f"Failed to read file: {e}"
 
-    rel_path = file_path.relative_to(src.config.ROOT_DIR)
+    rel_path = file_path.relative_to(src.config.get_effective_workspace_root())
     
     if file_path.suffix == ".py":
         structure = parse_python_structure(content)
@@ -86,7 +86,7 @@ def index_codebase(workspace_dir: Path = None):
     and indexes them into the 'janus_codebase' ChromaDB collection.
     """
     if workspace_dir is None:
-        workspace_dir = src.config.ROOT_DIR
+        workspace_dir = src.config.get_effective_workspace_root()
         
     logger.info(f"Scanning and indexing codebase at: {workspace_dir} ...")
     

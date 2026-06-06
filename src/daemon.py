@@ -474,7 +474,8 @@ async def run_heartbeat_loop():
                                 proposed_code = re.sub(r"\s*```$", "", proposed_code, flags=re.IGNORECASE)
                                 
                                 # Path verification guardrail:
-                                full_path = Path(src.config.ROOT_DIR) / rel_path
+                                from src.config import get_effective_workspace_root
+                                full_path = get_effective_workspace_root() / rel_path
                                 if not full_path.exists() and not full_path.parent.exists():
                                     raise FileNotFoundError(
                                         f"Target file path '{rel_path}' is invalid: parent directory '{Path(rel_path).parent}' does not exist."

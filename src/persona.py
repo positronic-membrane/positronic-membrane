@@ -103,12 +103,14 @@ def parse_proposed_changes(message_content: str) -> dict:
     regex_proposed = {}
     pattern = r"(?:[Pp]ath|[Ff]ile|[Ff]ilename):\s*([a-zA-Z0-9_/.-]+)\s*\n+```[a-zA-Z0-9-]*\n(.*?)\n```"
     matches = re.findall(pattern, message_content, re.DOTALL)
+    from src.config import get_effective_workspace_root
+    workspace_root = get_effective_workspace_root()
     for path, content in matches:
         path = path.strip().rstrip(".,;!?`\"'")
         # Ensure path is relative and doesn't do directory traversal
         try:
-            full_path = src.config.ROOT_DIR / path
-            full_path.relative_to(src.config.ROOT_DIR)
+            full_path = workspace_root / path
+            full_path.relative_to(workspace_root)
             regex_proposed[path] = content.strip()
         except ValueError:
             pass
@@ -124,19 +126,21 @@ def parse_proposed_changes(message_content: str) -> dict:
     )
     
     unique_paths = set()
+    from src.config import get_effective_workspace_root
+    workspace_root = get_effective_workspace_root()
     for p in paths:
         p = p.rstrip(".,;!?`\"'")
         # Ensure path is relative and doesn't do directory traversal
         try:
-            full_path = src.config.ROOT_DIR / p
-            full_path.relative_to(src.config.ROOT_DIR)
+            full_path = workspace_root / p
+            full_path.relative_to(workspace_root)
             unique_paths.add(p)
         except ValueError:
             pass
             
     current_files = {}
     for p in unique_paths:
-        full_path = src.config.ROOT_DIR / p
+        full_path = workspace_root / p
         if full_path.is_file():
             try:
                 with open(full_path, "r", encoding="utf-8", errors="ignore") as f:
@@ -597,9 +601,11 @@ async def run_persona_chat():
                     print("\n" + "="*60)
                     print("[Janus] Proposed Modifications:")
                     print("="*60)
+                    from src.config import get_effective_workspace_root
+                    workspace_root = get_effective_workspace_root()
                     mod_files = list(proposed_mods.keys())
                     for idx, file in enumerate(mod_files, start=1):
-                        is_new = not (src.config.ROOT_DIR / file).exists()
+                        is_new = not (workspace_root / file).exists()
                         status_str = "New File" if is_new else "Modified File"
                         print(f"  {idx}. {file} ({status_str})")
                     print("="*60)
@@ -709,7 +715,8 @@ async def run_persona_chat():
                                     
                                     # Read current file contents to assist proposer
                                     from pathlib import Path
-                                    full_path = src.config.ROOT_DIR / file_path
+                                    from src.config import get_effective_workspace_root
+                                    full_path = get_effective_workspace_root() / file_path
                                     current_content = ""
                                     if full_path.exists():
                                         try:
@@ -809,7 +816,8 @@ async def run_persona_chat():
                                     heal_tasks = []
                                     for test_file in failing_tests:
                                         print(f"\n[Janus] Preparing self-healing for '{test_file}'...")
-                                        full_path = src.config.ROOT_DIR / test_file
+                                        from src.config import get_effective_workspace_root
+                                        full_path = get_effective_workspace_root() / test_file
                                         current_content = ""
                                         if full_path.exists():
                                             try:
@@ -945,7 +953,8 @@ async def run_persona_chat():
                                 
                                 # Read current file contents to assist proposer
                                 from pathlib import Path
-                                full_path = src.config.ROOT_DIR / target_file
+                                from src.config import get_effective_workspace_root
+                                full_path = get_effective_workspace_root() / target_file
                                 current_content = ""
                                 if full_path.exists():
                                     try:
@@ -1007,7 +1016,8 @@ async def run_persona_chat():
                 
                 # Fetch current file content to help Proposer generate full code
                 from pathlib import Path
-                full_path = src.config.ROOT_DIR / file_path
+                from src.config import get_effective_workspace_root
+                full_path = get_effective_workspace_root() / file_path
                 current_content = ""
                 if full_path.exists():
                     try:
@@ -1428,7 +1438,8 @@ async def handle_web_slash_command(user_msg: str) -> str:
         if vetoed_files:
             refine_tasks = []
             for file_path, reason in vetoed_files.items():
-                full_path = src.config.ROOT_DIR / file_path
+                from src.config import get_effective_workspace_root
+                full_path = get_effective_workspace_root() / file_path
                 current_content = ""
                 if full_path.exists():
                     try:
@@ -1489,7 +1500,8 @@ async def handle_web_slash_command(user_msg: str) -> str:
         if file_path == "INVALID" or not file_path:
             return "[Error] Invalid format. Please use: /modify <relative_file_path> | <instructions>"
             
-        full_path = src.config.ROOT_DIR / file_path
+        from src.config import get_effective_workspace_root
+        full_path = get_effective_workspace_root() / file_path
         current_content = ""
         if full_path.exists():
             try:
