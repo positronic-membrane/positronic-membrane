@@ -481,6 +481,18 @@ async def run_heartbeat_loop():
                                         f"Target file path '{rel_path}' is invalid: parent directory '{Path(rel_path).parent}' does not exist."
                                     )
                                 
+                                # Support search-and-replace blocks inside modify_code
+                                if "<<<<<<< SEARCH" in proposed_code and ">>>>>>> REPLACE" in proposed_code:
+                                    current_content = ""
+                                    if full_path.exists():
+                                        try:
+                                            with open(full_path, "r", encoding="utf-8") as f:
+                                                current_content = f.read()
+                                        except Exception as e:
+                                            logger.warning(f"Could not read file {full_path} for search/replace: {e}")
+                                    from src.self_modification import apply_search_replace_blocks
+                                    proposed_code = apply_search_replace_blocks(current_content, proposed_code)
+                                
                                 from src.self_modification import stage_and_test, generate_diff
                                 from src.database import stage_modification_in_db
                                 

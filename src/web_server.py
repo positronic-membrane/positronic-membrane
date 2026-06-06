@@ -515,11 +515,12 @@ class JanusRequestHandler(BaseHTTPRequestHandler):
                     if full_path.exists():
                         with open(full_path, "r", encoding="utf-8") as file_io:
                             current_content = file_io.read()
+                    from src.self_modification import summarize_pytest_logs
                     draft_prompt = f"""
                     You are the Proposer. A pre-existing test file has failed during staging.
                     Fix (self-heal) this test file to pass unit tests.
                     FAILING TEST FILE: {test_file}
-                    TEST RUN LOGS: {logs}
+                    TEST RUN LOGS: {summarize_pytest_logs(logs)}
                     CURRENT CONTENT: {current_content}
                     Output the COMPLETE updated source code for {test_file}.
                     CRITICAL RULES: Output ONLY raw code. Do NOT wrap in markdown code blocks.

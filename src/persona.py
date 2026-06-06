@@ -95,6 +95,7 @@ def parse_proposed_changes(message_content: str) -> dict:
     """
     Extracts potential file paths from the message, retrieves their current live contents,
     and queries the LLM to construct a mapping of relative file paths to their complete updated contents.
+    Supports search-and-replace blocks using <<<<<<< SEARCH / ======= / >>>>>>> REPLACE syntax.
     """
     import json
 
@@ -111,6 +112,19 @@ def parse_proposed_changes(message_content: str) -> dict:
         try:
             full_path = workspace_root / path
             full_path.relative_to(workspace_root)
+            
+            # Apply search-and-replace if blocks exist
+            if "<<<<<<< SEARCH" in content and ">>>>>>> REPLACE" in content:
+                current_content = ""
+                if full_path.exists():
+                    try:
+                        with open(full_path, "r", encoding="utf-8", errors="ignore") as f:
+                            current_content = f.read()
+                    except Exception:
+                        pass
+                from src.self_modification import apply_search_replace_blocks
+                content = apply_search_replace_blocks(current_content, content)
+                
             regex_proposed[path] = content.strip()
         except ValueError:
             pass
@@ -150,10 +164,10 @@ def parse_proposed_changes(message_content: str) -> dict:
                 
     current_files_json = json.dumps(current_files, indent=2)
     prompt = f"""
-    You are a precise parsing agent. Analyze the following message from Janus, which proposes file changes (either as new files, full code blocks, or unified diffs).
+    You are a precise parsing agent. Analyze the following message from Janus, which proposes file changes (either as new files, full code blocks, or search-and-replace blocks).
     Your task is to output the COMPLETE, updated content for every file proposed to be created or modified.
 
-    We have provided the current live content of the files mentioned in the message below for your reference (to apply diffs or modifications).
+    We have provided the current live content of the files mentioned in the message below for your reference (to apply diffs, search-and-replace blocks, or modifications).
 
     CURRENT FILE CONTENTS:
     {current_files_json}
@@ -185,7 +199,28 @@ def parse_proposed_changes(message_content: str) -> dict:
             raw_json_str = "\n".join(lines).strip()
             
         parsed = json.loads(raw_json_str)
-        return parsed.get("files", {})
+        files = parsed.get("files", {})
+        
+        # Apply search-and-replace post-processing to any JSON keys if they contained block markers
+        for path in list(files.keys()):
+            content = files[path]
+            if "<<<<<<< SEARCH" in content and ">>>>>>> REPLACE" in content:
+                full_path = workspace_root / path
+                current_content = ""
+                if full_path.exists():
+                    try:
+                        with open(full_path, "r", encoding="utf-8", errors="ignore") as f:
+                            current_content = f.read()
+                    except Exception:
+                        pass
+                from src.self_modification import apply_search_replace_blocks
+                try:
+                    files[path] = apply_search_replace_blocks(current_content, content)
+                except ValueError as e:
+                    logger.error(f"Failed to apply search/replace block in LLM JSON output for {path}: {e}")
+                    del files[path]
+                    
+        return files
     except Exception as e:
         logger.error(f"Failed to parse proposed changes using LLM: {e}")
         return {}
@@ -826,6 +861,7 @@ async def run_persona_chat():
                                             except Exception:
                                                 pass
                                                 
+                                        from src.self_modification import summarize_pytest_logs
                                         draft_prompt = f"""
                                         You are the Proposer. A pre-existing test file has failed during staging.
                                         We need to automatically fix (self-heal) this test file so it passes correctly.
@@ -833,7 +869,7 @@ async def run_persona_chat():
                                         FAILING TEST FILE: {test_file}
                                         
                                         TEST RUN FAILURE LOGS:
-                                        {logs}
+                                        {summarize_pytest_logs(logs)}
                                         
                                         CURRENT TEST FILE CONTENT:
                                         {current_content}

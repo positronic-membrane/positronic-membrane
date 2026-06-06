@@ -68,6 +68,15 @@ def create_sandbox_session(session_name: str) -> tuple:
     if res.returncode != 0:
         raise RuntimeError(f"Failed to create git worktree sandbox: {res.stderr or res.stdout}")
         
+    # Copy active DB to sandbox directory for database isolation
+    db_src = Path(src.config.DB_PATH)
+    if db_src.exists() and db_src.is_file():
+        try:
+            shutil.copy2(db_src, sandbox_dir / "janus_test.db")
+            logger.info(f"Isolated database copied to sandbox: '{sandbox_dir / 'janus_test.db'}'")
+        except Exception as e:
+            logger.warning(f"Could not isolate database for sandbox session: {e}")
+
     # 3. Save to database
     save_sandbox_session(sandbox_path_str, branch_name, "active")
     
@@ -117,6 +126,10 @@ def run_sandbox_tests() -> tuple:
     env = os.environ.copy()
     env["JANUS_TEST_MODE"] = "1"
     
+    # Inject DB_PATH if isolated DB exists in sandbox root
+    if (sandbox_root / "janus_test.db").exists():
+        env["DB_PATH"] = str(sandbox_root / "janus_test.db")
+    
     current_pythonpath = env.get("PYTHONPATH", "")
     if current_pythonpath:
         env["PYTHONPATH"] = f"{sandbox_root}{os.pathsep}{current_pythonpath}"
@@ -143,6 +156,13 @@ def run_sandbox_tests() -> tuple:
         
     new_status = "passed" if passed else "failed"
     save_sandbox_session(str(sandbox_root), branch_name, new_status, test_logs=logs)
+    
+    # Automatically commit sandbox state if tests passed
+    if passed:
+        try:
+            commit_sandbox_state("Auto-commit: passing edits in sandbox session")
+        except Exception as e:
+            logger.warning(f"Failed to auto-commit sandbox state: {e}")
     
     # Save copy of logs to sandbox root log file
     try:
@@ -279,3 +299,89 @@ def cleanup_git_sandbox(sandbox_path: str, branch_name: str):
         shutil.rmtree(sandbox_dir, ignore_errors=True)
     
     logger.info(f"Sandbox cleanup completed for '{sandbox_path}' ({branch_name})")
+
+
+def commit_sandbox_state(message: str) -> bool:
+    """
+    Commits current changes in the active sandbox worktree with the given message.
+    Returns True if successful (or if there are no changes to commit).
+    """
+    session = get_active_sandbox()
+    if not session:
+        return False
+        
+    sandbox_root = Path(session["active_sandbox_path"])
+    
+    # Check if there are changes to commit
+    res_status = subprocess.run(
+        ["git", "status", "--porcelain"],
+        cwd=sandbox_root,
+        capture_output=True,
+        text=True
+    )
+    if not res_status.stdout.strip():
+        # No changes to commit
+        return True
+        
+    # Stage and commit with system environment variables for Project Janus git identity
+    env = os.environ.copy()
+    env["GIT_AUTHOR_NAME"] = "Project Janus"
+    env["GIT_AUTHOR_EMAIL"] = "janus@local.net"
+    env["GIT_COMMITTER_NAME"] = "Project Janus"
+    env["GIT_COMMITTER_EMAIL"] = "janus@local.net"
+    
+    subprocess.run(["git", "add", "."], cwd=sandbox_root, capture_output=True, env=env)
+    res_commit = subprocess.run(
+        ["git", "commit", "-m", message],
+        cwd=sandbox_root,
+        capture_output=True,
+        text=True,
+        env=env
+    )
+    return res_commit.returncode == 0
+
+
+def rollback_sandbox_last_commit() -> bool:
+    """
+    Resets the sandbox worktree to the previous commit (git reset --hard HEAD~1),
+    discarding the last set of edits.
+    Returns True if successful.
+    """
+    session = get_active_sandbox()
+    if not session:
+        return False
+        
+    sandbox_root = Path(session["active_sandbox_path"])
+    res = subprocess.run(
+        ["git", "reset", "--hard", "HEAD~1"],
+        cwd=sandbox_root,
+        capture_output=True,
+        text=True
+    )
+    return res.returncode == 0
+
+
+def discard_sandbox_changes() -> bool:
+    """
+    Discards any current uncommitted/dirty changes in the active sandbox worktree
+    by resetting to HEAD and cleaning untracked files.
+    Returns True if successful.
+    """
+    session = get_active_sandbox()
+    if not session:
+        return False
+        
+    sandbox_root = Path(session["active_sandbox_path"])
+    res_reset = subprocess.run(
+        ["git", "reset", "--hard", "HEAD"],
+        cwd=sandbox_root,
+        capture_output=True,
+        text=True
+    )
+    res_clean = subprocess.run(
+        ["git", "clean", "-fd"],
+        cwd=sandbox_root,
+        capture_output=True,
+        text=True
+    )
+    return res_reset.returncode == 0 and res_clean.returncode == 0

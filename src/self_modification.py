@@ -95,6 +95,15 @@ def stage_and_test(rel_path: str, proposed_code: str) -> tuple:
         env = os.environ.copy()
         env["JANUS_TEST_MODE"] = "1"
         
+        # Copy active DB to staging folder for database isolation
+        db_src = Path(src.config.DB_PATH)
+        if db_src.exists() and db_src.is_file():
+            try:
+                shutil.copy2(db_src, temp_dir_path / "janus_test.db")
+                env["DB_PATH"] = str(temp_dir_path / "janus_test.db")
+            except Exception as e:
+                logger.warning(f"Could not isolate database for staging: {e}")
+        
         current_pythonpath = env.get("PYTHONPATH", "")
         if current_pythonpath:
             env["PYTHONPATH"] = f"{temp_dir_path}{os.pathsep}{current_pythonpath}"
@@ -172,6 +181,15 @@ def stage_and_test_multi(modifications: dict) -> tuple:
         env = os.environ.copy()
         env["JANUS_TEST_MODE"] = "1"
         
+        # Copy active DB to staging folder for database isolation
+        db_src = Path(src.config.DB_PATH)
+        if db_src.exists() and db_src.is_file():
+            try:
+                shutil.copy2(db_src, temp_dir_path / "janus_test.db")
+                env["DB_PATH"] = str(temp_dir_path / "janus_test.db")
+            except Exception as e:
+                logger.warning(f"Could not isolate database for staging: {e}")
+        
         current_pythonpath = env.get("PYTHONPATH", "")
         if current_pythonpath:
             env["PYTHONPATH"] = f"{temp_dir_path}{os.pathsep}{current_pythonpath}"
@@ -245,4 +263,102 @@ def apply_staged_multi(temp_dir_path: str, modifications: dict):
         os.makedirs(dest_file.parent, exist_ok=True)
         shutil.copy2(src_file, dest_file)
     logger.info("All staged changes applied successfully.")
+
+
+def apply_search_replace_blocks(current_content: str, block_text: str) -> str:
+    """
+    Parses search/replace blocks from 'block_text' and applies them to 'current_content'.
+    Format:
+    <<<<<<< SEARCH
+    [original content]
+    =======
+    [replacement content]
+    >>>>>>> REPLACE
+    """
+    import re
+    pattern = r"<<<<<<< SEARCH\r?\n(.*?)\r?\n=======\r?\n(.*?)\r?\n>>>>>>> REPLACE"
+    blocks = re.findall(pattern, block_text, re.DOTALL)
+    
+    if not blocks:
+        raise ValueError("Invalid search/replace block syntax. No blocks could be parsed.")
+        
+    updated_content = current_content
+    for search_part, replace_part in blocks:
+        search_norm = search_part.replace("\r\n", "\n")
+        content_norm = updated_content.replace("\r\n", "\n")
+        
+        count = updated_content.count(search_part)
+        if count == 0:
+            count_norm = content_norm.count(search_norm)
+            if count_norm == 0:
+                raise ValueError(f"Search block not found in the target content:\n{search_part}")
+            elif count_norm > 1:
+                raise ValueError(f"Search block matches multiple times ({count_norm}) when normalized. Please make it more specific:\n{search_part}")
+            else:
+                parts = content_norm.split(search_norm, 1)
+                updated_content = parts[0] + replace_part + parts[1]
+        elif count > 1:
+            raise ValueError(f"Search block matches multiple times ({count}) in the file. Please make it more specific:\n{search_part}")
+        else:
+            updated_content = updated_content.replace(search_part, replace_part, 1)
+            
+    return updated_content
+
+
+def summarize_pytest_logs(logs: str) -> str:
+    """
+    Extracts only relevant test failure details and tracebacks from raw pytest output
+    to prevent large logs from bloating context.
+    """
+    if not logs:
+        return "No logs provided."
+        
+    lines = logs.splitlines()
+    summary_parts = []
+    
+    in_failures = False
+    current_failure = []
+    
+    for line in lines:
+        if line.startswith("___") and line.endswith("___"):
+            if current_failure:
+                summary_parts.append("\n".join(current_failure))
+                current_failure = []
+            in_failures = True
+            current_failure.append(line)
+        elif line.startswith("=== FAILURES ==="):
+            in_failures = True
+        elif line.startswith("===") and in_failures:
+            if current_failure:
+                summary_parts.append("\n".join(current_failure))
+                current_failure = []
+            in_failures = False
+        elif in_failures:
+            current_failure.append(line)
+            
+    if current_failure:
+        summary_parts.append("\n".join(current_failure))
+        
+    in_summary_info = False
+    summary_info = []
+    for line in lines:
+        if "short test summary info" in line:
+            in_summary_info = True
+            summary_info.append(line)
+        elif in_summary_info and line.startswith("==="):
+            in_summary_info = False
+        elif in_summary_info:
+            summary_info.append(line)
+            
+    final_parts = []
+    if summary_parts:
+        final_parts.append("FAILING TEST DETAILS:\n" + "\n\n".join(summary_parts))
+    if summary_info:
+        final_parts.append("SHORT TEST SUMMARY INFO:\n" + "\n".join(summary_info))
+        
+    if not final_parts:
+        truncated_raw = "\n".join(lines[-40:])
+        return f"RAW TEST LOGS (TRUNCATED):\n{truncated_raw}"
+        
+    return "\n\n".join(final_parts)
 
