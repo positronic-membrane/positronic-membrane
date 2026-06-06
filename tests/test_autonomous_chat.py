@@ -43,7 +43,10 @@ def test_get_recent_episodic_memories_filtering():
 @patch("src.config.get_effective_workspace_root")
 @patch("src.sandbox_session.run_sandbox_tests")
 @patch("src.sandbox_session.get_sandbox_diff")
-def test_execute_chat_sandbox_commands(mock_diff, mock_tests, mock_workspace, tmp_path):
+@patch("subprocess.run")
+@patch("src.sandbox_session.discard_sandbox_changes")
+@patch("src.sandbox_session.rollback_sandbox_last_commit")
+def test_execute_chat_sandbox_commands(mock_rollback, mock_discard, mock_run, mock_diff, mock_tests, mock_workspace, tmp_path):
     """Verify execution of individual sandbox commands."""
     mock_workspace.return_value = tmp_path
     mock_tests.return_value = (True, "All tests passed!")
@@ -73,6 +76,34 @@ def test_execute_chat_sandbox_commands(mock_diff, mock_tests, mock_workspace, tm
     block = "read ../outside.txt"
     res = execute_chat_sandbox_commands(block)
     assert "Access denied" in res
+    
+    # Test checkout command
+    mock_run_instance = MagicMock()
+    mock_run_instance.returncode = 0
+    mock_run.return_value = mock_run_instance
+    block = "checkout test_file.txt"
+    res = execute_chat_sandbox_commands(block)
+    assert "Reverted successfully" in res
+    mock_run.assert_called_with(["git", "checkout", "--", "test_file.txt"], cwd=tmp_path, capture_output=True, text=True)
+    
+    # Test checkout directory traversal protection
+    block = "checkout ../outside.txt"
+    res = execute_chat_sandbox_commands(block)
+    assert "Access denied" in res
+    
+    # Test discard command
+    mock_discard.return_value = True
+    block = "discard"
+    res = execute_chat_sandbox_commands(block)
+    assert "discarded successfully" in res
+    mock_discard.assert_called_once()
+    
+    # Test rollback command
+    mock_rollback.return_value = True
+    block = "rollback"
+    res = execute_chat_sandbox_commands(block)
+    assert "Rolled back the last commit" in res
+    mock_rollback.assert_called_once()
     
     # Test run test command
     block = "test"

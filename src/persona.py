@@ -391,6 +391,9 @@ def execute_chat_sandbox_commands(block: str) -> str:
       - read <path> or read: <path>
       - test or run_tests or run-tests
       - diff
+      - checkout <path> or checkout: <path>
+      - discard
+      - rollback
     """
     from src.config import get_effective_workspace_root
     from src.sandbox_session import run_sandbox_tests, get_sandbox_diff
@@ -404,6 +407,8 @@ def execute_chat_sandbox_commands(block: str) -> str:
             continue
             
         read_match = re.match(r"^read(?:\s*:\s*|\s+)(.*)$", line, re.IGNORECASE)
+        checkout_match = re.match(r"^checkout(?:\s*:\s*|\s+)(.*)$", line, re.IGNORECASE)
+        
         if read_match:
             rel_path = read_match.group(1).strip().rstrip(".,;!?`\"'")
             try:
@@ -422,6 +427,29 @@ def execute_chat_sandbox_commands(block: str) -> str:
             except Exception as e:
                 results.append(f"- read {rel_path}: Error reading file: {e}")
                 
+        elif checkout_match:
+            rel_path = checkout_match.group(1).strip().rstrip(".,;!?`\"'")
+            try:
+                # Ensure path is clean and resolved within the effective workspace root
+                full_path = (workspace_root / rel_path).resolve()
+                if not str(full_path).startswith(str(workspace_root.resolve())):
+                    results.append(f"- checkout {rel_path}: Access denied (outside workspace).")
+                    continue
+                
+                import subprocess
+                res = subprocess.run(
+                    ["git", "checkout", "--", rel_path],
+                    cwd=workspace_root,
+                    capture_output=True,
+                    text=True
+                )
+                if res.returncode == 0:
+                    results.append(f"- checkout {rel_path}: Reverted successfully.")
+                else:
+                    results.append(f"- checkout {rel_path}: Failed to checkout. Git error: {res.stderr or res.stdout}")
+            except Exception as e:
+                results.append(f"- checkout {rel_path}: Error running checkout: {e}")
+                
         elif line.lower() in ("test", "run_tests", "run-tests"):
             try:
                 passed, logs = run_sandbox_tests()
@@ -436,6 +464,28 @@ def execute_chat_sandbox_commands(block: str) -> str:
                 results.append(f"- diff:\n```diff\n{diff}\n```")
             except Exception as e:
                 results.append(f"- diff: Error getting diff: {e}")
+                
+        elif line.lower() == "discard":
+            try:
+                from src.sandbox_session import discard_sandbox_changes
+                success = discard_sandbox_changes()
+                if success:
+                    results.append("- discard: All uncommitted sandbox changes discarded successfully.")
+                else:
+                    results.append("- discard: Failed to discard sandbox changes.")
+            except Exception as e:
+                results.append(f"- discard: Error discarding changes: {e}")
+                
+        elif line.lower() == "rollback":
+            try:
+                from src.sandbox_session import rollback_sandbox_last_commit
+                success = rollback_sandbox_last_commit()
+                if success:
+                    results.append("- rollback: Rolled back the last commit in the sandbox successfully.")
+                else:
+                    results.append("- rollback: Failed to rollback last commit in the sandbox.")
+            except Exception as e:
+                results.append(f"- rollback: Error rolling back last commit: {e}")
                 
         else:
             results.append(f"- {line}: Unknown sandbox command.")
