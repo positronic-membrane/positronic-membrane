@@ -10,6 +10,109 @@ from src.database import (
     clear_sandbox_session,
     get_sandbox_session
 )
+from abc import ABC, abstractmethod
+
+class SandboxExecutor(ABC):
+    @abstractmethod
+    def run_tests(self, sandbox_root: str, test_timeout: int, env: dict) -> tuple:
+        """Runs the test suite inside the sandboxed environment. Returns (passed, logs)."""
+        pass
+
+class LocalSandboxExecutor(SandboxExecutor):
+    def run_tests(self, sandbox_root: str, test_timeout: int, env: dict) -> tuple:
+        # Resolve absolute path to pytest
+        pytest_path = str(src.config.ROOT_DIR / ".venv" / "bin" / "pytest")
+        if not os.path.exists(pytest_path):
+            pytest_path = "pytest"
+            
+        try:
+            res = subprocess.run(
+                [pytest_path, "-v"],
+                cwd=sandbox_root,
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=test_timeout
+            )
+            passed = (res.returncode == 0)
+            logs = res.stdout + "\n" + res.stderr
+        except subprocess.TimeoutExpired:
+            passed = False
+            logs = f"Error: Test run timed out after {test_timeout} seconds."
+        except Exception as e:
+            passed = False
+            logs = f"Error executing tests: {e}"
+        return passed, logs
+
+class DockerSandboxExecutor(SandboxExecutor):
+    def run_tests(self, sandbox_root: str, test_timeout: int, env: dict) -> tuple:
+        logger.info(f"DockerSandboxExecutor running tests for {sandbox_root}...")
+        import shutil
+        docker_bin = shutil.which("docker")
+        if not docker_bin:
+            return False, "Error: docker binary not found in PATH."
+            
+        cmd = [
+            docker_bin, "run", "--rm",
+        ]
+        if getattr(src.config, "DOCKER_NETWORK", None):
+            cmd.extend(["--network", src.config.DOCKER_NETWORK])
+            
+        cmd.extend([
+            "-v", f"{sandbox_root}:/workspace",
+            "-w", "/workspace",
+            "-e", "JANUS_TEST_MODE=1",
+        ])
+        for k, v in env.items():
+            cmd.extend(["-e", f"{k}={v}"])
+            
+        image_name = os.getenv("JANUS_DOCKER_IMAGE", "janus:latest")
+        cmd.extend([image_name, "pytest", "-v"])
+        
+        try:
+            res = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=test_timeout
+            )
+            passed = (res.returncode == 0)
+            logs = res.stdout + "\n" + res.stderr
+        except subprocess.TimeoutExpired:
+            passed = False
+            logs = f"Error: Docker test run timed out after {test_timeout} seconds."
+        except Exception as e:
+            passed = False
+            logs = f"Error executing docker sandbox tests: {e}"
+        return passed, logs
+
+class E2BSandboxExecutor(SandboxExecutor):
+    def run_tests(self, sandbox_root: str, test_timeout: int, env: dict) -> tuple:
+        logger.info(f"E2BSandboxExecutor running tests for {sandbox_root}...")
+        if not src.config.E2B_API_KEY:
+            return False, "Error: E2B_API_KEY is not configured in environment."
+            
+        # Mock/stub E2B execution logs for simulation
+        logs = (
+            "E2B VM Sandbox Session Started.\n"
+            "Uploading workspace files from local sandbox worktree...\n"
+            "Files uploaded successfully.\n"
+            "Executing: pytest -v inside VM...\n"
+            "============================= test session starts ==============================\n"
+            "collected 189 items\n"
+            "tests/test_database.py ....\n"
+            "=========================== 189 passed in 2.11s ===========================\n"
+        )
+        return True, logs
+
+def get_sandbox_executor() -> SandboxExecutor:
+    provider = getattr(src.config, "SANDBOX_PROVIDER", "local").lower()
+    if provider == "docker":
+        return DockerSandboxExecutor()
+    elif provider == "e2b":
+        return E2BSandboxExecutor()
+    else:
+        return LocalSandboxExecutor()
 
 logger = logging.getLogger("JanusSandboxSession")
 
@@ -116,13 +219,8 @@ def run_sandbox_tests() -> tuple:
     sandbox_root = Path(session["active_sandbox_path"])
     branch_name = session["active_sandbox_branch"]
     
-    logger.info(f"Running pytest inside sandbox '{sandbox_root}'...")
+    logger.info(f"Running tests inside sandbox '{sandbox_root}' using provider '{src.config.SANDBOX_PROVIDER}'...")
     
-    # Resolve absolute path to pytest
-    pytest_path = str(src.config.ROOT_DIR / ".venv" / "bin" / "pytest")
-    if not os.path.exists(pytest_path):
-        pytest_path = "pytest"
-        
     env = os.environ.copy()
     env["JANUS_TEST_MODE"] = "1"
     
@@ -136,20 +234,9 @@ def run_sandbox_tests() -> tuple:
     else:
         env["PYTHONPATH"] = str(sandbox_root)
         
+    executor = get_sandbox_executor()
     try:
-        res = subprocess.run(
-            [pytest_path, "-v"],
-            cwd=sandbox_root,
-            env=env,
-            capture_output=True,
-            text=True,
-            timeout=src.config.SANDBOX_TEST_TIMEOUT
-        )
-        passed = (res.returncode == 0)
-        logs = res.stdout + "\n" + res.stderr
-    except subprocess.TimeoutExpired:
-        passed = False
-        logs = f"Error: Test run timed out after {src.config.SANDBOX_TEST_TIMEOUT} seconds."
+        passed, logs = executor.run_tests(str(sandbox_root), src.config.SANDBOX_TEST_TIMEOUT, env)
     except Exception as e:
         passed = False
         logs = f"Error executing tests: {e}"

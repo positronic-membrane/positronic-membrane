@@ -47,7 +47,7 @@ def test_user_presence_detection(tmp_path):
 @pytest.mark.asyncio
 @patch("src.memory.add_memory")
 @patch("src.memory.query_memories")
-@patch("src.llm.query_agent")
+@patch("src.skills.query_agent")
 async def test_heartbeat_loop_execution(mock_query, mock_query_memories, mock_add_memory, tmp_path, monkeypatch):
     """
     Test that the heartbeat daemon loop runs, increments boredom,
@@ -115,7 +115,7 @@ async def test_heartbeat_loop_execution(mock_query, mock_query_memories, mock_ad
 @pytest.mark.asyncio
 @patch("src.memory.add_memory")
 @patch("src.memory.query_memories")
-@patch("src.llm.query_agent")
+@patch("src.skills.query_agent")
 async def test_modify_code_path_verification(mock_query, mock_query_memories, mock_add_memory, tmp_path, monkeypatch):
     """Verify that modify_code tool execution validates directories and reports error on invalid parent path."""
     mock_query_memories.return_value = []

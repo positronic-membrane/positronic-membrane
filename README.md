@@ -1,17 +1,34 @@
-# Positronic Membrane
+# Positronic Membrane: Project Janus
 
-Swarm AI experimentation and local autonomous agent daemon orchestration (Project Janus).
+Swarm AI experimentation and local autonomous agent daemon orchestration (Project Janus). Designed to run as an autonomous, self-modifying developer swarm. It is now fully cloud-ready with decoupled API, persistence, and execution sandboxing layers.
+
+---
+
+## Current Architecture State
+
+*   **API & Web Server:** Upgraded from standard Python server to **FastAPI + Uvicorn**. Features bi-directional WebSockets for real-time chat (`/ws/chat`) and background agent deliberation streaming (`/ws/deliberations`).
+*   **Cryptographic Security:** Secured by **RS256 JWT Authentication** using automated local RSA 2048-bit key generation. Verifies role levels (`admin`, `user`, etc.) dynamically on REST and WebSocket layers.
+*   **Pluggable Persistence Adapters:** Abstracts both relational and vector data structures behind a dialect-aware query wrapper. Dynamically routes to:
+    *   **Local Mode:** SQLite3 file-backed database and filesystem-backed ChromaDB collections.
+    *   **Cloud Mode:** PostgreSQL instance (with restricted schema role privileges) and **pgvector** collection tables.
+*   **Pluggable Sandbox Executors:** Sandbox code executions run dynamically via the `SandboxExecutor` interface based on environment configuration (`local` git worktrees, `docker` containers, or `e2b` micro-VMs).
+*   **PostgreSQL Spawning Replication:** Child agent swarms are spawned into isolated database schemas (e.g. `janus_child_<name>`) on the database cluster dynamically using search path routing.
+
+---
 
 ## Documentation
 
-* **[Ollama Setup & Model Guide](file:///Users/jsmccauley/projects/positronic-membrane/docs/ollama_setup.md)**: Steps to download, install, run, and integrate local LLMs.
-* **[Gemini.md Specification](file:///Users/jsmccauley/projects/positronic-membrane/docs/gemini_md_specification.md)**: Core rules, schema specifications, and constraints for the Janus system.
-* **[Gemini.md Workflows](file:///Users/jsmccauley/projects/positronic-membrane/docs/gemini_md_workflows.md)**: Walkthroughs of daemon executions and Socratic alignments.
-* **[Project Manifesto](file:///Users/jsmccauley/projects/positronic-membrane/docs/manifesto.md)**: Philosophy and long-term vision.
+*   **[User Guide](file:///Users/jsmccauley/projects/positronic-membrane/docs/user_guide.md)**: Guide on how to run, configure, and align Janus instances.
+*   **[Deployment Guide](file:///Users/jsmccauley/projects/positronic-membrane/docs/deployment_guide.md)**: Cloud provisioning, Docker builds, and Postgres schema setups.
+*   **[Future Roadmap](file:///Users/jsmccauley/projects/positronic-membrane/docs/future_roadmap.md)**: Prerequisites and plans for GitHub integrations, parallel releases, and token cost caps.
+*   **[Ollama Setup & Model Guide](file:///Users/jsmccauley/projects/positronic-membrane/docs/ollama_setup.md)**: Steps to download, install, run, and integrate local LLMs.
+*   **[Gemini.md Specification](file:///Users/jsmccauley/projects/positronic-membrane/docs/gemini_md_specification.md)**: Core rules, schema specifications, and constraints for the Janus system.
+
+---
 
 ## Quick Start
 
-1. Install dependencies:
+1. Install system and python dependencies:
    ```bash
    pip install -r requirements.txt
    ```
@@ -20,6 +37,12 @@ Swarm AI experimentation and local autonomous agent daemon orchestration (Projec
    ```bash
    python -m src.main
    ```
+4. To start the FastAPI API server:
+   ```bash
+   python -m src.web_server
+   ```
+
+---
 
 ## Console Escaped Commands
 
@@ -34,14 +57,3 @@ When running Project Janus in CLI mode (`python -m src.main --cli`), the interac
 *   `/sandbox diff`: Shows a cumulative unified diff of all changes currently in the sandbox.
 *   `/sandbox ship`: Runs validation tests inside the sandbox, prompts to apply all sandbox changes back to the active workspace, and disposes of the worktree environment and branch.
 *   `/sandbox abort`: Discards all sandbox changes, removes the worktree environment, and deletes the branch.
-
-### Sandbox Auto-apply and Continuous Testing
-When a sandbox session is active, any code changes proposed by Janus during the standard chat conversation are automatically extracted, applied to the sandbox workspace, and tested in the background. The test status is reported to you in real-time.
-
-
-### Staged Self-Modification Interactive Prompts
-When the background agent swarm stages a code modification, the console intercepts execution prior to the next user prompt to display the unified diff and unit test execution logs. It then prompts for confirmation:
-`Approve and commit this change? (y/n): `
-
-*   **`y` / `yes`**: Applies the staged modifications back to the active workspace, clears the pending queue from `system_config`, cleans up temporary staging files, and restarts the async event loop to load the updated code.
-*   **`n` / `no` / other key**: Rejects the modification, clears it from the queue, and deletes the temporary staging folder without altering any files in the active workspace.

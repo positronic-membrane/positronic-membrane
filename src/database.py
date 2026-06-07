@@ -2,6 +2,7 @@ import sqlite3
 import json
 from datetime import datetime
 import src.config
+import re
 
 # SQLite Authorizer codes
 SQLITE_DENY = 1
@@ -28,23 +29,305 @@ def constitution_authorizer(action, arg1, arg2, dbname, trigger_or_view):
             return SQLITE_DENY
     return SQLITE_OK
 
+CONFLICT_COLUMNS = {
+    "core_constitution": ["rule_key"],
+    "system_config": ["config_key"],
+    "agent_registry": ["agent_id"],
+    "agent_rules": ["rule_key"],
+    "agent_skills": ["skill_id"],
+    "instincts": ["key"],
+    "reflex_rules": ["trigger_pattern"],
+    "external_agents": ["name"],
+    "parties": ["id"],
+    "spawn_log": ["child_path"],
+    "preferences": ["party_id", "preference_key"],
+    "memories": ["party_id", "namespace", "key"],
+    "self_model": ["trait_name"],
+    "cognitive_layers": ["layer_name"],
+}
+
+def translate_sqlite_to_postgres(sql: str) -> str:
+    if not sql:
+        return sql
+        
+    # 1. Translate AUTOINCREMENT to SERIAL
+    sql = re.sub(
+        r'INTEGER\s+PRIMARY\s+KEY\s+AUTOINCREMENT', 
+        'SERIAL PRIMARY KEY', 
+        sql, 
+        flags=re.IGNORECASE
+    )
+    
+    # 2. Translate INSERT OR IGNORE / INSERT OR REPLACE
+    pattern = re.compile(
+        r'INSERT\s+OR\s+(IGNORE|REPLACE)\s+INTO\s+(\w+)\s*\(([^)]+)\)\s*(VALUES\s*\(.+?\);?)',
+        re.IGNORECASE | re.DOTALL
+    )
+    
+    def replace_match(match):
+        op = match.group(1).upper()
+        table = match.group(2).lower()
+        cols_str = match.group(3)
+        values_part = match.group(4)
+        
+        cols = [c.strip() for c in cols_str.split(',')]
+        conflict_cols = CONFLICT_COLUMNS.get(table, ['id'])
+        conflict_cols_str = ", ".join(conflict_cols)
+        
+        if op == "IGNORE":
+            val_part = values_part.rstrip(';').strip()
+            return f"INSERT INTO {match.group(2)} ({cols_str}) {val_part} ON CONFLICT ({conflict_cols_str}) DO NOTHING"
+        elif op == "REPLACE":
+            val_part = values_part.rstrip(';').strip()
+            update_cols = [c for c in cols if c not in conflict_cols]
+            set_clauses = [f"{c} = EXCLUDED.{c}" for c in update_cols]
+            set_str = ", ".join(set_clauses)
+            return f"INSERT INTO {match.group(2)} ({cols_str}) {val_part} ON CONFLICT ({conflict_cols_str}) DO UPDATE SET {set_str}"
+        return match.group(0)
+
+    sql = pattern.sub(replace_match, sql)
+    
+    # 3. Replace ? placeholders with %s
+    result = []
+    in_single_quote = False
+    in_double_quote = False
+    i = 0
+    n = len(sql)
+    while i < n:
+        char = sql[i]
+        if char == "'" and not in_double_quote:
+            in_single_quote = not in_single_quote
+            result.append(char)
+        elif char == '"' and not in_single_quote:
+            in_double_quote = not in_double_quote
+            result.append(char)
+        elif char == '?' and not in_single_quote and not in_double_quote:
+            result.append('%s')
+        else:
+            result.append(char)
+        i += 1
+    sql = "".join(result)
+    
+    # 4. Handle datetime('now') -> CURRENT_TIMESTAMP
+    sql = re.sub(r"datetime\('now'\)", "CURRENT_TIMESTAMP", sql, flags=re.IGNORECASE)
+    
+    # 5. Handle SQLite PRAGMA statements
+    if sql.strip().upper().startswith("PRAGMA"):
+        return "SELECT 1"
+        
+    return sql
+
+class JanusCursorWrapper:
+    def __init__(self, cursor, db_type, read_only_constitution):
+        self._cursor = cursor
+        self._db_type = db_type
+        self._read_only_constitution = read_only_constitution
+        self._lastrowid = None
+
+    def execute(self, sql, params=None):
+        if self._db_type == "postgres":
+            translated_sql = translate_sqlite_to_postgres(sql)
+            if self._read_only_constitution:
+                pattern = r'\b(insert|update|delete|drop|alter|truncate|create)\b.*\bcore_constitution\b'
+                if re.search(pattern, translated_sql, re.IGNORECASE | re.DOTALL):
+                    raise PermissionError("Write access to core_constitution table is denied for agent connections.")
+            if params is not None:
+                self._cursor.execute(translated_sql, params)
+            else:
+                self._cursor.execute(translated_sql)
+                
+            if translated_sql.strip().upper().startswith("INSERT"):
+                try:
+                    with self._cursor.connection.cursor() as temp_cur:
+                        temp_cur.execute("SELECT lastval();")
+                        self._lastrowid = temp_cur.fetchone()[0]
+                except Exception:
+                    self._lastrowid = None
+        else:
+            if params is not None:
+                self._cursor.execute(sql, params)
+            else:
+                self._cursor.execute(sql)
+            self._lastrowid = self._cursor.lastrowid
+        return self
+
+    def executemany(self, sql, seq_of_params):
+        if self._db_type == "postgres":
+            translated_sql = translate_sqlite_to_postgres(sql)
+            if self._read_only_constitution:
+                pattern = r'\b(insert|update|delete|drop|alter|truncate|create)\b.*\bcore_constitution\b'
+                if re.search(pattern, translated_sql, re.IGNORECASE | re.DOTALL):
+                    raise PermissionError("Write access to core_constitution table is denied for agent connections.")
+            self._cursor.executemany(translated_sql, seq_of_params)
+        else:
+            self._cursor.executemany(sql, seq_of_params)
+        return self
+
+    def executescript(self, sql_script):
+        if self._db_type == "postgres":
+            translated_script = translate_sqlite_to_postgres(sql_script)
+            statements = translated_script.split(';')
+            for stmt in statements:
+                stmt_strip = stmt.strip()
+                if stmt_strip:
+                    self._cursor.execute(stmt_strip)
+        else:
+            self._cursor.executescript(sql_script)
+        return self
+
+    def fetchone(self):
+        return self._cursor.fetchone()
+
+    def fetchall(self):
+        return self._cursor.fetchall()
+
+    def fetchmany(self, size=None):
+        if size is not None:
+            return self._cursor.fetchmany(size)
+        return self._cursor.fetchmany()
+
+    @property
+    def description(self):
+        return self._cursor.description
+
+    @property
+    def rowcount(self):
+        return self._cursor.rowcount
+
+    @property
+    def lastrowid(self):
+        return self._lastrowid
+
+    def __iter__(self):
+        return iter(self._cursor)
+
+    def __getattr__(self, name):
+        return getattr(self._cursor, name)
+
+class JanusConnectionWrapper:
+    def __init__(self, conn, db_type="sqlite", read_only_constitution=True):
+        self._conn = conn
+        self._db_type = db_type
+        self._read_only_constitution = read_only_constitution
+        self._row_factory = None
+
+    def cursor(self):
+        if self._db_type == "postgres":
+            import psycopg2.extras
+            cur = self._conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
+        else:
+            cur = self._conn.cursor()
+            if self._row_factory:
+                cur.row_factory = self._row_factory
+        return JanusCursorWrapper(cur, self._db_type, self._read_only_constitution)
+
+    def commit(self):
+        self._conn.commit()
+
+    def rollback(self):
+        self._conn.rollback()
+
+    def close(self):
+        self._conn.close()
+
+    def execute(self, sql, params=None):
+        cur = self.cursor()
+        cur.execute(sql, params)
+        return cur
+
+    def executescript(self, sql_script):
+        cur = self.cursor()
+        cur.executescript(sql_script)
+        return cur
+
+    def executemany(self, sql, seq_of_params):
+        cur = self.cursor()
+        cur.executemany(sql, seq_of_params)
+        return cur
+
+    def set_authorizer(self, authorizer_callback):
+        if self._db_type == "sqlite":
+            self._conn.set_authorizer(authorizer_callback)
+
+    @property
+    def row_factory(self):
+        if self._db_type == "sqlite":
+            return self._conn.row_factory
+        return self._row_factory
+
+    @row_factory.setter
+    def row_factory(self, val):
+        self._row_factory = val
+        if self._db_type == "sqlite":
+            self._conn.row_factory = val
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if self._db_type == "postgres":
+            if exc_type is not None:
+                self.rollback()
+            else:
+                self.commit()
+        else:
+            return self._conn.__exit__(exc_type, exc_val, exc_tb)
+
+    def __getattr__(self, name):
+        return getattr(self._conn, name)
+
 def get_connection(read_only_constitution=True):
     """
-    Returns an SQLite connection. By default, it applies an authorizer
-    that blocks writing to the core_constitution table.
+    Returns a dialect-aware wrapped connection (SQLite or PostgreSQL).
     """
-    import os
-    db_dir = os.path.dirname(os.path.abspath(src.config.DB_PATH))
-    if db_dir:
-        os.makedirs(db_dir, exist_ok=True)
-    conn = sqlite3.connect(src.config.DB_PATH)
-    # Enable Write-Ahead Logging (WAL)
-    conn.execute("PRAGMA journal_mode=WAL;")
+    db_type = getattr(src.config, "DB_TYPE", "sqlite").lower()
     
-    if read_only_constitution:
-        conn.set_authorizer(constitution_authorizer)
+    if db_type == "postgres":
+        import psycopg2
+        import psycopg2.extras
+        import os
+        conn = psycopg2.connect(src.config.DATABASE_URL)
         
-    return conn
+        # 1. Setup schema isolation if requested
+        schema = os.getenv("DB_SCHEMA")
+        if schema:
+            import re
+            schema_clean = re.sub(r'[^a-zA-Z0-9_]', '', schema)
+            if schema_clean:
+                try:
+                    with conn.cursor() as cur:
+                        cur.execute(f"CREATE SCHEMA IF NOT EXISTS {schema_clean};")
+                        cur.execute(f"SET search_path TO {schema_clean}, public;")
+                except Exception:
+                    conn.rollback()
+
+        # 2. Setup Role Privileges
+        wrapped = JanusConnectionWrapper(conn, db_type="postgres", read_only_constitution=read_only_constitution)
+        
+        if read_only_constitution:
+            try:
+                with conn.cursor() as cur:
+                    cur.execute("SET ROLE janus_agent;")
+            except Exception:
+                conn.rollback()
+        else:
+            try:
+                with conn.cursor() as cur:
+                    cur.execute("SET ROLE janus_admin;")
+            except Exception:
+                conn.rollback()
+                
+        return wrapped
+    else:
+        import os
+        db_dir = os.path.dirname(os.path.abspath(src.config.DB_PATH))
+        if db_dir:
+            os.makedirs(db_dir, exist_ok=True)
+        conn = sqlite3.connect(src.config.DB_PATH)
+        conn.execute("PRAGMA journal_mode=WAL;")
+        if read_only_constitution:
+            conn.set_authorizer(constitution_authorizer)
+        return JanusConnectionWrapper(conn, db_type="sqlite", read_only_constitution=read_only_constitution)
 
 def init_db():
     """
@@ -368,7 +651,7 @@ def init_db():
                     },
                     "required": ["query"]
                 }),
-                'def web_search(query):\n    from src.explorer import search_web\n    results = search_web(query)\n    if not results:\n        return f"No results found for \'{query}\'."\n    return "\\n".join([f"- Title: {r[\'title\']}\\n  URL: {r[\'url\']}\\n  Snippet: {r[\'snippet\']}" for r in results])\n',
+                'def web_search(query):\n    results = sdk[\'explorer\'].search(query)\n    if not results:\n        return f"No results found for \'{query}\'."\n    return "\\n".join([f"- Title: {r[\'title\']}\\n  URL: {r[\'url\']}\\n  Snippet: {r[\'snippet\']}" for r in results])\n',
                 "web_search",
                 "contributor",
                 "manual",
@@ -388,7 +671,7 @@ def init_db():
                     },
                     "required": ["url"]
                 }),
-                'def fetch_url(url):\n    from src.explorer import fetch_webpage\n    content = fetch_webpage(url)\n    return content[:1500] + "..." if len(content) > 1500 else content\n',
+                'def fetch_url(url):\n    content = sdk[\'explorer\'].fetch(url)\n    return content[:1500] + "..." if len(content) > 1500 else content\n',
                 "fetch_url",
                 "contributor",
                 "manual",
@@ -408,7 +691,7 @@ def init_db():
                     },
                     "required": ["query"]
                 }),
-                'def read_codebase(query):\n    from src.codebase import query_codebase_context\n    return query_codebase_context(query)\n',
+                'def read_codebase(query):\n    return sdk[\'codebase\'].query(query)\n',
                 "read_codebase",
                 "contributor",
                 "manual",
@@ -422,7 +705,7 @@ def init_db():
                     "type": "object",
                     "properties": {}
                 }),
-                'def scan_workspace():\n    from src.codebase import index_codebase\n    index_codebase()\n    return "Workspace codebase successfully scanned and indexed in ChromaDB."\n',
+                'def scan_workspace():\n    return sdk[\'codebase\'].scan()\n',
                 "scan_workspace",
                 "contributor",
                 "manual",
@@ -450,7 +733,7 @@ def init_db():
                     },
                     "required": ["agent_id", "name", "prompt"]
                 }),
-                'def spawn_agent(agent_id, name, prompt):\n    from src.database import register_helper_agent\n    register_helper_agent(agent_id.lower().strip(), name.strip(), prompt.strip())\n    return f"Helper agent \'{agent_id}\' ({name}) successfully registered in agent_registry."\n',
+                'def spawn_agent(agent_id, name, prompt):\n    sdk[\'swarm\'].register_agent(agent_id.lower().strip(), name.strip(), prompt.strip())\n    return f"Helper agent \'{agent_id}\' ({name}) successfully registered in agent_registry."\n',
                 "spawn_agent",
                 "contributor",
                 "manual",
@@ -470,7 +753,7 @@ def init_db():
                     },
                     "required": ["code"]
                 }),
-                'def execute_code(code):\n    import re\n    code = re.sub(r"^```python\\s*", "", code, flags=re.IGNORECASE)\n    code = re.sub(r"\\s*```$", "", code, flags=re.IGNORECASE)\n    from src.sandbox import execute_code_safely\n    return execute_code_safely(code)\n',
+                'def execute_code(code):\n    import re\n    code = re.sub(r"^```python\\s*", "", code, flags=re.IGNORECASE)\n    code = re.sub(r"\\s*```$", "", code, flags=re.IGNORECASE)\n    return sdk[\'sandbox\'].execute(code)\n',
                 "execute_code",
                 "contributor",
                 "manual",
@@ -494,7 +777,7 @@ def init_db():
                     },
                     "required": ["rel_path", "proposed_code"]
                 }),
-                'def modify_code(rel_path, proposed_code):\n    import os, re\n    from pathlib import Path\n    from src.config import get_effective_workspace_root\n    from src.self_modification import stage_and_test, generate_diff\n    from src.database import stage_modification_in_db\n    proposed_code = re.sub(r"^```python\\s*", "", proposed_code, flags=re.IGNORECASE)\n    proposed_code = re.sub(r"\\s*```$", "", proposed_code, flags=re.IGNORECASE)\n    full_path = get_effective_workspace_root() / rel_path\n    if not full_path.exists() and not full_path.parent.exists():\n        raise FileNotFoundError(f"Target file path \'{rel_path}\' is invalid: parent directory \'{Path(rel_path).parent}\' does not exist.")\n    if "<<<<<<< SEARCH" in proposed_code and ">>>>>>> REPLACE" in proposed_code:\n        current_content = ""\n        if full_path.exists():\n            with open(full_path, "r", encoding="utf-8") as f:\n                current_content = f.read()\n        from src.self_modification import apply_search_replace_blocks\n        proposed_code = apply_search_replace_blocks(current_content, proposed_code)\n    passed, test_logs, temp_dir = stage_and_test(rel_path, proposed_code)\n    status = "passed" if passed else "failed"\n    diff = generate_diff(rel_path, proposed_code)\n    stage_modification_in_db(rel_path, temp_dir, diff, status)\n    return f"Staged modification for file \'{rel_path}\' in isolated folder \'{temp_dir}\'.\\nUnit test status: {status.upper()}.\\nAwaiting human approval before applying changes to the live codebase."\n',
+                'def modify_code(rel_path, proposed_code):\n    import re\n    from pathlib import Path\n    proposed_code = re.sub(r"^```python\\s*", "", proposed_code, flags=re.IGNORECASE)\n    proposed_code = re.sub(r"\\s*```$", "", proposed_code, flags=re.IGNORECASE)\n    if not sdk[\'fs\'].exists(rel_path):\n        parent_rel = str(Path(rel_path).parent)\n        if not sdk[\'fs\'].exists(parent_rel) and parent_rel != ".":\n            raise FileNotFoundError(f"Target file path \'{rel_path}\' is invalid: parent directory \'{parent_rel}\' does not exist.")\n    if "<<<<<<< SEARCH" in proposed_code and ">>>>>>> REPLACE" in proposed_code:\n        current_content = ""\n        if sdk[\'fs\'].exists(rel_path):\n            current_content = sdk[\'fs\'].read(rel_path)\n        proposed_code = sdk[\'codebase\'].apply_search_replace(current_content, proposed_code)\n    res = sdk[\'codebase\'].stage_modification(rel_path, proposed_code)\n    status = res[\'status\']\n    temp_dir = res[\'temp_dir\']\n    return f"Staged modification for file \'{rel_path}\' in isolated folder \'{temp_dir}\'.\\nUnit test status: {status.upper()}.\\nAwaiting human approval before applying changes to the live codebase."\n',
                 "modify_code",
                 "contributor",
                 "manual",
@@ -508,7 +791,7 @@ def init_db():
                     "type": "object",
                     "properties": {}
                 }),
-                'def consolidate_memories():\n    import logging\n    logger = logging.getLogger("JanusSkill.ConsolidateMemories")\n    logger.info("Auto-triggered background memory consolidation...")\n    from src.memory import consolidate_memories\n    consolidate_memories(batch_size=5)\n    return "Memory consolidation executed successfully."\n',
+                'def consolidate_memories():\n    sdk[\'logger\'].info("Auto-triggered background memory consolidation...")\n    sdk[\'memory\'].consolidate(batch_size=5)\n    return "Memory consolidation executed successfully."\n',
                 "consolidate_memories",
                 "contributor",
                 "interval",
@@ -523,9 +806,8 @@ def init_db():
     import time
     import os
     from pathlib import Path
-    from src.config import get_effective_workspace_root
     
-    workspace_path = get_effective_workspace_root()
+    workspace_path = sdk['fs'].root
     now = time.time()
     max_age_seconds = 120
     ignored_items = {
@@ -619,32 +901,20 @@ def init_db():
     import time
     import re
     import json
-    from src.database import (
-        get_recent_episodic_memories,
-        get_constitution,
-        get_curiosity_vector,
-        update_curiosity_vector,
-        log_episodic_memory,
-        log_deliberation
-    )
-    from src.middleware import validate_action, SafetyViolationError
-    from src.memory import get_active_curiosity_topics, update_curiosity_topics
-    from src.skills import DynamicSkillExecutor
-    from src.daemon import parse_action, parse_critic_response
 
     sdk['logger'].info("Starting autonomous reflection cycle skill...")
 
     try:
-        memories = get_recent_episodic_memories(limit=5)
+        memories = sdk['memory'].get_recent_episodic_memories(limit=5)
         memory_summary = "\\n".join([f"[{ts}] {spk}: {msg}" for spk, msg, ts in reversed(memories)])
 
         try:
-            curiosity = get_active_curiosity_topics(limit=5)
+            curiosity = sdk['memory'].get_active_curiosity_topics(limit=5)
         except Exception as e:
             sdk['logger'].error(f"Failed to query semantic curiosity: {e}")
             curiosity = []
         if not curiosity:
-            curiosity = get_curiosity_vector()
+            curiosity = sdk['drives'].get_curiosity_vector()
 
         semantic_context = ""
         if curiosity:
@@ -709,23 +979,22 @@ def init_db():
 
                 sdk['logger'].info(f"Proposer delegating task to '{recipient}': '{content}'")
 
-                from src.database import send_swarm_message, get_pending_swarm_messages, mark_swarm_message_processed
-                send_swarm_message("proposer", recipient, "task_request", content)
+                sdk['swarm'].send_message("proposer", recipient, "task_request", content)
 
-                pending = get_pending_swarm_messages(recipient)
+                pending = sdk['swarm'].get_pending_messages(recipient)
                 for msg_id, sender_id, msg_type, msg_content, _ in pending:
                     try:
                         recipient_resp = sdk['swarm'].query_agent(recipient, f"Execute task request: {msg_content}")
                     except Exception as err:
                         recipient_resp = f"Error executing task: {err}"
 
-                    send_swarm_message(recipient, "proposer", "task_response", recipient_resp)
-                    mark_swarm_message_processed(msg_id)
+                    sdk['swarm'].send_message(recipient, "proposer", "task_response", recipient_resp)
+                    sdk['swarm'].mark_message_processed(msg_id)
 
-                proposer_pending = get_pending_swarm_messages("proposer")
+                proposer_pending = sdk['swarm'].get_pending_messages("proposer")
                 for p_id, p_sender, p_type, p_content, _ in proposer_pending:
                     pending_bus_context += f"\\n- You asked {p_sender}: '{content}'\\n- {p_sender} responded: '{p_content}'\\n"
-                    mark_swarm_message_processed(p_id)
+                    sdk['swarm'].mark_message_processed(p_id)
 
                 bus_turns += 1
             else:
@@ -738,7 +1007,7 @@ def init_db():
 
         sdk['logger'].info(f"Proposer resolved proposed action: '{proposed_action}'")
 
-        constitution_rules = get_constitution()
+        constitution_rules = sdk['swarm'].get_constitution()
         constitution_summary = "\\n".join([f"- {key}: {text}" for key, text in constitution_rules])
 
         critic_prompt = f\"\"\"
@@ -756,13 +1025,13 @@ def init_db():
         \"\"\"
 
         critic_resp = sdk['swarm'].query_agent("critic", critic_prompt)
-        critic_decision, critic_justification = parse_critic_response(critic_resp)
+        critic_decision, critic_justification = sdk['swarm'].parse_critic_response(critic_resp)
         sdk['logger'].info(f"Critic Decision: {critic_decision}. Justification: {critic_justification}")
 
         middleware_approved = True
         try:
-            validate_action(proposed_action)
-        except SafetyViolationError as sve:
+            sdk['swarm'].validate_action(proposed_action)
+        except Exception as sve:
             sdk['logger'].warning(f"Middleware VETOED proposed action: {sve}")
             critic_decision = 0
             critic_justification = f"Hard-coded Middleware Veto: {sve}"
@@ -776,7 +1045,7 @@ def init_db():
             "middleware_passed": middleware_approved
         }
 
-        log_deliberation(
+        sdk['swarm'].log_deliberation(
             proposed_action=proposed_action,
             debate_json=debate,
             critic_decision=critic_decision,
@@ -785,7 +1054,7 @@ def init_db():
         )
 
         if critic_decision == 1:
-            log_episodic_memory(
+            sdk['memory'].log_episodic_memory(
                 speaker="system",
                 message_content=f"Executed action: '{proposed_action}' (Approved by Critic. Justification: {critic_justification})",
                 context_type="background_thought"
@@ -793,11 +1062,11 @@ def init_db():
 
             execution_transcript = ""
             try:
-                skill_id, args, mock_result = parse_action(proposed_action)
+                skill_id, args, mock_result = sdk['swarm'].parse_action(proposed_action)
                 if mock_result is not None:
                     execution_transcript = mock_result
                 else:
-                    res = DynamicSkillExecutor.execute(skill_id, args, party_id="system")
+                    res = sdk['swarm'].execute_skill(skill_id, args, party_id="system")
                     if res["success"]:
                         skill_res = res["result"]
                         if isinstance(skill_res, str):
@@ -806,7 +1075,7 @@ def init_db():
                             execution_transcript = json.dumps(skill_res, indent=2)
                     else:
                         execution_transcript = res["error"]
-                        log_episodic_memory(
+                        sdk['memory'].log_episodic_memory(
                             speaker="system",
                             message_content=f"Action execution failed: {res['error']}",
                             context_type="background_thought"
@@ -814,7 +1083,7 @@ def init_db():
             except Exception as exc:
                 sdk['logger'].error(f"Error executing tool action: {exc}", exc_info=True)
                 execution_transcript = f"Action execution failed: {exc}"
-                log_episodic_memory(
+                sdk['memory'].log_episodic_memory(
                     speaker="system",
                     message_content=f"Action execution failed: {exc}",
                     context_type="background_thought"
@@ -841,13 +1110,13 @@ def init_db():
             except Exception as e:
                 sdk['logger'].error(f"Failed to add memory nugget to ChromaDB: {e}")
 
-            log_episodic_memory(
+            sdk['memory'].log_episodic_memory(
                 speaker="proposer",
                 message_content=f"Reflection complete for action: '{proposed_action}'",
                 context_type="background_thought"
             )
         else:
-            log_episodic_memory(
+            sdk['memory'].log_episodic_memory(
                 speaker="critic",
                 message_content=f"Vetoed proposed action: '{proposed_action}' (Reason: {critic_justification})",
                 context_type="background_thought"
@@ -874,10 +1143,10 @@ def init_db():
         if topics_match:
             new_topics = [t.strip() for t in topics_match.group(1).split(",") if t.strip()]
             try:
-                update_curiosity_topics(new_topics)
+                sdk['memory'].update_curiosity_topics(new_topics)
             except Exception as e:
                 sdk['logger'].error(f"Failed to semantically index curiosity: {e}")
-            update_curiosity_vector(new_topics)
+            sdk['drives'].update_curiosity_vector(new_topics)
             sdk['logger'].info(f"Updated curiosity vector to: {new_topics}")
         else:
             sdk['logger'].warning(f"Failed to parse curiosity topics from response: '{curiosity_resp}'")
@@ -886,7 +1155,7 @@ def init_db():
 
     except Exception as e:
         sdk['logger'].error(f"Error during autonomous reflection cycle skill: {e}", exc_info=True)
-        log_episodic_memory(
+        sdk['memory'].log_episodic_memory(
             speaker="system",
             message_content=f"Swarm cycle skill failed: {e}",
             context_type="background_thought"

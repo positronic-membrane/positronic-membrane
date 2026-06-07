@@ -9,7 +9,6 @@ from http.server import ThreadingHTTPServer
 
 import src.config
 from src.database import init_db
-from src.web_server import JanusRequestHandler
 
 def get_free_port():
     s = socket.socket()
@@ -31,16 +30,22 @@ def web_server():
     init_db()
     
     port = get_free_port()
-    server = ThreadingHTTPServer(("localhost", port), JanusRequestHandler)
+    import uvicorn
+    from src.web_server import app
     
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    config = uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning")
+    server = uvicorn.Server(config)
+    
+    thread = threading.Thread(target=server.run, daemon=True)
     thread.start()
     
-    yield f"http://localhost:{port}"
+    import time
+    time.sleep(0.5)
     
-    server.shutdown()
-    server.server_close()
-    thread.join()
+    yield f"http://127.0.0.1:{port}"
+    
+    server.should_exit = True
+    thread.join(timeout=5)
     
     src.config.DB_PATH = orig_db_path
     import shutil

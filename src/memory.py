@@ -6,8 +6,234 @@ import chromadb
 from openai import OpenAI
 import src.config
 from src.llm import query_agent
+from abc import ABC, abstractmethod
 
 logger = logging.getLogger("JanusMemory")
+
+class VectorStoreAdapter(ABC):
+    @abstractmethod
+    def add(self, documents, metadatas, ids, embeddings=None):
+        pass
+
+    @abstractmethod
+    def query(self, query_embeddings, n_results, where=None) -> dict:
+        pass
+
+    @abstractmethod
+    def get(self, ids=None, where=None) -> dict:
+        pass
+
+    @abstractmethod
+    def update(self, ids, metadatas):
+        pass
+
+    @abstractmethod
+    def upsert(self, documents, metadatas, ids, embeddings=None):
+        pass
+
+class ChromaCollectionWrapper(VectorStoreAdapter):
+    def __init__(self, collection):
+        self._collection = collection
+
+    def add(self, documents, metadatas, ids, embeddings=None):
+        self._collection.add(documents=documents, metadatas=metadatas, ids=ids, embeddings=embeddings)
+
+    def query(self, query_embeddings, n_results, where=None) -> dict:
+        return self._collection.query(query_embeddings=query_embeddings, n_results=n_results, where=where)
+
+    def get(self, ids=None, where=None) -> dict:
+        return self._collection.get(ids=ids, where=where)
+
+    def update(self, ids, metadatas):
+        self._collection.update(ids=ids, metadatas=metadatas)
+
+    def upsert(self, documents, metadatas, ids, embeddings=None):
+        self._collection.upsert(documents=documents, metadatas=metadatas, ids=ids, embeddings=embeddings)
+
+class PgVectorCollectionWrapper(VectorStoreAdapter):
+    def __init__(self, name):
+        self.name = name
+
+    def add(self, documents, metadatas, ids, embeddings=None):
+        from src.database import get_connection
+        if embeddings is None:
+            from src.memory import get_embeddings
+            embeddings = get_embeddings(documents)
+            
+        conn = get_connection(read_only_constitution=False)
+        try:
+            with conn.cursor() as cur:
+                for doc_id, doc, meta, emb in zip(ids, documents, metadatas, embeddings):
+                    emb_str = "[" + ",".join(map(str, emb)) + "]"
+                    meta_str = json.dumps(meta)
+                    cur.execute(
+                        "INSERT INTO janus_embeddings (collection_name, id, document, metadata, embedding) VALUES (%s, %s, %s, %s, %s::vector)",
+                        (self.name, doc_id, doc, meta_str, emb_str)
+                    )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def query(self, query_embeddings, n_results, where=None) -> dict:
+        from src.database import get_connection
+        emb = query_embeddings[0]
+        emb_str = "[" + ",".join(map(str, emb)) + "]"
+        
+        where_clause, params = self._build_where_clause(where)
+        sql = f"""
+            SELECT id, document, metadata, (embedding <=> %s::vector) AS distance
+            FROM janus_embeddings
+            WHERE collection_name = %s {where_clause}
+            ORDER BY distance ASC
+            LIMIT %s
+        """
+        all_params = [emb_str, self.name] + params + [n_results]
+        
+        conn = get_connection(read_only_constitution=True)
+        try:
+            with conn.cursor() as cur:
+                cur.execute(sql, all_params)
+                rows = cur.fetchall()
+        finally:
+            conn.close()
+            
+        ids = []
+        documents = []
+        metadatas = []
+        distances = []
+        for row in rows:
+            ids.append(row[0])
+            documents.append(row[1])
+            meta = row[2]
+            if isinstance(meta, str):
+                try:
+                    meta = json.loads(meta)
+                except Exception:
+                    meta = {}
+            elif not isinstance(meta, dict):
+                meta = {}
+            metadatas.append(meta)
+            distances.append(row[3])
+            
+        return {
+            "ids": [ids],
+            "documents": [documents],
+            "metadatas": [metadatas],
+            "distances": [distances]
+        }
+
+    def get(self, ids=None, where=None) -> dict:
+        from src.database import get_connection
+        where_clause, params = self._build_where_clause(where)
+        
+        if ids:
+            id_placeholders = ",".join(["%s"] * len(ids))
+            where_clause += f" AND id IN ({id_placeholders})"
+            params.extend(ids)
+            
+        sql = f"""
+            SELECT id, document, metadata
+            FROM janus_embeddings
+            WHERE collection_name = %s {where_clause}
+        """
+        all_params = [self.name] + params
+        
+        conn = get_connection(read_only_constitution=True)
+        try:
+            with conn.cursor() as cur:
+                cur.execute(sql, all_params)
+                rows = cur.fetchall()
+        finally:
+            conn.close()
+            
+        ret_ids = []
+        documents = []
+        metadatas = []
+        for row in rows:
+            ret_ids.append(row[0])
+            documents.append(row[1])
+            meta = row[2]
+            if isinstance(meta, str):
+                try:
+                    meta = json.loads(meta)
+                except Exception:
+                    meta = {}
+            elif not isinstance(meta, dict):
+                meta = {}
+            metadatas.append(meta)
+            
+        return {
+            "ids": ret_ids,
+            "documents": documents,
+            "metadatas": metadatas
+        }
+
+    def update(self, ids, metadatas):
+        from src.database import get_connection
+        conn = get_connection(read_only_constitution=False)
+        try:
+            with conn.cursor() as cur:
+                for item_id, meta in zip(ids, metadatas):
+                    cur.execute(
+                        "SELECT metadata FROM janus_embeddings WHERE collection_name = %s AND id = %s",
+                        (self.name, item_id)
+                    )
+                    row = cur.fetchone()
+                    existing_meta = {}
+                    if row:
+                        raw_meta = row[0]
+                        if isinstance(raw_meta, str):
+                            try:
+                                existing_meta = json.loads(raw_meta)
+                            except Exception:
+                                pass
+                        elif isinstance(raw_meta, dict):
+                            existing_meta = raw_meta
+                    existing_meta.update(meta)
+                    cur.execute(
+                        "UPDATE janus_embeddings SET metadata = %s WHERE collection_name = %s AND id = %s",
+                        (json.dumps(existing_meta), self.name, item_id)
+                    )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def upsert(self, documents, metadatas, ids, embeddings=None):
+        from src.database import get_connection
+        if embeddings is None:
+            from src.memory import get_embeddings
+            embeddings = get_embeddings(documents)
+            
+        conn = get_connection(read_only_constitution=False)
+        try:
+            with conn.cursor() as cur:
+                for doc_id, doc, meta, emb in zip(ids, documents, metadatas, embeddings):
+                    emb_str = "[" + ",".join(map(str, emb)) + "]"
+                    meta_str = json.dumps(meta)
+                    cur.execute(
+                        """
+                        INSERT INTO janus_embeddings (collection_name, id, document, metadata, embedding)
+                        VALUES (%s, %s, %s, %s, %s::vector)
+                        ON CONFLICT (collection_name, id) DO UPDATE SET
+                            document = EXCLUDED.document,
+                            metadata = EXCLUDED.metadata,
+                            embedding = EXCLUDED.embedding
+                        """,
+                        (self.name, doc_id, doc, meta_str, emb_str)
+                    )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def _build_where_clause(self, where_dict):
+        if not where_dict:
+            return "", []
+        clauses = []
+        params = []
+        for k, v in where_dict.items():
+            clauses.append("metadata ->> %s = %s")
+            params.extend([k, str(v)])
+        return " AND " + " AND ".join(clauses), params
 
 # Persistent ChromaDB client initialized lazily
 _chroma_client = None
@@ -22,11 +248,15 @@ def get_chroma_client():
     return _chroma_client
 
 def get_collection(name: str = "janus_long_term"):
-    """Lazily retrieves or creates the requested ChromaDB collection."""
+    """Lazily retrieves or creates the requested vector collection."""
     global _collections
     if name not in _collections:
-        client = get_chroma_client()
-        _collections[name] = client.get_or_create_collection(name=name)
+        db_type = getattr(src.config, "DB_TYPE", "sqlite").lower()
+        if db_type == "postgres":
+            _collections[name] = PgVectorCollectionWrapper(name)
+        else:
+            client = get_chroma_client()
+            _collections[name] = ChromaCollectionWrapper(client.get_or_create_collection(name=name))
     return _collections[name]
 
 def get_embeddings(texts: list) -> list:
@@ -364,3 +594,85 @@ def index_skills_to_vector_db():
         logger.info(f"Successfully indexed {len(ids)} skills in vector DB.")
     except Exception as e:
         logger.error(f"Failed to semantically index dynamic skills: {e}", exc_info=True)
+
+
+def compress_episodic_memory(limit: int = 50, keep_recent: int = 10):
+    """
+    Checks the total row count of episodic_memory table. If it exceeds limit,
+    summarizes the oldest (count - keep_recent) memories into a Primary Concept,
+    stores it in vector DB collection 'janus_long_term', and deletes those old entries from SQLite/Postgres.
+    """
+    from src.database import get_connection
+    logger.info("Checking episodic memory for compression...")
+    
+    conn = get_connection(read_only_constitution=True)
+    cursor = conn.cursor()
+    try:
+        cursor.execute("SELECT COUNT(*) FROM episodic_memory;")
+        count = cursor.fetchone()[0]
+    except Exception as e:
+        logger.error(f"Failed to query episodic memory count: {e}")
+        conn.close()
+        return
+        
+    if count <= limit:
+        logger.info(f"Episodic memory count ({count}) does not exceed limit ({limit}). No compression needed.")
+        conn.close()
+        return
+        
+    num_to_compress = count - keep_recent
+    logger.info(f"Episodic memory count ({count}) exceeds limit ({limit}). Compressing oldest {num_to_compress} records...")
+    
+    try:
+        # Fetch the oldest records to compress
+        cursor.execute("""
+            SELECT id, speaker, message_content, timestamp, context_type
+            FROM episodic_memory
+            ORDER BY id ASC
+            LIMIT ?;
+        """, (num_to_compress,))
+        rows = cursor.fetchall()
+    except Exception as e:
+        logger.error(f"Failed to fetch episodic memories for compression: {e}")
+        conn.close()
+        return
+        
+    if not rows:
+        conn.close()
+        return
+        
+    # Format memories into a trace string
+    memories_summary = "\n".join([f"[{row[3]}] {row[1]}: {row[2]}" for row in rows])
+    
+    archivist_prompt = f"""
+    You are the Archivist. Synthesize the following sequence of user interaction and background agent logs into a single, cohesive, high-level Primary Concept summary (under 2 sentences).
+    
+    EPISODIC LOG ENTRIES:
+    {memories_summary}
+    
+    Respond with the synthesized Primary Concept directly. Do not include agent names, prefixes, quotes, or JSON.
+    """
+    
+    try:
+        primary_concept = query_agent("archivist", archivist_prompt).strip()
+        
+        # Save Primary Concept to janus_long_term
+        concept_id = f"episodic_{uuid.uuid4()}"
+        concept_metadata = {
+            "type": "episodic_summary",
+            "timestamp": time.time(),
+            "start_time": str(rows[0][3]),
+            "end_time": str(rows[-1][3])
+        }
+        add_memory(primary_concept, concept_metadata, concept_id, "janus_long_term")
+        
+        # Delete summarized rows
+        ids_to_delete = [row[0] for row in rows]
+        placeholders = ",".join(["?"] * len(ids_to_delete))
+        cursor.execute(f"DELETE FROM episodic_memory WHERE id IN ({placeholders});", ids_to_delete)
+        conn.commit()
+        logger.info(f"Successfully compressed {len(ids_to_delete)} episodic memories into Primary Concept: '{primary_concept}'")
+    except Exception as e:
+        logger.error(f"Error during episodic memory compression: {e}", exc_info=True)
+    finally:
+        conn.close()

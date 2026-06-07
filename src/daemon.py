@@ -127,6 +127,14 @@ def run_background_maintenance():
         """)
         
         conn.commit()
+        
+        # 3. Compress episodic memory if it exceeds limits
+        try:
+            from src.memory import compress_episodic_memory
+            compress_episodic_memory()
+        except Exception as e:
+            logger.error(f"Failed to compress episodic memory: {e}")
+            
         logger.debug("Background maintenance completed successfully.")
     except Exception as e:
         logger.error(f"Error during background maintenance: {e}")

@@ -156,3 +156,52 @@ def test_sdk_memory_isolation(mock_embeddings):
     col = get_collection("janus_long_term")
     mem_records = col.get(ids=["scoped_1"])
     assert mem_records["metadatas"][0]["party_id"] == "contrib1"
+
+
+def test_sdk_decoupled_wrappers():
+    """Verify that SafeExplorer, SafeCodebase, and SafeSandbox execute and forward calls correctly."""
+    conn = get_connection(read_only_constitution=False)
+    code = (
+        "def run():\n"
+        "    r_search = sdk['explorer'].search('hello')\n"
+        "    r_fetch = sdk['explorer'].fetch('http://test.com')\n"
+        "    r_query = sdk['codebase'].query('symbol')\n"
+        "    r_scan = sdk['codebase'].scan()\n"
+        "    r_exec = sdk['sandbox'].execute('print(1)')\n"
+        "    return {'search': r_search, 'fetch': r_fetch, 'query': r_query, 'scan': r_scan, 'exec': r_exec}"
+    )
+    conn.execute("""
+    INSERT INTO agent_skills (skill_id, name, description, parameters_schema, code_blob, entry_point_function, required_role)
+    VALUES ('sdk_decouple_test', 'Decouple Test', 'Verifies decoupled SDK objects', '{}', ?, 'run', 'contributor');
+    """, (code,))
+    conn.commit()
+    conn.close()
+
+    with patch("src.skills.search_web") as mock_search, \
+         patch("src.skills.fetch_webpage") as mock_fetch, \
+         patch("src.skills.query_codebase_context") as mock_query, \
+         patch("src.skills.index_codebase") as mock_scan, \
+         patch("src.skills.execute_code_safely") as mock_exec:
+         
+        mock_search.return_value = [{"title": "t", "url": "u", "snippet": "s"}]
+        mock_fetch.return_value = "parsed webpage content"
+        mock_query.return_value = "codebase query result"
+        mock_scan.return_value = None
+        mock_exec.return_value = "exec output"
+
+        res = DynamicSkillExecutor.execute('sdk_decouple_test', {}, party_id='contrib1')
+        assert res['success']
+        assert res['result'] == {
+            "search": [{"title": "t", "url": "u", "snippet": "s"}],
+            "fetch": "parsed webpage content",
+            "query": "codebase query result",
+            "scan": "Codebase successfully scanned and indexed.",
+            "exec": "exec output"
+        }
+
+        mock_search.assert_called_once_with("hello")
+        mock_fetch.assert_called_once_with("http://test.com")
+        mock_query.assert_called_once_with("symbol")
+        mock_scan.assert_called_once()
+        mock_exec.assert_called_once_with("print(1)")
+

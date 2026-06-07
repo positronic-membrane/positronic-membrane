@@ -139,10 +139,143 @@ def stage_and_test(rel_path: str, proposed_code: str) -> tuple:
         logger.error(f"Failed during staging and test execution: {e}", exc_info=True)
         return False, f"Staging Error: {e}", str(temp_dir_path)
 
+def push_to_github_and_open_pr(temp_dir_path: str, files: list):
+    """
+    Creates a new branch on git, copies staging files, stages/commits,
+    pushes to GitHub remote, opens a PR, and restores workspace state.
+    """
+    import subprocess
+    import time
+    import urllib.request
+    import json
+    import src.config
+    
+    root_dir = src.config.ROOT_DIR
+    logger.info(f"GITHUB_ENABLED is True. Preparing GitHub PR for changes to files: {files}")
+    
+    # 1. Get current branch (base branch)
+    res = subprocess.run(
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+        cwd=root_dir,
+        capture_output=True,
+        text=True
+    )
+    base_branch = res.stdout.strip() if res.returncode == 0 else "main"
+    if not base_branch:
+        base_branch = "main"
+        
+    branch_name = f"janus-patch-{int(time.time())}"
+    logger.info(f"Base branch is '{base_branch}'. Creating temporary branch '{branch_name}'...")
+    
+    # 2. Checkout new temporary branch
+    subprocess.run(["git", "checkout", "-b", branch_name], cwd=root_dir, capture_output=True)
+    
+    try:
+        # 3. Copy files from temp_dir_path to active workspace
+        for rel_path in files:
+            src_file = Path(temp_dir_path) / rel_path
+            dest_file = root_dir / rel_path
+            if src_file.exists():
+                os.makedirs(dest_file.parent, exist_ok=True)
+                shutil.copy2(src_file, dest_file)
+                # Stage file
+                subprocess.run(["git", "add", rel_path], cwd=root_dir, capture_output=True)
+                
+        # 4. Commit changes
+        env = os.environ.copy()
+        env["GIT_AUTHOR_NAME"] = "Project Janus"
+        env["GIT_AUTHOR_EMAIL"] = "janus@local.net"
+        env["GIT_COMMITTER_NAME"] = "Project Janus"
+        env["GIT_COMMITTER_EMAIL"] = "janus@local.net"
+        
+        subprocess.run(
+            ["git", "commit", "-m", f"Janus self-modification: updates to {', '.join(files)}"],
+            cwd=root_dir,
+            capture_output=True,
+            env=env
+        )
+        
+        # 5. Push to GitHub remote
+        if src.config.GITHUB_ACCESS_TOKEN and src.config.GITHUB_REPO:
+            push_url = f"https://x-access-token:{src.config.GITHUB_ACCESS_TOKEN}@github.com/{src.config.GITHUB_REPO}.git"
+        else:
+            push_url = "origin"
+            
+        logger.info(f"Pushing branch '{branch_name}' to remote repository...")
+        push_res = subprocess.run(["git", "push", push_url, branch_name], cwd=root_dir, capture_output=True, text=True)
+        if push_res.returncode != 0:
+            logger.error(f"Git push failed: {push_res.stderr or push_res.stdout}")
+            raise RuntimeError(f"Git push failed: {push_res.stderr or push_res.stdout}")
+            
+        # 6. Open Pull Request on GitHub
+        if not src.config.GITHUB_REPO:
+            logger.warning("GITHUB_REPO is not configured. Skipping PR creation.")
+            return
+            
+        url = f"https://api.github.com/repos/{src.config.GITHUB_REPO}/pulls"
+        data = {
+            "title": f"Janus Self-Modification: updates to {', '.join(files)}",
+            "body": "This Pull Request contains self-modification changes proposed and validated by Project Janus.",
+            "head": branch_name,
+            "base": base_branch
+        }
+        headers = {
+            "Authorization": f"token {src.config.GITHUB_ACCESS_TOKEN}",
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+            "Content-Type": "application/json",
+            "User-Agent": "Project-Janus"
+        }
+        
+        req = urllib.request.Request(
+            url,
+            data=json.dumps(data).encode("utf-8"),
+            headers=headers,
+            method="POST"
+        )
+        try:
+            with urllib.request.urlopen(req) as response:
+                resp_data = json.loads(response.read().decode("utf-8"))
+                logger.info(f"GitHub Pull Request created successfully: {resp_data.get('html_url')}")
+        except Exception as api_err:
+            logger.error(f"Failed to open GitHub Pull Request: {api_err}")
+            raise api_err
+            
+    finally:
+        # 7. Switch back to base branch and clean up workspace
+        logger.info(f"Restoring workspace to branch '{base_branch}'...")
+        subprocess.run(["git", "checkout", base_branch], cwd=root_dir, capture_output=True)
+        # Delete local temporary branch
+        subprocess.run(["git", "branch", "-D", branch_name], cwd=root_dir, capture_output=True)
+        
+        # Restore modified files to checkout state on base_branch, delete new files
+        for rel_path in files:
+            dest_file = root_dir / rel_path
+            file_exists_in_base = subprocess.run(
+                ["git", "cat-file", "-e", f"HEAD:{rel_path}"],
+                cwd=root_dir,
+                capture_output=True
+            ).returncode == 0
+            
+            if file_exists_in_base:
+                subprocess.run(["git", "checkout", "HEAD", "--", rel_path], cwd=root_dir, capture_output=True)
+                logger.info(f"Restored file '{rel_path}' to original state in workspace.")
+            else:
+                if dest_file.exists():
+                    dest_file.unlink()
+                    logger.info(f"Removed temporary new file '{rel_path}' from workspace.")
+
+
 def apply_staged_change(temp_dir_path: str, rel_path: str):
     """
-    Copies the validated file back from the staging directory to the active workspace.
+    Copies the validated file back from the staging directory to the active workspace,
+    or pushes it to GitHub and opens a Pull Request if GITHUB_ENABLED is True.
     """
+    import src.config
+    if getattr(src.config, "GITHUB_ENABLED", False):
+        push_to_github_and_open_pr(temp_dir_path, [rel_path])
+        return
+
     from src.config import get_effective_workspace_root
     src_file = Path(temp_dir_path) / rel_path
     dest_file = get_effective_workspace_root() / rel_path
@@ -272,8 +405,14 @@ def generate_multi_diff(modifications: dict) -> str:
 
 def apply_staged_multi(temp_dir_path: str, modifications: dict):
     """
-    Copies the validated files back from the staging directory to the active workspace.
+    Copies the validated files back from the staging directory to the active workspace,
+    or pushes them to GitHub and opens a Pull Request if GITHUB_ENABLED is True.
     """
+    import src.config
+    if getattr(src.config, "GITHUB_ENABLED", False):
+        push_to_github_and_open_pr(temp_dir_path, list(modifications.keys()))
+        return
+
     from src.config import get_effective_workspace_root
     for rel_path in modifications:
         src_file = Path(temp_dir_path) / rel_path

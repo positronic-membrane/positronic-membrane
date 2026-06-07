@@ -461,12 +461,12 @@ class TestWebServerEndpoints:
     """Integration tests for the multi-party API via the web server."""
 
     @pytest.fixture
-    def server_handler(self, db_conn):
-        """Create a JanusRequestHandler connected to test database."""
+    def api_client(self, db_conn):
+        """Create a TestClient connected to the test database."""
         import src.web_server as ws_module
+        from fastapi.testclient import TestClient
 
         original_get_connection = ws_module.get_connection
-
         ws_module.get_connection = _shared_state['mock_get_connection']
 
         original_orch_get_conn = ws_module.memory_orch._get_connection
@@ -475,83 +475,20 @@ class TestWebServerEndpoints:
         ws_module.memory_orch._get_connection = _shared_state['mock_get_connection']
         ws_module.bootstrap._get_connection = _shared_state['mock_get_connection']
 
-        yield ws_module.JanusRequestHandler
+        client = TestClient(ws_module.app)
+        yield client
 
         ws_module.get_connection = original_get_connection
         ws_module.memory_orch._get_connection = original_orch_get_conn
         ws_module.bootstrap._get_connection = original_bs_get_conn
 
-    def create_mock_request(self, handler_class, method, path, body=b'', headers=None):
-        """Helper to simulate a request and get JSON response."""
-        import io
-
-        # Convert body to bytes if it isn't already, to compute length
-        body_bytes = body if isinstance(body, bytes) else body.encode('utf-8') if body else b''
-
-        all_headers = {
-            'Host': 'localhost:5005',
-            'Content-Type': 'application/json',
-            'Content-Length': str(len(body_bytes))
-        }
-        if headers:
-            all_headers.update(headers)
-
-        class MockSocket:
-            def __init__(self, data):
-                self.data = data if isinstance(data, bytes) else data.encode('utf-8') if data else b''
-                self.closed = False
-
-            def makefile(self, mode, buffering=-1):
-                if 'r' in mode:
-                    return io.BytesIO(self.data)
-                return io.BytesIO()
-
-            def close(self):
-                self.closed = True
-
-            def sendall(self, data):
-                pass
-
-            def settimeout(self, timeout):
-                pass
-
-        class MockServer:
-            server_address = ('127.0.0.1', 5005)
-
-        mock_socket = MockSocket(body)
-        handler = handler_class.__new__(handler_class)
-        handler.request = mock_socket
-        handler.client_address = ('127.0.0.1', 5005)
-        handler.server = MockServer()
-        handler.command = method
-        handler.path = path
-        handler.headers = all_headers
-        handler.request_version = 'HTTP/1.1'
-        handler.rfile = io.BytesIO(body if isinstance(body, bytes) else body.encode('utf-8') if body else b'')
-        handler.wfile = io.BytesIO()
-        handler.close_connection = True
-
-        response_data = {}
-        handler._send_json = lambda status, data: response_data.update({'status': status, 'data': data})
-
-        if method == 'GET':
-            handler.do_GET()
-        elif method == 'POST':
-            handler.do_POST()
-        elif method == 'PUT':
-            handler.do_PUT()
-
-        return handler, response_data
-
-    def test_bootstrap_status(self, server_handler, db_conn):
+    def test_bootstrap_status(self, api_client, db_conn):
         """Test bootstrap status endpoint."""
-        handler, resp = self.create_mock_request(
-            server_handler, 'GET', '/api/v1/bootstrap/status'
-        )
-        assert resp['status'] == 200
-        assert resp['data']['bootstrap_required'] is True
+        resp = api_client.get('/api/v1/bootstrap/status')
+        assert resp.status_code == 200
+        assert resp.json()['bootstrap_required'] is True
 
-    def test_register_party(self, server_handler, db_conn):
+    def test_register_party(self, api_client, db_conn):
         """Test party registration as admin."""
         admin_id = str(uuid.uuid4())
         now = datetime.utcnow().isoformat()
@@ -561,17 +498,17 @@ class TestWebServerEndpoints:
         )
         db_conn.commit()
 
-        body = json.dumps({'name': 'NewParty', 'role': 'contributor'}).encode('utf-8')
-        handler, resp = self.create_mock_request(
-            server_handler, 'POST', '/api/v1/party/register',
-            body=body,
+        resp = api_client.post(
+            '/api/v1/party/register',
+            json={'name': 'NewParty', 'role': 'contributor'},
             headers={'X-Party-ID': admin_id}
         )
-        assert resp['status'] == 201
-        assert resp['data']['name'] == 'NewParty'
-        assert resp['data']['role'] == 'contributor'
+        assert resp.status_code == 201
+        data = resp.json()
+        assert data['name'] == 'NewParty'
+        assert data['role'] == 'contributor'
 
-    def test_write_and_read_memory(self, server_handler, db_conn):
+    def test_write_and_read_memory(self, api_client, db_conn):
         """Test writing and reading memory via API."""
         party_id = str(uuid.uuid4())
         now = datetime.utcnow().isoformat()
@@ -581,23 +518,22 @@ class TestWebServerEndpoints:
         )
         db_conn.commit()
 
-        body = json.dumps({'key': 'api_key', 'value': 'api_value', 'namespace': 'api_test'}).encode('utf-8')
-        handler, resp = self.create_mock_request(
-            server_handler, 'POST', '/api/v1/memory',
-            body=body,
+        resp = api_client.post(
+            '/api/v1/memory',
+            json={'key': 'api_key', 'value': 'api_value', 'namespace': 'api_test'},
             headers={'X-Party-ID': party_id}
         )
-        assert resp['status'] == 201
-        assert 'memory_id' in resp['data']
+        assert resp.status_code == 201
+        assert 'memory_id' in resp.json()
 
-        handler, resp = self.create_mock_request(
-            server_handler, 'GET', '/api/v1/memory/api_key?namespace=api_test',
+        resp = api_client.get(
+            '/api/v1/memory/api_key?namespace=api_test',
             headers={'X-Party-ID': party_id}
         )
-        assert resp['status'] == 200
-        assert resp['data']['value'] == 'api_value'
+        assert resp.status_code == 200
+        assert resp.json()['value'] == 'api_value'
 
-    def test_register_party_with_metadata(self, server_handler, db_conn):
+    def test_register_party_with_metadata(self, api_client, db_conn):
         """Test registering a party with metadata and retrieving it."""
         admin_id = str(uuid.uuid4())
         now = datetime.utcnow().isoformat()
@@ -608,29 +544,30 @@ class TestWebServerEndpoints:
         db_conn.commit()
 
         metadata = {'key': 'val', 'nested': {'num': 42}}
-        body = json.dumps({'name': 'PartyWithMeta', 'role': 'user', 'metadata': metadata}).encode('utf-8')
-        handler, resp = self.create_mock_request(
-            server_handler, 'POST', '/api/v1/party/register',
-            body=body,
+        resp = api_client.post(
+            '/api/v1/party/register',
+            json={'name': 'PartyWithMeta', 'role': 'user', 'metadata': metadata},
             headers={'X-Party-ID': admin_id}
         )
-        assert resp['status'] == 201
-        assert resp['data']['name'] == 'PartyWithMeta'
-        assert resp['data']['metadata'] == metadata
-        assert 'last_seen' in resp['data']
+        assert resp.status_code == 201
+        data = resp.json()
+        assert data['name'] == 'PartyWithMeta'
+        assert data['metadata'] == metadata
+        assert 'last_seen' in data
 
-        party_id = resp['data']['party_id']
+        party_id = data['party_id']
 
         # Now query the party
-        handler, resp = self.create_mock_request(
-            server_handler, 'GET', f'/api/v1/party/{party_id}',
+        resp = api_client.get(
+            f'/api/v1/party/{party_id}',
             headers={'X-Party-ID': admin_id}
         )
-        assert resp['status'] == 200
-        assert resp['data']['metadata'] == metadata
-        assert 'last_seen' in resp['data']
+        assert resp.status_code == 200
+        data_get = resp.json()
+        assert data_get['metadata'] == metadata
+        assert 'last_seen' in data_get
 
-    def test_last_seen_updates_on_auth(self, server_handler, db_conn):
+    def test_last_seen_updates_on_auth(self, api_client, db_conn):
         """Test that last_seen updates when requests are authenticated."""
         party_id = str(uuid.uuid4())
         past_time = "2020-01-01T00:00:00"
@@ -641,11 +578,11 @@ class TestWebServerEndpoints:
         db_conn.commit()
 
         # Perform a request that uses require_role
-        handler, resp = self.create_mock_request(
-            server_handler, 'GET', f'/api/v1/party/{party_id}',
+        resp = api_client.get(
+            f'/api/v1/party/{party_id}',
             headers={'X-Party-ID': party_id}
         )
-        assert resp['status'] == 200
+        assert resp.status_code == 200
 
         # Verify last_seen was updated in DB
         row = db_conn.execute('SELECT last_seen FROM parties WHERE id = ?', (party_id,)).fetchone()

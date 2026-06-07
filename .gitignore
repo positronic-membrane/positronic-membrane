@@ -231,9 +231,11 @@ janus.db
 janus.db-journal
 janus.db-wal
 janus.db-shm
+janus.db.bak
 data/
 .janus_sandboxes/
 .janus_snapshots/
+.keys/
 
 # Manual Additions
 temp_reference/

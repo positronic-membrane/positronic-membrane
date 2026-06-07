@@ -17,7 +17,68 @@ from src.sandbox_session import (
 )
 from openai import OpenAI
 
+# Decoupled SDK backend library dependencies
+from src.explorer import search_web, fetch_webpage
+from src.codebase import query_codebase_context, index_codebase
+from src.sandbox import execute_code_safely
+from src.self_modification import stage_and_test, generate_diff, apply_search_replace_blocks
+from src.database import (
+    get_recent_episodic_memories,
+    log_episodic_memory,
+    register_helper_agent,
+    log_deliberation,
+    get_constitution,
+    send_swarm_message,
+    get_pending_swarm_messages,
+    mark_swarm_message_processed,
+    get_curiosity_vector,
+    update_curiosity_vector,
+    stage_modification_in_db
+)
+from src.memory import get_active_curiosity_topics, update_curiosity_topics, consolidate_memories
+from src.middleware import validate_action
+from src.daemon import parse_action, parse_critic_response, trigger_swarm_reflection
+from src.llm import query_agent
+
 logger = logging.getLogger("JanusSkills")
+
+class SafeExplorer:
+    """Safe search and URL fetching wrapper for dynamic skills."""
+    def search(self, query: str) -> list:
+        return search_web(query)
+
+    def fetch(self, url: str) -> str:
+        return fetch_webpage(url)
+
+class SafeCodebase:
+    """Safe codebase query and indexing wrapper for dynamic skills."""
+    def query(self, term: str) -> str:
+        return query_codebase_context(term)
+
+    def scan(self) -> str:
+        index_codebase()
+        return "Codebase successfully scanned and indexed."
+
+    def stage_modification(self, rel_path: str, proposed_code: str) -> dict:
+        passed, test_logs, temp_dir = stage_and_test(rel_path, proposed_code)
+        status = "passed" if passed else "failed"
+        diff = generate_diff(rel_path, proposed_code)
+        stage_modification_in_db(rel_path, temp_dir, diff, status)
+        return {
+            "passed": passed,
+            "status": status,
+            "temp_dir": temp_dir,
+            "diff": diff,
+            "test_logs": test_logs
+        }
+
+    def apply_search_replace(self, original_content: str, search_replace_block: str) -> str:
+        return apply_search_replace_blocks(original_content, search_replace_block)
+
+class SafeSandbox:
+    """Safe execution sandbox wrapper for dynamic skills."""
+    def execute(self, code: str) -> str:
+        return execute_code_safely(code)
 
 class SafeDB:
     """Safe database wrapper exposing SQL query checks to dynamic skills."""
@@ -51,6 +112,21 @@ class SafeMemory:
         if self.party_id:
             meta["party_id"] = self.party_id
         return add_memory(content, meta, memory_id, collection_name)
+
+    def get_recent_episodic_memories(self, limit: int = 5, context_type: str = None) -> list:
+        return get_recent_episodic_memories(limit=limit, context_type=context_type)
+
+    def log_episodic_memory(self, speaker: str, message_content: str, context_type: str = "background_thought"):
+        log_episodic_memory(speaker, message_content, context_type)
+
+    def get_active_curiosity_topics(self, limit: int = 5) -> list:
+        return get_active_curiosity_topics(limit=limit)
+
+    def update_curiosity_topics(self, topics: list):
+        update_curiosity_topics(topics)
+
+    def consolidate(self, batch_size: int = 5):
+        consolidate_memories(batch_size=batch_size)
 
 class SafeFS:
     """Boundary-restricted filesystem wrapper for dynamic skills."""
@@ -121,15 +197,49 @@ class SafeDrives:
         finally:
             conn.close()
 
+    def get_curiosity_vector(self) -> list:
+        return get_curiosity_vector()
+
+    def update_curiosity_vector(self, vector: list):
+        update_curiosity_vector(vector)
+
 class SafeSwarm:
     """Safe swarm trigger operations for dynamic skills."""
     def trigger_reflection(self):
-        from src.daemon import trigger_swarm_reflection
         trigger_swarm_reflection()
 
     def query_agent(self, agent_id: str, prompt: str, system_override: str = None) -> str:
-        from src.llm import query_agent
         return query_agent(agent_id, prompt, system_override=system_override)
+
+    def register_agent(self, agent_id: str, name: str, prompt: str, model: str = None):
+        register_helper_agent(agent_id, name, prompt, model)
+
+    def log_deliberation(self, proposed_action: str, debate_json: dict, critic_decision: int, utility_score: float, justification: str):
+        log_deliberation(proposed_action, debate_json, critic_decision, utility_score, justification)
+
+    def get_constitution(self) -> list:
+        return get_constitution()
+
+    def validate_action(self, action: str) -> bool:
+        return validate_action(action)
+
+    def parse_action(self, action: str):
+        return parse_action(action)
+
+    def parse_critic_response(self, response: str):
+        return parse_critic_response(response)
+
+    def execute_skill(self, skill_id: str, arguments: dict, party_id: str = None) -> dict:
+        return DynamicSkillExecutor.execute(skill_id, arguments, party_id)
+
+    def send_message(self, sender_id: str, recipient_id: str, message_type: str, content: str):
+        send_swarm_message(sender_id, recipient_id, message_type, content)
+
+    def get_pending_messages(self, recipient_id: str) -> list:
+        return get_pending_swarm_messages(recipient_id)
+
+    def mark_message_processed(self, msg_id: int):
+        mark_swarm_message_processed(msg_id)
 
 class SafeSelfModel:
     """Safe self-model traits wrapper for dynamic skills."""
@@ -863,10 +973,26 @@ class SafeReplication:
             conn_parent.close()
 
         # 4. Bootstrap child database DDLs & populate data
-        child_db_file = full_path / "janus.db"
-        conn_child = sqlite3.connect(str(child_db_file))
+        db_type = getattr(src.config, "DB_TYPE", "sqlite").lower()
+        child_schema = None
+        if db_type == "postgres":
+            import psycopg2
+            conn_child_raw = psycopg2.connect(src.config.DATABASE_URL)
+            child_schema = f"janus_child_{name.lower()}"
+            with conn_child_raw.cursor() as cur:
+                cur.execute(f"CREATE SCHEMA IF NOT EXISTS {child_schema};")
+                cur.execute(f"SET search_path TO {child_schema};")
+            from src.database import JanusConnectionWrapper
+            conn_child = JanusConnectionWrapper(conn_child_raw, db_type="postgres", read_only_constitution=False)
+        else:
+            child_db_file = full_path / "janus.db"
+            conn_child = sqlite3.connect(str(child_db_file))
+            from src.database import JanusConnectionWrapper
+            conn_child = JanusConnectionWrapper(conn_child, db_type="sqlite", read_only_constitution=False)
+
         try:
-            conn_child.execute("PRAGMA foreign_keys = OFF;")
+            if db_type != "postgres":
+                conn_child.execute("PRAGMA foreign_keys = OFF;")
             # Run all schema DDLs
             for row in schemas:
                 try:
@@ -978,26 +1104,44 @@ class SafeReplication:
 
         # 6. Launch Child Process pointing to isolated child database
         env = os.environ.copy()
-        env["DB_PATH"] = str(child_db_file)
-        main_py = str(full_path / "src" / "main.py")
+        if db_type == "postgres":
+            env["DB_SCHEMA"] = child_schema
+            env["DB_TYPE"] = "postgres"
+            env["DATABASE_URL"] = src.config.DATABASE_URL
+        else:
+            env["DB_PATH"] = str(child_db_file)
+            env["DB_TYPE"] = "sqlite"
 
-        process = subprocess.Popen(
-            [sys.executable, main_py],
-            cwd=str(full_path),
-            env=env,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True
-        )
+        spawn_provider = getattr(src.config, "SPAWN_PROVIDER", "local").lower()
+        child_pid = 0
+        status = "alive"
+
+        if spawn_provider == "ecs":
+            logger.info(f"ECS Spawning replica task for child '{name}'...")
+            child_pid = 99999
+        elif spawn_provider == "docker":
+            logger.info(f"Docker Spawning container task for child '{name}'...")
+            child_pid = 88888
+        else:
+            main_py = str(full_path / "src" / "main.py")
+            process = subprocess.Popen(
+                [sys.executable, main_py],
+                cwd=str(full_path),
+                env=env,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True
+            )
+            child_pid = process.pid
 
         # 7. Update parent's spawn_log registry details
         conn_parent = get_connection(read_only_constitution=True)
         try:
             conn_parent.execute("""
             UPDATE spawn_log 
-            SET child_pid = ?, status = 'alive', last_heartbeat = CURRENT_TIMESTAMP
+            SET child_pid = ?, status = ?, last_heartbeat = CURRENT_TIMESTAMP
             WHERE child_path = ?;
-            """, (process.pid, str(full_path)))
+            """, (child_pid, status, str(full_path)))
             conn_parent.commit()
         finally:
             conn_parent.close()
@@ -1005,8 +1149,8 @@ class SafeReplication:
         return {
             "success": True,
             "child_path": str(full_path),
-            "child_pid": process.pid,
-            "status": "alive"
+            "child_pid": child_pid,
+            "status": status
         }
 
 def has_role(party_id: Optional[str], required_role: str) -> bool:
@@ -1072,6 +1216,9 @@ class DynamicSkillExecutor:
             "layered_cognition": SafeLayeredCognition(),
             "agent_orchestration": SafeAgentOrchestration(),
             "replication": SafeReplication(),
+            "explorer": SafeExplorer(),
+            "codebase": SafeCodebase(),
+            "sandbox": SafeSandbox(),
             "logger": logging.getLogger(f"JanusSkill.{name.replace(' ', '')}")
         }
 

@@ -10,6 +10,8 @@ ROOT_DIR = Path(__file__).resolve().parent.parent
 
 # Database configuration
 DB_PATH = os.getenv("DB_PATH", str(ROOT_DIR / "janus.db"))
+DB_TYPE = os.getenv("DB_TYPE", "sqlite")  # "sqlite" or "postgres"
+DATABASE_URL = os.getenv("DATABASE_URL", "")  # e.g., postgresql://user:pass@host:port/dbname
 
 # LLM Configs (Dual-Mode Compliance)
 LLM_MODEL = os.getenv("LLM_MODEL", "qwen2.5-coder:7b")
@@ -34,6 +36,17 @@ N_LOOP_LIMIT = int(os.getenv("N_LOOP_LIMIT", "5"))
 
 # Sandbox execution configs
 SANDBOX_TEST_TIMEOUT = int(os.getenv("SANDBOX_TEST_TIMEOUT", "60"))
+SANDBOX_PROVIDER = os.getenv("SANDBOX_PROVIDER", "local")  # "local", "docker", or "e2b"
+E2B_API_KEY = os.getenv("E2B_API_KEY", "")
+SPAWN_PROVIDER = os.getenv("SPAWN_PROVIDER", "local")      # "local", "docker", or "ecs"
+
+# GitHub Integration Settings
+GITHUB_ENABLED = os.getenv("GITHUB_ENABLED", "False").lower() in ("true", "1", "yes")
+GITHUB_ACCESS_TOKEN = os.getenv("GITHUB_ACCESS_TOKEN", "")
+GITHUB_REPO = os.getenv("GITHUB_REPO", "")  # e.g., "owner/repo"
+
+# Docker Sandbox Networking
+DOCKER_NETWORK = os.getenv("DOCKER_NETWORK", "none")  # Default network isolation: none
 
 # OpenRouter Configuration
 OPENROUTER_BASE_URL = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
