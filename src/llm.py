@@ -76,6 +76,20 @@ def query_agent(agent_id: str, prompt_content: str, system_override: str = None)
         rules_text = "\n\n### Rules & Guidelines:\n" + "\n".join(f"- {r['text']}" for r in rules)
         system += rules_text
 
+    # Dynamically retrieve and append active skills for proposer and explorer
+    if agent_id in ("proposer", "explorer"):
+        try:
+            from src.memory import query_memories
+            skills = query_memories(prompt_content, limit=5, collection_name="janus_skills")
+            if skills:
+                skills_docs = []
+                for s in skills:
+                    skills_docs.append(f"Skill ID: {s['id']}\n{s['content']}")
+                skills_context = "\n\n### Available Dynamic Skills (Retrieved Semantically):\n" + "\n---\n".join(skills_docs)
+                system += skills_context
+        except Exception as e:
+            logger.error(f"Failed to query semantic skills for {agent_id}: {e}", exc_info=True)
+
     base_url, api_key = resolve_agent_client_params(agent_id, model)
 
     logger.info(f"Querying Agent '{agent_id}' ({name}) using model '{model}' via endpoint '{base_url}'...")

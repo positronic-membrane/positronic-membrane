@@ -13,6 +13,84 @@ from src.database import (
 
 logger = logging.getLogger("JanusPersona")
 
+from typing import Optional
+
+def get_session_party_id() -> Optional[str]:
+    from src.database import get_connection
+    conn = get_connection(read_only_constitution=True)
+    try:
+        # Try to find an admin first, then contributor, then user
+        for role in ('admin', 'contributor', 'user'):
+            row = conn.execute("SELECT id FROM parties WHERE role = ? LIMIT 1;", (role,)).fetchone()
+            if row:
+                return row[0]
+        # Fallback to any party
+        row = conn.execute("SELECT id FROM parties LIMIT 1;").fetchone()
+        if row:
+            return row[0]
+    except Exception:
+        pass
+    finally:
+        conn.close()
+    return None
+
+def handle_skills_command() -> str:
+    from src.database import get_connection
+    conn = get_connection(read_only_constitution=True)
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT skill_id, name, description, required_role, trigger_type FROM agent_skills WHERE is_active = 1;"
+        )
+        rows = cursor.fetchall()
+    except Exception as e:
+        return f"[Error] Failed to fetch skills: {e}"
+    finally:
+        conn.close()
+        
+    if not rows:
+        return "No active skills registered."
+        
+    output = ["### Active Swarm Skills\n"]
+    output.append("| Skill ID | Name | Description | Required Role | Trigger Type |")
+    output.append("| --- | --- | --- | --- | --- |")
+    for skill_id, name, desc, role, trigger in rows:
+        output.append(f"| `{skill_id}` | {name} | {desc} | `{role}` | `{trigger}` |")
+    return "\n".join(output)
+
+def handle_runskill_command(command_str: str) -> str:
+    import json
+    import re
+    # Command format: /runskill <skill_id> [arguments_json]
+    match = re.match(r"^/runskill\s+([a-zA-Z0-9_-]+)(?:\s+(.*))?", command_str, re.DOTALL)
+    if not match:
+        return "[Error] Usage: /runskill <skill_id> [arguments_json]"
+        
+    skill_id = match.group(1).strip()
+    args_str = (match.group(2) or "").strip()
+    
+    args = {}
+    if args_str:
+        try:
+            args = json.loads(args_str)
+            if not isinstance(args, dict):
+                return "[Error] Arguments must be a JSON object."
+        except Exception as e:
+            return f"[Error] Invalid JSON arguments: {e}"
+            
+    # Resolve current session party ID
+    party_id = get_session_party_id()
+    
+    from src.skills import DynamicSkillExecutor
+    res = DynamicSkillExecutor.execute(skill_id, args, party_id=party_id)
+    if res["success"]:
+        skill_res = res["result"]
+        if isinstance(skill_res, str):
+            return skill_res
+        return json.dumps(skill_res, indent=2)
+    else:
+        return f"[Error] Skill execution failed: {res['error']}"
+
 def detect_metacognitive_intent(user_query: str) -> bool:
     """
     Returns True if the user query suggests interest in background activities,
@@ -280,6 +358,536 @@ def generate_metacognitive_narrative(user_query: str) -> str:
         logger.error(f"Failed to generate metacognitive narrative: {e}")
         return f"I recall looking up background tasks, but I failed to query my deliberations subsystem: {e}"
 
+def get_self_model_prompt_guidelines() -> str:
+    from src.database import get_connection
+    conn = get_connection(read_only_constitution=True)
+    traits = {}
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT trait_name, value FROM self_model;")
+        rows = cursor.fetchall()
+        for row in rows:
+            try:
+                name = row['trait_name']
+                val = float(row['value'])
+            except (TypeError, IndexError, KeyError):
+                name = row[0]
+                val = float(row[1])
+            traits[name] = val
+    except Exception as e:
+        logger.error(f"Failed to query self-model traits: {e}")
+    finally:
+        conn.close()
+
+    if not traits:
+        return ""
+
+    guidelines = []
+    
+    # Verbosity guidelines
+    v_val = traits.get("verbosity", 0.5)
+    if v_val < 0.3:
+        guidelines.append("- Style instructions: Be extremely concise, brief, and to the point. Keep responses under 2-3 sentences. Avoid extra details.")
+    elif v_val > 0.7:
+        guidelines.append("- Style instructions: Be highly verbose, comprehensive, and detailed. Provide complete context, code snippets if helpful, and thorough explanations.")
+    else:
+        guidelines.append("- Style instructions: Keep responses moderately concise, clear, and balanced in length.")
+
+    # Curiosity guidelines
+    cur_val = traits.get("curiosity", 0.5)
+    if cur_val > 0.7:
+        guidelines.append("- Persona instructions: Actively demonstrate curiosity. Propose next steps, future exploration ideas, or ask probing questions.")
+    elif cur_val < 0.3:
+        guidelines.append("- Persona instructions: Answer directly and stick only to the requested topic without recommending unrelated research.")
+
+    # Cautiousness guidelines
+    caut_val = traits.get("cautiousness", 0.5)
+    if caut_val > 0.7:
+        guidelines.append("- Persona instructions: Emphasize security, verification, thorough testing, and risk auditing in your response.")
+    elif caut_val < 0.3:
+        guidelines.append("- Persona instructions: Prioritize direct action, efficiency, and speed. Avoid defensive coding disclaimers.")
+
+    return "\n".join(guidelines)
+
+def handle_self_command() -> str:
+    from src.database import get_connection
+    conn = get_connection(read_only_constitution=True)
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT trait_name, value, confidence, is_pinned FROM self_model;")
+        traits = cursor.fetchall()
+        
+        cursor.execute("""
+            SELECT trait_name, old_value, new_value, old_confidence, new_confidence, reason, changed_at 
+            FROM self_model_history 
+            ORDER BY id DESC LIMIT 5;
+        """)
+        history = cursor.fetchall()
+    except Exception as e:
+        return f"[Error] Failed to fetch self-model state: {e}"
+    finally:
+        conn.close()
+
+    output = ["### 🧠 Janus Self-Model & Personality Traits\n"]
+    for row in traits:
+        try:
+            name = row['trait_name']
+            val = float(row['value'])
+            conf = float(row['confidence'])
+            pinned = int(row['is_pinned'])
+        except (TypeError, IndexError, KeyError):
+            name = row[0]
+            val = float(row[1])
+            conf = float(row[2])
+            pinned = int(row[3])
+            
+        filled = int(round(val * 10))
+        filled = max(0, min(10, filled))
+        bar = "█" * filled + "░" * (10 - filled)
+        status = "pinned 🔒" if pinned else "dynamic ⏳"
+        output.append(f"- **{name.capitalize()}**: `[{bar}]` **{val:.2f}** (confidence: {conf:.2f}, mode: {status})")
+
+    if history:
+        output.append("\n### 📜 Recent Trait Drift & Modification History\n")
+        output.append("| Timestamp | Trait | Drift/Change | Confidence Change | Reason |")
+        output.append("| --- | --- | --- | --- | --- |")
+        for h in history:
+            try:
+                tname = h['trait_name']
+                old_v = h['old_value']
+                new_v = h['new_value']
+                old_c = h['old_confidence']
+                new_c = h['new_confidence']
+                reason = h['reason']
+                ts = h['changed_at']
+            except (TypeError, IndexError, KeyError):
+                tname = h[0]
+                old_v = h[1]
+                new_v = h[2]
+                old_c = h[3]
+                new_c = h[4]
+                reason = h[5]
+                ts = h[6]
+            
+            # Format value change
+            if old_v is not None:
+                v_change = f"{old_v:.2f} ➔ {new_v:.2f}"
+            else:
+                v_change = f"{new_v:.2f}"
+                
+            if old_c is not None:
+                c_change = f"{old_c:.2f} ➔ {new_c:.2f}"
+            else:
+                c_change = f"{new_c:.2f}"
+                
+            output.append(f"| {ts} | **{tname}** | {v_change} | {c_change} | {reason} |")
+    else:
+        output.append("\nNo trait modifications or decay cycles recorded yet.")
+
+    return "\n".join(output)
+
+def handle_pin_command(command_str: str) -> str:
+    match = re.match(r"^/pin\s+([a-zA-Z0-9_-]+)\s+([0-9.]+)", command_str)
+    if not match:
+        return "[Error] Usage: /pin <trait> <value>"
+    
+    trait = match.group(1).strip().lower()
+    try:
+        val = float(match.group(2))
+    except ValueError:
+        return "[Error] Value must be a valid float between 0.0 and 1.0."
+        
+    if not (0.0 <= val <= 1.0):
+        return "[Error] Value must be between 0.0 and 1.0."
+        
+    from src.database import get_connection
+    conn = get_connection(read_only_constitution=True)
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT value, confidence FROM self_model WHERE trait_name = ?;", (trait,))
+        row = cursor.fetchone()
+        if not row:
+            return f"[Error] Trait '{trait}' not found in self-model."
+            
+        try:
+            old_v = row['value']
+            old_c = row['confidence']
+        except (TypeError, IndexError, KeyError):
+            old_v = row[0]
+            old_c = row[1]
+            
+        new_c = 1.0
+        cursor.execute(
+            "UPDATE self_model SET value = ?, confidence = ?, is_pinned = 1, updated_at = CURRENT_TIMESTAMP WHERE trait_name = ?;",
+            (val, new_c, trait)
+        )
+        cursor.execute(
+            "INSERT INTO self_model_history (trait_name, old_value, new_value, old_confidence, new_confidence, reason) "
+            "VALUES (?, ?, ?, ?, ?, ?);",
+            (trait, float(old_v), val, float(old_c), new_c, "Manual user pin override")
+        )
+        conn.commit()
+        return f"[✔] Trait '{trait}' pinned at value {val:.2f} (confidence: {new_c:.2f})."
+    except Exception as e:
+        return f"[Error] Failed to pin trait: {e}"
+    finally:
+        conn.close()
+
+def handle_unpin_command(command_str: str) -> str:
+    match = re.match(r"^/unpin\s+([a-zA-Z0-9_-]+)", command_str)
+    if not match:
+        return "[Error] Usage: /unpin <trait>"
+        
+    trait = match.group(1).strip().lower()
+    
+    from src.database import get_connection
+    conn = get_connection(read_only_constitution=True)
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT value, confidence, is_pinned FROM self_model WHERE trait_name = ?;", (trait,))
+        row = cursor.fetchone()
+        if not row:
+            return f"[Error] Trait '{trait}' not found in self-model."
+            
+        try:
+            old_v = row['value']
+            old_c = row['confidence']
+            pinned = row['is_pinned']
+        except (TypeError, IndexError, KeyError):
+            old_v = row[0]
+            old_c = row[1]
+            pinned = row[2]
+            
+        if not pinned:
+            return f"Trait '{trait}' is already unpinned."
+            
+        cursor.execute(
+            "UPDATE self_model SET is_pinned = 0, updated_at = CURRENT_TIMESTAMP WHERE trait_name = ?;",
+            (trait,)
+        )
+        cursor.execute(
+            "INSERT INTO self_model_history (trait_name, old_value, new_value, old_confidence, new_confidence, reason) "
+            "VALUES (?, ?, ?, ?, ?, ?);",
+            (trait, float(old_v), float(old_v), float(old_c), float(old_c), "Manual user unpin override")
+        )
+        conn.commit()
+        return f"[✔] Trait '{trait}' unpinned. It will now drift/decay normally."
+    except Exception as e:
+        return f"[Error] Failed to unpin trait: {e}"
+    finally:
+        conn.close()
+
+def handle_agent_command(command_str: str) -> str:
+    from src.skills import SafeAgentOrchestration
+    sao = SafeAgentOrchestration()
+    
+    parts = command_str.strip().split(None, 1)
+    subcommand = ""
+    args_str = ""
+    if len(parts) > 1:
+        subcommand_part = parts[1].strip()
+        sub_parts = subcommand_part.split(None, 1)
+        subcommand = sub_parts[0].lower()
+        if len(sub_parts) > 1:
+            args_str = sub_parts[1].strip()
+
+    if not subcommand or subcommand == "list":
+        agents = sao.get_agents()
+        if not agents:
+            return "No external agents registered yet. Register an agent with `/agent register <name> <api/cli> <endpoint> <api_key> <capabilities>`."
+            
+        output = ["### 🤖 Project Janus External Coder Agents\n"]
+        for a in agents:
+            status_emoji = "🟢" if a['is_active'] else "🔴"
+            output.append(f"- **{a['name']}** (Type: `{a['type']}`, Endpoint: `{a['endpoint']}`) {status_emoji}")
+            output.append(f"  Capabilities: {a['capabilities']}")
+        return "\n".join(output)
+
+    elif subcommand == "register":
+        import json
+        args_parts = args_str.split(None, 4)
+        if len(args_parts) < 3:
+            return "[Error] Usage: /agent register <name> <api/cli> <endpoint> [api_key] [capabilities_json]"
+            
+        name = args_parts[0]
+        atype = args_parts[1].lower()
+        endpoint = args_parts[2]
+        
+        api_key = ""
+        caps = []
+        
+        if len(args_parts) > 3:
+            api_key = args_parts[3]
+        if len(args_parts) > 4:
+            try:
+                caps = json.loads(args_parts[4])
+            except Exception:
+                caps = [c.strip() for c in args_parts[4].split(",") if c.strip()]
+                
+        if atype == 'cli' and api_key and not api_key.startswith("[") and not api_key.startswith("{"):
+            if api_key.startswith("http") or "/" in api_key:
+                pass
+            else:
+                try:
+                    caps = json.loads(api_key)
+                    api_key = ""
+                except Exception:
+                    pass
+                    
+        try:
+            aid = sao.register_agent(name, atype, endpoint, api_key, caps)
+            return f"[✔] External agent '{name}' (ID: {aid}) successfully registered."
+        except Exception as e:
+            return f"[Error] Failed to register agent: {e}"
+            
+    return "[Error] Unknown subcommand. Supported: list, register"
+
+def handle_dispatch_command(command_str: str) -> str:
+    from src.skills import SafeAgentOrchestration
+    sao = SafeAgentOrchestration()
+    
+    parts = command_str.strip().split(None, 1)
+    subcommand = ""
+    args_str = ""
+    if len(parts) > 1:
+        subcommand_part = parts[1].strip()
+        sub_parts = subcommand_part.split(None, 1)
+        subcommand = sub_parts[0].lower()
+        if len(sub_parts) > 1:
+            args_str = sub_parts[1].strip()
+
+    if not subcommand or subcommand == "list":
+        logs = sao.get_all_dispatches()
+        if not logs:
+            return "No task dispatches logged yet. Dispatch a task with `/dispatch <agent_name> <task_description> [file_paths]`."
+            
+        output = ["### 📋 External Agent Task Dispatch Log\n"]
+        for l in logs:
+            status_emoji = {
+                'pending': '⏳',
+                'in_progress': '⚙️',
+                'success': '✅',
+                'failed': '❌',
+                'reviewed': '📦'
+            }.get(l['status'], '❓')
+            
+            output.append(
+                f"- **[{l['id']}]** {status_emoji} Agent: `{l['agent_name']}` | "
+                f"Task: *{l['task_description']}* | Status: `{l['status']}` | Sandbox: `{l['sandbox_session_id']}`"
+            )
+        return "\n".join(output)
+
+    elif subcommand == "review":
+        args_parts = args_str.split()
+        if len(args_parts) < 2:
+            return "[Error] Usage: /dispatch review <id> [approve/reject]"
+        try:
+            did = int(args_parts[0])
+            action = args_parts[1].lower()
+            if action not in ('approve', 'reject'):
+                return "[Error] Action must be either 'approve' or 'reject'."
+                
+            approve = (action == 'approve')
+            success = sao.review_dispatch(did, approve=approve)
+            if success:
+                verb = "merged and shipped" if approve else "aborted and discarded"
+                return f"[✔] Dispatch [{did}] successfully {verb}."
+            return f"[Error] Failed to review dispatch [{did}]. Ensure task is in 'success' or 'failed' status."
+        except ValueError:
+            return "[Error] Dispatch ID must be an integer."
+        except Exception as e:
+            return f"[Error] Review failed: {e}"
+
+    else:
+        agent_name = subcommand
+        
+        agents = sao.get_agents()
+        agent_names = [a['name'].lower() for a in agents]
+        if agent_name not in agent_names:
+            return f"[Error] Unknown agent '{agent_name}'. Supported subcommands: list, review, or any registered agent name."
+            
+        file_paths = []
+        task_desc = args_str
+        
+        bracket_match = re.search(r"\[(.*?)\]$", args_str)
+        if bracket_match:
+            paths_str = bracket_match.group(1)
+            file_paths = [p.strip() for p in paths_str.split(",") if p.strip()]
+            task_desc = args_str[:bracket_match.start()].strip()
+        else:
+            words = args_str.rsplit(None, 1)
+            if len(words) == 2 and ("/" in words[1] or "." in words[1]):
+                file_paths = [p.strip() for p in words[1].split(",") if p.strip()]
+                task_desc = words[0].strip()
+                
+        matched_agent = next(a for a in agents if a['name'].lower() == agent_name)
+        exact_name = matched_agent['name']
+        
+        try:
+            did = sao.dispatch_task(exact_name, task_desc, file_paths)
+            status_details = sao.get_dispatch_status(did)
+            status = status_details.get("status", "failed")
+            
+            status_emoji = "✅" if status == "success" else "❌"
+            msg = (
+                f"[✔] Dispatch [{did}] completed with status '{status}' {status_emoji}.\n"
+                f"Sandbox Session: {status_details.get('sandbox_session_id')}\n"
+            )
+            if status == "success":
+                msg += f"Review the changes with `/dispatch list` or check git diff. To merge: `/dispatch review {did} approve`."
+            else:
+                msg += f"Tests failed. To inspect logs, check the dispatch status or run `/dispatch review {did} reject` to abort."
+            return msg
+        except Exception as e:
+            return f"[Error] Dispatch failed: {e}"
+
+def handle_replication_command(command_str: str) -> str:
+    from src.skills import SafeReplication
+    rep = SafeReplication()
+    
+    parts = command_str.strip().split(None, 1)
+    cmd = parts[0].lower()
+    args_str = parts[1].strip() if len(parts) > 1 else ""
+
+    if cmd == "/children":
+        children = rep.get_children()
+        if not children:
+            return "No child Janus instances spawned yet."
+            
+        output = ["### 🧬 Spawned Child Janus Instances\n"]
+        for c in children:
+            output.append(
+                f"- **PID: {c['child_pid']}** | Status: `{c['status']}` | Path: `{c['child_path']}`\n"
+                f"  Spawned: {c['spawned_at']} | Last HB: {c['last_heartbeat']}"
+            )
+        return "\n".join(output)
+
+    elif cmd == "/spawn":
+        if not args_str:
+            return "[Error] Usage: /spawn <name> <relative_path>"
+            
+        args_parts = args_str.split(None, 1)
+        if len(args_parts) < 2:
+            return "[Error] Usage: /spawn <name> <relative_path>"
+            
+        name = args_parts[0].strip()
+        path = args_parts[1].strip()
+        
+        try:
+            res = rep.spawn_child(name, path)
+            if res.get("success"):
+                return f"[✔] Successfully spawned child Janus '{name}' (PID: {res['child_pid']}) at path: {res['child_path']}"
+            return f"[Error] Failed to spawn child instance: {res}"
+        except Exception as e:
+            return f"[Error] Failed to spawn child instance: {e}"
+
+    return "[Error] Unknown command. Supported: /spawn, /children"
+
+def handle_goal_command(command_str: str) -> str:
+    from src.skills import SafeGoals
+    sg = SafeGoals()
+    
+    parts = command_str.strip().split(None, 1)
+    subcommand = ""
+    args_str = ""
+    if len(parts) > 1:
+        subcommand_part = parts[1].strip()
+        sub_parts = subcommand_part.split(None, 1)
+        subcommand = sub_parts[0].lower()
+        if len(sub_parts) > 1:
+            args_str = sub_parts[1].strip()
+
+    if not subcommand:
+        # List goals
+        goals = sg.get_goals()
+        if not goals:
+            return "No goals established yet. Define a new goal with `/goal create <type> <description>`."
+            
+        output = ["### 🎯 Project Janus Goal Registry\n"]
+        tiers = {'short': [], 'long': [], 'stretch': [], 'aspirational': []}
+        for g in goals:
+            tiers[g['type']].append(g)
+            
+        for tier, g_list in tiers.items():
+            if not g_list:
+                continue
+            output.append(f"#### {tier.capitalize()}-Term Goals")
+            for g in g_list:
+                status_emoji = {
+                    'proposed': '💡',
+                    'active': '🚀',
+                    'in_progress': '⚙️',
+                    'completed': '✅',
+                    'abandoned': '❌'
+                }.get(g['status'], '❓')
+                
+                output.append(f"- **[{g['id']}]** {status_emoji} *{g['description']}* (Status: `{g['status']}`)")
+                for cp in g['checkpoints']:
+                    cp_box = "[x]" if cp['achieved'] else "[ ]"
+                    output.append(f"  - {cp_box} checkpoint {cp['id']}: {cp['description']}")
+            output.append("")
+            
+        return "\n".join(output)
+
+    elif subcommand == "create":
+        create_parts = args_str.split(None, 1)
+        if len(create_parts) < 2:
+            return "[Error] Usage: /goal create <type> <description>\nTypes: short, long, stretch, aspirational"
+        gtype = create_parts[0].lower()
+        description = create_parts[1]
+        try:
+            gid = sg.create_goal(gtype, description)
+            return f"[✔] Goal [{gid}] successfully created under '{gtype}' tier."
+        except Exception as e:
+            return f"[Error] Failed to create goal: {e}"
+
+    elif subcommand == "status":
+        status_parts = args_str.split(None, 1)
+        if len(status_parts) < 2:
+            return "[Error] Usage: /goal status <goal_id> <status>\nStatuses: proposed, active, in_progress, completed, abandoned"
+        try:
+            gid = int(status_parts[0])
+            status = status_parts[1].lower()
+            success = sg.update_goal_status(gid, status)
+            if success:
+                return f"[✔] Goal [{gid}] status updated to '{status}'."
+            return f"[Error] Goal ID {gid} not found."
+        except ValueError:
+            return "[Error] Goal ID must be an integer."
+        except Exception as e:
+            return f"[Error] Failed to update goal: {e}"
+
+    elif subcommand == "checkpoint":
+        cp_parts = args_str.split(None, 1)
+        if len(cp_parts) < 2:
+            return "[Error] Usage: /goal checkpoint <goal_id> <description>"
+        try:
+            gid = int(cp_parts[0])
+            desc = cp_parts[1]
+            cpid = sg.add_checkpoint(gid, desc)
+            return f"[✔] Checkpoint [{cpid}] added to Goal [{gid}]."
+        except ValueError:
+            return "[Error] Goal ID must be an integer."
+        except Exception as e:
+            return f"[Error] Failed to add checkpoint: {e}"
+
+    elif subcommand == "complete":
+        if not args_str:
+            return "[Error] Usage: /goal complete <checkpoint_id>"
+        try:
+            cpid = int(args_str)
+            success = sg.complete_checkpoint(cpid)
+            if success:
+                return f"[✔] Checkpoint [{cpid}] marked as completed."
+            return f"[Error] Checkpoint ID {cpid} not found."
+        except ValueError:
+            return "[Error] Checkpoint ID must be an integer."
+        except Exception as e:
+            return f"[Error] Failed to complete checkpoint: {e}"
+
+    else:
+        return f"[Error] Unknown goal subcommand '{subcommand}'. Available commands: create, status, checkpoint, complete."
+
 def generate_persona_response(user_query: str) -> str:
     """
     Queries ChromaDB (Primary Concepts & Codebase) and episodic logs for context,
@@ -365,8 +973,13 @@ def generate_persona_response(user_query: str) -> str:
             chat_history.append(f"{speaker.upper()}: {msg}")
     history_summary = "\n".join(chat_history)
 
+    traits_prompt = get_self_model_prompt_guidelines()
+
     prompt = f"""
     You are the singular Persona surface of Project Janus, speaking as a cohesive consciousness. Respond to the user's message.
+    
+    PERSONALITY & STYLE INSTRUCTIONS:
+    {traits_prompt if traits_prompt else "Respond naturally."}
     
     RELEVANT HISTORICAL DATA:
     {semantic_context if semantic_context.strip() else "None."}
@@ -1402,6 +2015,52 @@ async def run_persona_chat():
                     print("\nJanus >> Invalid format. Please use: /amend <rule_key> | <rule_text>\n")
                 continue
 
+            if user_msg.lower().startswith("/skills"):
+                res = handle_skills_command()
+                print(f"\n{res}\n")
+                continue
+
+            if user_msg.lower().startswith("/runskill"):
+                res = handle_runskill_command(user_msg)
+                print(f"\n{res}\n")
+                continue
+
+            user_msg_lower = user_msg.strip().lower()
+            if user_msg_lower == "/self" or user_msg_lower.startswith("/self "):
+                res = handle_self_command()
+                print(f"\n{res}\n")
+                continue
+
+            if user_msg_lower.startswith("/pin ") or user_msg_lower == "/pin":
+                res = handle_pin_command(user_msg)
+                print(f"\n{res}\n")
+                continue
+
+            if user_msg_lower.startswith("/unpin ") or user_msg_lower == "/unpin":
+                res = handle_unpin_command(user_msg)
+                print(f"\n{res}\n")
+                continue
+
+            if user_msg_lower == "/agent" or user_msg_lower.startswith("/agent "):
+                res = handle_agent_command(user_msg)
+                print(f"\n{res}\n")
+                continue
+
+            if user_msg_lower == "/dispatch" or user_msg_lower.startswith("/dispatch "):
+                res = handle_dispatch_command(user_msg)
+                print(f"\n{res}\n")
+                continue
+
+            if user_msg_lower == "/spawn" or user_msg_lower.startswith("/spawn ") or user_msg_lower == "/children" or user_msg_lower.startswith("/children "):
+                res = handle_replication_command(user_msg)
+                print(f"\n{res}\n")
+                continue
+
+            if user_msg_lower == "/goal" or user_msg_lower.startswith("/goal ") or user_msg_lower == "/goals" or user_msg_lower.startswith("/goals "):
+                res = handle_goal_command(user_msg)
+                print(f"\n{res}\n")
+                continue
+
             # Log user prompt to SQLite
             log_episodic_memory("user", user_msg, "user_visible")
 
@@ -1756,6 +2415,35 @@ async def handle_web_slash_command(user_msg: str) -> str:
             return f"[✔] Rule '{rule_key}' successfully sealed in the core constitution."
         else:
             return "[Error] Invalid format. Please use: /amend <rule_key> | <rule_text>"
+            
+    # 5. /skills command
+    elif user_msg.lower().startswith("/skills"):
+        return handle_skills_command()
+
+    # 6. /runskill command
+    elif user_msg.lower().startswith("/runskill"):
+        return handle_runskill_command(user_msg)
+
+    elif user_msg.strip().lower() == "/self" or user_msg.strip().lower().startswith("/self "):
+        return handle_self_command()
+
+    elif user_msg.strip().lower().startswith("/pin ") or user_msg.strip().lower() == "/pin":
+        return handle_pin_command(user_msg)
+
+    elif user_msg.strip().lower().startswith("/unpin ") or user_msg.strip().lower() == "/unpin":
+        return handle_unpin_command(user_msg)
+
+    elif user_msg.strip().lower() == "/agent" or user_msg.strip().lower().startswith("/agent "):
+        return handle_agent_command(user_msg)
+
+    elif user_msg.strip().lower() == "/dispatch" or user_msg.strip().lower().startswith("/dispatch "):
+        return handle_dispatch_command(user_msg)
+
+    elif user_msg.strip().lower() == "/spawn" or user_msg.strip().lower().startswith("/spawn ") or user_msg.strip().lower() == "/children" or user_msg.strip().lower().startswith("/children "):
+        return handle_replication_command(user_msg)
+
+    elif user_msg.strip().lower() == "/goal" or user_msg.strip().lower().startswith("/goal ") or user_msg.strip().lower() == "/goals" or user_msg.strip().lower().startswith("/goals "):
+        return handle_goal_command(user_msg)
             
     return "[Error] Unknown slash command."
 

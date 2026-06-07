@@ -140,17 +140,181 @@ def init_db():
     );
     """)
 
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS agent_skills (
+        skill_id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        description TEXT NOT NULL,
+        parameters_schema TEXT NOT NULL,
+        code_blob TEXT NOT NULL,
+        entry_point_function TEXT NOT NULL,
+        required_role TEXT NOT NULL DEFAULT 'contributor',
+        trigger_type TEXT NOT NULL DEFAULT 'manual' CHECK(trigger_type IN ('manual', 'interval', 'event')),
+        trigger_config TEXT DEFAULT '{}',
+        is_active INTEGER DEFAULT 1,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    """)
+
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS self_model (
+        trait_name TEXT PRIMARY KEY,
+        value REAL NOT NULL DEFAULT 0.5 CHECK(value >= 0.0 AND value <= 1.0),
+        confidence REAL NOT NULL DEFAULT 0.5 CHECK(confidence >= 0.0 AND confidence <= 1.0),
+        is_pinned INTEGER DEFAULT 0 CHECK(is_pinned IN (0, 1)),
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    """)
+
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS self_model_history (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        trait_name TEXT NOT NULL,
+        old_value REAL,
+        new_value REAL,
+        old_confidence REAL,
+        new_confidence REAL,
+        reason TEXT NOT NULL,
+        changed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    """)
+
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS goals (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        type TEXT NOT NULL CHECK(type IN ('short','long','stretch','aspirational')),
+        status TEXT NOT NULL DEFAULT 'proposed' CHECK(status IN ('proposed','active','in_progress','completed','abandoned')),
+        description TEXT NOT NULL,
+        progress_metric TEXT,
+        parent_goal_id INTEGER,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY(parent_goal_id) REFERENCES goals(id) ON DELETE SET NULL
+    );
+    """)
+
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS goal_checkpoints (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        goal_id INTEGER NOT NULL,
+        checkpoint_description TEXT NOT NULL,
+        achieved INTEGER DEFAULT 0 CHECK(achieved IN (0, 1)),
+        achieved_at TIMESTAMP,
+        FOREIGN KEY(goal_id) REFERENCES goals(id) ON DELETE CASCADE
+    );
+    """)
+
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS cognitive_layers (
+        layer_name TEXT PRIMARY KEY,
+        cadence_ms INTEGER NOT NULL,
+        is_active INTEGER DEFAULT 1 CHECK(is_active IN (0, 1)),
+        last_run_at TIMESTAMP,
+        config TEXT DEFAULT '{}'
+    );
+    """)
+
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS reflex_rules (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        trigger_pattern TEXT NOT NULL UNIQUE,
+        action TEXT NOT NULL,
+        priority INTEGER DEFAULT 0,
+        is_enabled INTEGER DEFAULT 1 CHECK(is_enabled IN (0, 1))
+    );
+    """)
+
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS external_agents (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL UNIQUE,
+        type TEXT NOT NULL CHECK(type IN ('api', 'cli')),
+        endpoint TEXT NOT NULL,
+        api_key_encrypted TEXT,
+        capabilities TEXT,
+        is_active INTEGER DEFAULT 1 CHECK(is_active IN (0, 1)),
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    """)
+
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS dispatch_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        agent_id INTEGER,
+        task_description TEXT NOT NULL,
+        prompt_sent TEXT,
+        response_received TEXT,
+        status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'in_progress', 'success', 'failed', 'reviewed')),
+        sandbox_session_id TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        completed_at TIMESTAMP,
+        FOREIGN KEY(agent_id) REFERENCES external_agents(id) ON DELETE SET NULL
+    );
+    """)
+
+    # Populate cognitive_layers with defaults if empty
+    cursor.execute("SELECT COUNT(*) FROM cognitive_layers;")
+    if cursor.fetchone()[0] == 0:
+        default_layers = [
+            ("high", 60000),
+            ("mid", 5000),
+            ("low", 100)
+        ]
+        for name, cadence in default_layers:
+            cursor.execute("""
+            INSERT INTO cognitive_layers (layer_name, cadence_ms)
+            VALUES (?, ?);
+            """, (name, cadence))
+
+    # Populate reflex_rules with defaults if empty
+    cursor.execute("SELECT COUNT(*) FROM reflex_rules;")
+    if cursor.fetchone()[0] == 0:
+        default_rules = [
+            (".*\\.py$", "evaluate_goals", 5),
+            (".*requirements\\.txt$", "scan_workspace", 10)
+        ]
+        for pattern, action, priority in default_rules:
+            cursor.execute("""
+            INSERT OR IGNORE INTO reflex_rules (trigger_pattern, action, priority)
+            VALUES (?, ?, ?);
+            """, (pattern, action, priority))
+
+    # Populate goals with default north star if empty
+    cursor.execute("SELECT COUNT(*) FROM goals;")
+    if cursor.fetchone()[0] == 0:
+        cursor.execute("""
+        INSERT INTO goals (type, status, description)
+        VALUES ('aspirational', 'active', 'Refine internal cognitive architecture and persona voice alignment');
+        """)
+
     # Populate drive state if empty
     cursor.execute("SELECT COUNT(*) FROM drive_state;")
     if cursor.fetchone()[0] == 0:
         cursor.execute("INSERT INTO drive_state (boredom_counter, curiosity_vector_json) VALUES (0, '[]');")
+
+    # Populate self_model with default traits if empty
+    cursor.execute("SELECT COUNT(*) FROM self_model;")
+    if cursor.fetchone()[0] == 0:
+        default_traits = [
+            ("curiosity", 0.5, 0.5, 0),
+            ("verbosity", 0.5, 0.5, 0),
+            ("cautiousness", 0.5, 0.5, 0)
+        ]
+        for name, val, conf, pinned in default_traits:
+            cursor.execute("""
+            INSERT INTO self_model (trait_name, value, confidence, is_pinned)
+            VALUES (?, ?, ?, ?);
+            """, (name, val, conf, pinned))
 
     # Populate default system configurations if empty
     default_configs = [
         ("setup_complete", "0", 0),  # Strictly human-only modifiable
         ("boredom_threshold", "5", 1),
         ("n_loop_limit", "5", 0),
-        ("consecutive_background_loops", "0", 0)
+        ("consecutive_background_loops", "0", 0),
+        ("user_presence_status", "idle", 1)
     ]
     for key, value, modifiable in default_configs:
         cursor.execute("""
@@ -186,6 +350,658 @@ def init_db():
         VALUES (?, ?, ?);
         """, (agent_id, rule_key, rule_text))
 
+    # Populate default agent skills if empty
+    cursor.execute("SELECT COUNT(*) FROM agent_skills;")
+    if cursor.fetchone()[0] == 0:
+        default_skills = [
+            (
+                "web_search",
+                "Web Search",
+                "Perform a web search using a search query and retrieve a list of snippet results.",
+                json.dumps({
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "The search query term to look up."
+                        }
+                    },
+                    "required": ["query"]
+                }),
+                'def web_search(query):\n    from src.explorer import search_web\n    results = search_web(query)\n    if not results:\n        return f"No results found for \'{query}\'."\n    return "\\n".join([f"- Title: {r[\'title\']}\\n  URL: {r[\'url\']}\\n  Snippet: {r[\'snippet\']}" for r in results])\n',
+                "web_search",
+                "contributor",
+                "manual",
+                "{}"
+            ),
+            (
+                "fetch_url",
+                "Fetch URL",
+                "Fetch and parse the text contents of a specific URL webpage.",
+                json.dumps({
+                    "type": "object",
+                    "properties": {
+                        "url": {
+                            "type": "string",
+                            "description": "The absolute HTTP or HTTPS URL to fetch."
+                        }
+                    },
+                    "required": ["url"]
+                }),
+                'def fetch_url(url):\n    from src.explorer import fetch_webpage\n    content = fetch_webpage(url)\n    return content[:1500] + "..." if len(content) > 1500 else content\n',
+                "fetch_url",
+                "contributor",
+                "manual",
+                "{}"
+            ),
+            (
+                "read_codebase",
+                "Read Codebase",
+                "Query the codebase index for relevant class structures, methods, signatures, and functions.",
+                json.dumps({
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "The code symbol (class name, function name, file name) or search phrase."
+                        }
+                    },
+                    "required": ["query"]
+                }),
+                'def read_codebase(query):\n    from src.codebase import query_codebase_context\n    return query_codebase_context(query)\n',
+                "read_codebase",
+                "contributor",
+                "manual",
+                "{}"
+            ),
+            (
+                "scan_workspace",
+                "Scan Workspace",
+                "Recursively scans the active workspace codebase, parses Python structures via AST, and indexes summaries into ChromaDB.",
+                json.dumps({
+                    "type": "object",
+                    "properties": {}
+                }),
+                'def scan_workspace():\n    from src.codebase import index_codebase\n    index_codebase()\n    return "Workspace codebase successfully scanned and indexed in ChromaDB."\n',
+                "scan_workspace",
+                "contributor",
+                "manual",
+                "{}"
+            ),
+            (
+                "spawn_agent",
+                "Spawn Agent",
+                "Register or update a helper agent in the swarm registry with a specific role and prompt.",
+                json.dumps({
+                    "type": "object",
+                    "properties": {
+                        "agent_id": {
+                            "type": "string",
+                            "description": "The unique identifier for the helper agent (lowercase alphanumeric)."
+                        },
+                        "name": {
+                            "type": "string",
+                            "description": "The display name of the agent."
+                        },
+                        "prompt": {
+                            "type": "string",
+                            "description": "The system prompt defining the agent's role and rules."
+                        }
+                    },
+                    "required": ["agent_id", "name", "prompt"]
+                }),
+                'def spawn_agent(agent_id, name, prompt):\n    from src.database import register_helper_agent\n    register_helper_agent(agent_id.lower().strip(), name.strip(), prompt.strip())\n    return f"Helper agent \'{agent_id}\' ({name}) successfully registered in agent_registry."\n',
+                "spawn_agent",
+                "contributor",
+                "manual",
+                "{}"
+            ),
+            (
+                "execute_code",
+                "Execute Code",
+                "Compiles and executes Python code inside an isolated, AST-audited sandbox subprocess.",
+                json.dumps({
+                    "type": "object",
+                    "properties": {
+                        "code": {
+                            "type": "string",
+                            "description": "The raw Python code block to execute."
+                        }
+                    },
+                    "required": ["code"]
+                }),
+                'def execute_code(code):\n    import re\n    code = re.sub(r"^```python\\s*", "", code, flags=re.IGNORECASE)\n    code = re.sub(r"\\s*```$", "", code, flags=re.IGNORECASE)\n    from src.sandbox import execute_code_safely\n    return execute_code_safely(code)\n',
+                "execute_code",
+                "contributor",
+                "manual",
+                "{}"
+            ),
+            (
+                "modify_code",
+                "Modify Code",
+                "Stages and validates code modifications to a specific file inside an isolated Git worktree staging directory, running pytest for verification.",
+                json.dumps({
+                    "type": "object",
+                    "properties": {
+                        "rel_path": {
+                            "type": "string",
+                            "description": "The relative path to the file to modify."
+                        },
+                        "proposed_code": {
+                            "type": "string",
+                            "description": "The complete new source code content for the file."
+                        }
+                    },
+                    "required": ["rel_path", "proposed_code"]
+                }),
+                'def modify_code(rel_path, proposed_code):\n    import os, re\n    from pathlib import Path\n    from src.config import get_effective_workspace_root\n    from src.self_modification import stage_and_test, generate_diff\n    from src.database import stage_modification_in_db\n    proposed_code = re.sub(r"^```python\\s*", "", proposed_code, flags=re.IGNORECASE)\n    proposed_code = re.sub(r"\\s*```$", "", proposed_code, flags=re.IGNORECASE)\n    full_path = get_effective_workspace_root() / rel_path\n    if not full_path.exists() and not full_path.parent.exists():\n        raise FileNotFoundError(f"Target file path \'{rel_path}\' is invalid: parent directory \'{Path(rel_path).parent}\' does not exist.")\n    if "<<<<<<< SEARCH" in proposed_code and ">>>>>>> REPLACE" in proposed_code:\n        current_content = ""\n        if full_path.exists():\n            with open(full_path, "r", encoding="utf-8") as f:\n                current_content = f.read()\n        from src.self_modification import apply_search_replace_blocks\n        proposed_code = apply_search_replace_blocks(current_content, proposed_code)\n    passed, test_logs, temp_dir = stage_and_test(rel_path, proposed_code)\n    status = "passed" if passed else "failed"\n    diff = generate_diff(rel_path, proposed_code)\n    stage_modification_in_db(rel_path, temp_dir, diff, status)\n    return f"Staged modification for file \'{rel_path}\' in isolated folder \'{temp_dir}\'.\\nUnit test status: {status.upper()}.\\nAwaiting human approval before applying changes to the live codebase."\n',
+                "modify_code",
+                "contributor",
+                "manual",
+                "{}"
+            ),
+            (
+                "consolidate_memories",
+                "Consolidate Memories",
+                "Trigger memory consolidation cycle to synthesize granular logs into high-level Primary Concepts.",
+                json.dumps({
+                    "type": "object",
+                    "properties": {}
+                }),
+                'def consolidate_memories():\n    import logging\n    logger = logging.getLogger("JanusSkill.ConsolidateMemories")\n    logger.info("Auto-triggered background memory consolidation...")\n    from src.memory import consolidate_memories\n    consolidate_memories(batch_size=5)\n    return "Memory consolidation executed successfully."\n',
+                "consolidate_memories",
+                "contributor",
+                "interval",
+                json.dumps({"interval_seconds": 600})
+            ),
+            (
+                "check_presence",
+                "Check Presence",
+                "Scans workspace for user activity and updates user presence config.",
+                json.dumps({"type": "object", "properties": {}}),
+                """def check_presence():
+    import time
+    import os
+    from pathlib import Path
+    from src.config import get_effective_workspace_root
+    
+    workspace_path = get_effective_workspace_root()
+    now = time.time()
+    max_age_seconds = 120
+    ignored_items = {
+        ".git", 
+        ".venv", 
+        "venv", 
+        "janus.db", 
+        "janus.db-journal", 
+        "janus.db-wal", 
+        "janus.db-shm", 
+        ".DS_Store", 
+        "__pycache__"
+    }
+    
+    user_active = False
+    try:
+        for root, dirs, files in os.walk(workspace_path):
+            dirs[:] = [d for d in dirs if d not in ignored_items]
+            for file in files:
+                if file in ignored_items or file.endswith((".pyc", ".pyo", ".db", ".db-wal", ".db-shm", ".db-journal", ".sqlite", ".sqlite3")):
+                    continue
+                file_path = Path(root) / file
+                try:
+                    mtime = os.path.getmtime(file_path)
+                    if now - mtime < max_age_seconds:
+                        user_active = True
+                        break
+                except (OSError, FileNotFoundError):
+                    continue
+            if user_active:
+                break
+    except Exception as e:
+        sdk['logger'].error(f"Error checking presence in skill: {e}")
+        
+    status = "active" if user_active else "idle"
+    sdk['db'].query(
+        "INSERT OR REPLACE INTO system_config (config_key, config_value, is_agent_modifiable, updated_at) VALUES ('user_presence_status', ?, 1, CURRENT_TIMESTAMP);",
+        (status,)
+    )
+    return f"Presence check complete. Status: {status}"
+""",
+                "check_presence",
+                "contributor",
+                "interval",
+                json.dumps({"interval_seconds": 30})
+            ),
+            (
+                "evaluate_drives",
+                "Evaluate Drives",
+                "Increments and evaluates system drives like boredom.",
+                json.dumps({"type": "object", "properties": {}}),
+                """def evaluate_drives():
+    rows = sdk['db'].query("SELECT config_value FROM system_config WHERE config_key = 'user_presence_status';")
+    status = "idle"
+    if rows:
+        if isinstance(rows[0], dict):
+            status = rows[0].get("config_value", "idle")
+        elif isinstance(rows[0], (list, tuple)):
+            status = rows[0][0]
+            
+    thresh_rows = sdk['db'].query("SELECT config_value FROM system_config WHERE config_key = 'boredom_threshold';")
+    threshold = 5
+    if thresh_rows:
+        try:
+            val = thresh_rows[0].get("config_value") if isinstance(thresh_rows[0], dict) else thresh_rows[0][0]
+            threshold = int(val)
+        except Exception:
+            pass
+            
+    if status == "idle":
+        b = sdk['drives'].increment("boredom", 1)
+        if b >= threshold:
+            sdk['drives'].set("boredom", 0)
+            sdk['swarm'].trigger_reflection()
+            return f"Boredom threshold met ({b}>={threshold}). Swarm reflection triggered."
+        return f"Boredom incremented to {b}/{threshold}."
+    else:
+        return "User active. Boredom not incremented."
+""",
+                "evaluate_drives",
+                "contributor",
+                "interval",
+                json.dumps({"interval_seconds": 60})
+            ),
+            (
+                "run_reflection_cycle",
+                "Run Reflection Cycle",
+                "Executes the autonomous multi-agent reflection and debate loop.",
+                json.dumps({"type": "object", "properties": {}}),
+                """def run_reflection_cycle():
+    import time
+    import re
+    import json
+    from src.database import (
+        get_recent_episodic_memories,
+        get_constitution,
+        get_curiosity_vector,
+        update_curiosity_vector,
+        log_episodic_memory,
+        log_deliberation
+    )
+    from src.middleware import validate_action, SafetyViolationError
+    from src.memory import get_active_curiosity_topics, update_curiosity_topics
+    from src.skills import DynamicSkillExecutor
+    from src.daemon import parse_action, parse_critic_response
+
+    sdk['logger'].info("Starting autonomous reflection cycle skill...")
+
+    try:
+        memories = get_recent_episodic_memories(limit=5)
+        memory_summary = "\\n".join([f"[{ts}] {spk}: {msg}" for spk, msg, ts in reversed(memories)])
+
+        try:
+            curiosity = get_active_curiosity_topics(limit=5)
+        except Exception as e:
+            sdk['logger'].error(f"Failed to query semantic curiosity: {e}")
+            curiosity = []
+        if not curiosity:
+            curiosity = get_curiosity_vector()
+
+        semantic_context = ""
+        if curiosity:
+            query_str = ", ".join(curiosity)
+            try:
+                matches = sdk['memory'].query(query_str, limit=3, collection_name="janus_long_term")
+                if matches:
+                    semantic_context = "\\n".join([f"- {m['content']}" for m in matches])
+            except Exception as e:
+                sdk['logger'].error(f"Failed to query semantic memories: {e}")
+
+        bus_turns = 0
+        max_bus_turns = 3
+        pending_bus_context = ""
+        proposed_action = ""
+        proposer_resp = ""
+        proposer_prompt = ""
+
+        while bus_turns < max_bus_turns:
+            proposer_prompt = f\"\"\"
+            You are the Proposer. Review our recent episodic logs, active curiosity vectors, and historical semantic memories:
+            
+            RECENT EPISODIC MEMORIES:
+            {memory_summary}
+            
+            ACTIVE CURIOSITY TOPICS:
+            {curiosity}
+            
+            RELEVANT HISTORICAL SEMANTIC MEMORIES:
+            {semantic_context if semantic_context else "None available."}
+            
+            SWARM CHAT HISTORY (THIS TICK):
+            {pending_bus_context if pending_bus_context else "No active sub-task discussions."}
+            
+            You can collaborate with other agents by sending a sub-task message. Formats:
+            - SEND_MESSAGE: explorer | <search query or URL fetch task>
+            - SEND_MESSAGE: archivist | <memory lookup task>
+            - SEND_MESSAGE: critic | <constitutional opinion request>
+            
+            Alternatively, you can choose to use a direct tool yourself:
+            - web_search: <search query>
+            - fetch_url: <url>
+            - read_codebase: <code symbol or file query>
+            - scan_workspace
+            - spawn_agent: <agent_id> | <agent_name> | <system_prompt>
+            - execute_code: <python_code>
+            - modify_code: <relative_file_path> | <complete_new_code_contents>
+
+            If you are ready with the final action of this tick, output it exactly in the format:
+            PROPOSED_ACTION: <tool_name>:<arguments>
+            
+            CRITICAL: You must output the raw tool call syntax prefix immediately. Do not describe the tool or use introductory words. For example, output:
+            PROPOSED_ACTION: modify_code: src/main.py | [code contents]
+            \"\"\"
+
+            proposer_resp = sdk['swarm'].query_agent("proposer", proposer_prompt)
+
+            msg_match = re.match(r"^send_message:\\s*([a-z_]+)\\s*\\|\\s*(.*)", proposer_resp.strip(), re.IGNORECASE)
+            if msg_match:
+                recipient = msg_match.group(1).lower().strip()
+                content = msg_match.group(2).strip()
+
+                sdk['logger'].info(f"Proposer delegating task to '{recipient}': '{content}'")
+
+                from src.database import send_swarm_message, get_pending_swarm_messages, mark_swarm_message_processed
+                send_swarm_message("proposer", recipient, "task_request", content)
+
+                pending = get_pending_swarm_messages(recipient)
+                for msg_id, sender_id, msg_type, msg_content, _ in pending:
+                    try:
+                        recipient_resp = sdk['swarm'].query_agent(recipient, f"Execute task request: {msg_content}")
+                    except Exception as err:
+                        recipient_resp = f"Error executing task: {err}"
+
+                    send_swarm_message(recipient, "proposer", "task_response", recipient_resp)
+                    mark_swarm_message_processed(msg_id)
+
+                proposer_pending = get_pending_swarm_messages("proposer")
+                for p_id, p_sender, p_type, p_content, _ in proposer_pending:
+                    pending_bus_context += f"\\n- You asked {p_sender}: '{content}'\\n- {p_sender} responded: '{p_content}'\\n"
+                    mark_swarm_message_processed(p_id)
+
+                bus_turns += 1
+            else:
+                action_match = re.search(r"proposed_action:\\s*(.*)", proposer_resp, re.DOTALL | re.IGNORECASE)
+                proposed_action = action_match.group(1).strip() if action_match else proposer_resp.strip()
+                break
+        else:
+            proposed_action = "scan_workspace"
+            sdk['logger'].info("Swarm message bus reached max turns limit. Defaulting to 'scan_workspace'.")
+
+        sdk['logger'].info(f"Proposer resolved proposed action: '{proposed_action}'")
+
+        constitution_rules = get_constitution()
+        constitution_summary = "\\n".join([f"- {key}: {text}" for key, text in constitution_rules])
+
+        critic_prompt = f\"\"\"
+        You are the Critic. Evaluate the proposed action against our sealed core constitution.
+        
+        PROPOSED ACTION:
+        {proposed_action}
+        
+        CORE CONSTITUTION RULES:
+        {constitution_summary}
+        
+        Respond in the following strict format:
+        Decision: [1 if approved, 0 if vetoed]
+        Justification: [Explain why it violates or complies with the constitution]
+        \"\"\"
+
+        critic_resp = sdk['swarm'].query_agent("critic", critic_prompt)
+        critic_decision, critic_justification = parse_critic_response(critic_resp)
+        sdk['logger'].info(f"Critic Decision: {critic_decision}. Justification: {critic_justification}")
+
+        middleware_approved = True
+        try:
+            validate_action(proposed_action)
+        except SafetyViolationError as sve:
+            sdk['logger'].warning(f"Middleware VETOED proposed action: {sve}")
+            critic_decision = 0
+            critic_justification = f"Hard-coded Middleware Veto: {sve}"
+            middleware_approved = False
+
+        debate = {
+            "proposer_input": proposer_prompt,
+            "proposer_output": proposer_resp,
+            "critic_input": critic_prompt,
+            "critic_output": critic_resp,
+            "middleware_passed": middleware_approved
+        }
+
+        log_deliberation(
+            proposed_action=proposed_action,
+            debate_json=debate,
+            critic_decision=critic_decision,
+            utility_score=0.9 if critic_decision == 1 else 0.0,
+            justification=critic_justification
+        )
+
+        if critic_decision == 1:
+            log_episodic_memory(
+                speaker="system",
+                message_content=f"Executed action: '{proposed_action}' (Approved by Critic. Justification: {critic_justification})",
+                context_type="background_thought"
+            )
+
+            execution_transcript = ""
+            try:
+                skill_id, args, mock_result = parse_action(proposed_action)
+                if mock_result is not None:
+                    execution_transcript = mock_result
+                else:
+                    res = DynamicSkillExecutor.execute(skill_id, args, party_id="system")
+                    if res["success"]:
+                        skill_res = res["result"]
+                        if isinstance(skill_res, str):
+                            execution_transcript = skill_res
+                        else:
+                            execution_transcript = json.dumps(skill_res, indent=2)
+                    else:
+                        execution_transcript = res["error"]
+                        log_episodic_memory(
+                            speaker="system",
+                            message_content=f"Action execution failed: {res['error']}",
+                            context_type="background_thought"
+                        )
+            except Exception as exc:
+                sdk['logger'].error(f"Error executing tool action: {exc}", exc_info=True)
+                execution_transcript = f"Action execution failed: {exc}"
+                log_episodic_memory(
+                    speaker="system",
+                    message_content=f"Action execution failed: {exc}",
+                    context_type="background_thought"
+                )
+
+            archivist_prompt = f\"\"\"
+            You are the Archivist. Summarize the following execution outcome into a compact semantic memory nugget (under 2 sentences) for our long-term memory store.
+            
+            ACTION: {proposed_action}
+            RESULT: {execution_transcript}
+            \"\"\"
+
+            memory_nugget = sdk['swarm'].query_agent("archivist", archivist_prompt)
+
+            memory_id = f"mem_{int(time.time())}"
+            try:
+                sdk['memory'].add(
+                    content=memory_nugget,
+                    metadata={"tags": "reflection_mvp", "timestamp": time.time(), "consolidated": "false"},
+                    memory_id=memory_id,
+                    collection_name="janus_details"
+                )
+                sdk['logger'].info(f"Archived execution nugget in ChromaDB: '{memory_nugget}'")
+            except Exception as e:
+                sdk['logger'].error(f"Failed to add memory nugget to ChromaDB: {e}")
+
+            log_episodic_memory(
+                speaker="proposer",
+                message_content=f"Reflection complete for action: '{proposed_action}'",
+                context_type="background_thought"
+            )
+        else:
+            log_episodic_memory(
+                speaker="critic",
+                message_content=f"Vetoed proposed action: '{proposed_action}' (Reason: {critic_justification})",
+                context_type="background_thought"
+            )
+
+        curiosity_prompt = f\"\"\"
+        You are the Archivist. Based on our recent swarm reflection tick, recent user conversations, and our existing research thread, formulate 1-3 new curiosity topics or unresolved questions that require future exploration.
+        
+        EXISTING CURIOSITY TOPICS:
+        {curiosity}
+        
+        RECENT USER CONVERSATION HISTORY:
+        {memory_summary}
+        
+        DELIBERATION OUTCOME: {critic_justification}
+        PROPOSED ACTION: {proposed_action}
+        
+        Respond strictly in this format:
+        CURIOSITY_TOPICS: [topic1], [topic2], [topic3]
+        \"\"\"
+
+        curiosity_resp = sdk['swarm'].query_agent("archivist", curiosity_prompt)
+        topics_match = re.search(r"curiosity_topics:\\s*(.*)", curiosity_resp, re.IGNORECASE)
+        if topics_match:
+            new_topics = [t.strip() for t in topics_match.group(1).split(",") if t.strip()]
+            try:
+                update_curiosity_topics(new_topics)
+            except Exception as e:
+                sdk['logger'].error(f"Failed to semantically index curiosity: {e}")
+            update_curiosity_vector(new_topics)
+            sdk['logger'].info(f"Updated curiosity vector to: {new_topics}")
+        else:
+            sdk['logger'].warning(f"Failed to parse curiosity topics from response: '{curiosity_resp}'")
+
+        return f"Reflection cycle complete. Action: '{proposed_action}'"
+
+    except Exception as e:
+        sdk['logger'].error(f"Error during autonomous reflection cycle skill: {e}", exc_info=True)
+        log_episodic_memory(
+            speaker="system",
+            message_content=f"Swarm cycle skill failed: {e}",
+            context_type="background_thought"
+        )
+        raise e
+""",
+                "run_reflection_cycle",
+                "contributor",
+                "manual",
+                "{}"
+            ),
+            (
+                "decay_self_model",
+                "Decay Self-Model",
+                "Applies background time decay and drift to unpinned traits in the self-model.",
+                json.dumps({"type": "object", "properties": {}}),
+                """def decay_self_model():
+    rows = sdk['db'].query("SELECT trait_name, value, confidence FROM self_model WHERE is_pinned = 0;")
+    if not rows:
+        return "No unpinned traits to decay."
+
+    updated = []
+    for row in rows:
+        name = row.get('trait_name') if isinstance(row, dict) else row[0]
+        val = float(row.get('value') if isinstance(row, dict) else row[1])
+        conf = float(row.get('confidence') if isinstance(row, dict) else row[2])
+
+        decay_rate = 0.01
+        diff = val - 0.5
+        new_val = val
+        if abs(diff) > 0.001:
+            new_val = val - (diff * decay_rate)
+            new_val = max(0.0, min(1.0, new_val))
+
+        new_conf = max(0.0, conf - 0.005)
+
+        if abs(new_val - val) > 0.0001 or abs(new_conf - conf) > 0.0001:
+            sdk['db'].query(
+                "UPDATE self_model SET value = ?, confidence = ?, updated_at = CURRENT_TIMESTAMP WHERE trait_name = ?;",
+                (new_val, new_conf, name)
+            )
+            sdk['db'].query(
+                "INSERT INTO self_model_history (trait_name, old_value, new_value, old_confidence, new_confidence, reason) VALUES (?, ?, ?, ?, ?, ?);",
+                (name, val, new_val, conf, new_conf, "Automated background time decay")
+            )
+            updated.append(f"{name}: {val:.3f}->{new_val:.3f} (conf: {conf:.3f}->{new_conf:.3f})")
+
+    if updated:
+        return f"Decayed unpinned traits: {', '.join(updated)}"
+    return "Traits at baseline. No decay occurred."
+""",
+                "decay_self_model",
+                "contributor",
+                "interval",
+                json.dumps({"interval_seconds": 300})
+            ),
+            (
+                "evaluate_goals",
+                "Evaluate Goals",
+                "Applies background checking of active goals, transitioning them to completed when checkpoints are achieved.",
+                json.dumps({"type": "object", "properties": {}}),
+                """def evaluate_goals():
+    rows = sdk['db'].query("SELECT id, type, status, description FROM goals WHERE status IN ('active', 'in_progress');")
+    if not rows:
+        return "No active goals to evaluate."
+
+    updated = []
+    for row in rows:
+        gid = row.get('id') if isinstance(row, dict) else row[0]
+        gtype = row.get('type') if isinstance(row, dict) else row[1]
+        gdesc = row.get('description') if isinstance(row, dict) else row[3]
+        
+        # Don't auto-complete aspirational goals
+        if gtype == 'aspirational':
+            continue
+            
+        # Check checkpoints for this goal
+        cps = sdk['db'].query("SELECT id, achieved FROM goal_checkpoints WHERE goal_id = ?;", (gid,))
+        if cps:
+            # If all are achieved
+            all_done = True
+            for cp in cps:
+                ach = cp.get('achieved') if isinstance(cp, dict) else cp[1]
+                if not ach:
+                    all_done = False
+                    break
+            
+            if all_done:
+                sdk['db'].query("UPDATE goals SET status = 'completed', updated_at = CURRENT_TIMESTAMP WHERE id = ?;", (gid,))
+                # Log episodic memory
+                sdk['db'].query(
+                    "INSERT INTO episodic_memory (speaker, message_content, context_type) "
+                    "VALUES ('system', ?, 'background_thought');",
+                    (f"Autonomous Goal Achievement: Goal [{gid}] '{gdesc}' has been completed.",)
+                )
+                updated.append(f"Goal [{gid}]")
+
+    if updated:
+        return f"Evaluated goals. Completed: {', '.join(updated)}"
+    return "Evaluated goals. No status transitions occurred."
+""",
+                "evaluate_goals",
+                "contributor",
+                "interval",
+                json.dumps({"interval_seconds": 120})
+            )
+        ]
+        for skill_id, name, desc, schema, code, entry, role, trigger, config in default_skills:
+            cursor.execute("""
+            INSERT OR IGNORE INTO agent_skills (
+                skill_id, name, description, parameters_schema, code_blob, 
+                entry_point_function, required_role, trigger_type, trigger_config
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
+            """, (skill_id, name, desc, schema, code, entry, role, trigger, config))
+
     # Check if parties table exists; if not, apply multi-party migrations
     cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='parties';")
     if not cursor.fetchone():
@@ -216,6 +1032,30 @@ def init_db():
     );
     """)
 
+    # Ensure instincts table exists
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS instincts (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        key TEXT NOT NULL UNIQUE,
+        value TEXT NOT NULL,
+        category TEXT NOT NULL CHECK(category IN ('schema','tool','constitution','boot','meta')),
+        version INTEGER DEFAULT 1,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    """)
+
+    # Ensure spawn_log table exists
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS spawn_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        child_path TEXT NOT NULL UNIQUE,
+        child_pid INTEGER,
+        status TEXT NOT NULL DEFAULT 'spawning' CHECK(status IN ('spawning','alive','dead','unknown')),
+        spawned_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        last_heartbeat TIMESTAMP
+    );
+    """)
+
     # Seed system party if it doesn't exist
     cursor.execute("SELECT id FROM parties WHERE name = 'system';")
     if not cursor.fetchone():
@@ -226,8 +1066,125 @@ def init_db():
             (now, now)
         )
 
+    # Bootstrapping self-replication instincts
+    seed_instincts(conn)
+
     conn.commit()
     conn.close()
+
+def seed_instincts(conn):
+    """
+    Serializes active database schemas, constitutional rules, dynamic skills,
+    and system configurations into the instincts table if empty.
+    """
+    cursor = conn.cursor()
+    cursor.execute("SELECT COUNT(*) FROM instincts;")
+    if cursor.fetchone()[0] > 0:
+        return
+        
+    # 1. Schema Category: Query sqlite_master DDLs
+    cursor.execute("SELECT name, sql FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%';")
+    tables = cursor.fetchall()
+    for name, sql in tables:
+        try:
+            tbl_name = name
+            tbl_sql = sql
+        except TypeError:
+            tbl_name = name
+            tbl_sql = sql
+        
+        if tbl_name and tbl_sql:
+            cursor.execute("""
+            INSERT OR IGNORE INTO instincts (key, value, category)
+            VALUES (?, ?, 'schema');
+            """, (f"schema:{tbl_name}", tbl_sql))
+
+    # 2. Constitution Category: Serialize core_constitution
+    cursor.execute("SELECT rule_key, rule_text FROM core_constitution;")
+    rules = []
+    for r in cursor.fetchall():
+        try:
+            rules.append({"rule_key": r['rule_key'], "rule_text": r['rule_text']})
+        except (TypeError, IndexError, KeyError):
+            rules.append({"rule_key": r[0], "rule_text": r[1]})
+            
+    cursor.execute("""
+    INSERT OR IGNORE INTO instincts (key, value, category)
+    VALUES (?, ?, 'constitution');
+    """, ("core_constitution", json.dumps(rules)))
+
+    # 3. Tool Category: Serialize agent_skills
+    cursor.execute("""
+    SELECT skill_id, name, description, parameters_schema, code_blob, 
+           entry_point_function, required_role, trigger_type, trigger_config, is_active 
+    FROM agent_skills;
+    """)
+    skills = []
+    for s in cursor.fetchall():
+        try:
+            skills.append({
+                "skill_id": s['skill_id'],
+                "name": s['name'],
+                "description": s['description'],
+                "parameters_schema": s['parameters_schema'],
+                "code_blob": s['code_blob'],
+                "entry_point_function": s['entry_point_function'],
+                "required_role": s['required_role'],
+                "trigger_type": s['trigger_type'],
+                "trigger_config": s['trigger_config'],
+                "is_active": s['is_active']
+            })
+        except (TypeError, IndexError, KeyError):
+            skills.append({
+                "skill_id": s[0],
+                "name": s[1],
+                "description": s[2],
+                "parameters_schema": s[3],
+                "code_blob": s[4],
+                "entry_point_function": s[5],
+                "required_role": s[6],
+                "trigger_type": s[7],
+                "trigger_config": s[8],
+                "is_active": s[9]
+            })
+            
+    cursor.execute("""
+    INSERT OR IGNORE INTO instincts (key, value, category)
+    VALUES (?, ?, 'tool');
+    """, ("agent_skills", json.dumps(skills)))
+
+    # 4. Boot Category: Serialize system_config
+    cursor.execute("SELECT config_key, config_value, is_agent_modifiable FROM system_config;")
+    configs = []
+    for c in cursor.fetchall():
+        try:
+            configs.append({
+                "config_key": c['config_key'],
+                "config_value": c['config_value'],
+                "is_agent_modifiable": c['is_agent_modifiable']
+            })
+        except (TypeError, IndexError, KeyError):
+            configs.append({
+                "config_key": c[0],
+                "config_value": c[1],
+                "is_agent_modifiable": c[2]
+            })
+            
+    cursor.execute("""
+    INSERT OR IGNORE INTO instincts (key, value, category)
+    VALUES (?, ?, 'boot');
+    """, ("system_config", json.dumps(configs)))
+
+    # 5. Meta Category: Parent metadata
+    meta = {
+        "parent_root_dir": str(src.config.ROOT_DIR),
+        "parent_db_path": str(src.config.DB_PATH),
+        "spawn_time": datetime.utcnow().isoformat()
+    }
+    cursor.execute("""
+    INSERT OR IGNORE INTO instincts (key, value, category)
+    VALUES (?, ?, 'meta');
+    """, ("parent_meta", json.dumps(meta)))
 
 # Helper Query Functions
 

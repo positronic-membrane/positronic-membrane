@@ -1,6 +1,7 @@
 import time
 import logging
 import uuid
+import json
 import chromadb
 from openai import OpenAI
 import src.config
@@ -318,3 +319,48 @@ def orchestrate_workspace_snapshot(changes: dict) -> None:
         logger.info(f"Successfully wrote point-in-time snapshot to {snapshot_path}")
     except Exception as e:
         logger.error(f"Failed to write snapshot file {snapshot_path}: {e}")
+
+def index_skills_to_vector_db():
+    """
+    Reads active skills from SQLite and indexes them semantically in 'janus_skills' ChromaDB collection.
+    """
+    from src.database import get_connection
+    logger.info("Semantic indexing of dynamic skills into ChromaDB 'janus_skills'...")
+    conn = get_connection(read_only_constitution=True)
+    cursor = conn.cursor()
+    try:
+        cursor.execute("SELECT skill_id, name, description, parameters_schema, required_role FROM agent_skills WHERE is_active = 1;")
+        rows = cursor.fetchall()
+    finally:
+        conn.close()
+        
+    if not rows:
+        logger.info("No active skills found to index.")
+        return
+        
+    ids = []
+    documents = []
+    metadatas = []
+    
+    for skill_id, name, description, schema, role in rows:
+        doc = f"Skill: {name}\nDescription: {description}\nParameters Schema: {schema}"
+        ids.append(skill_id)
+        documents.append(doc)
+        metadatas.append({
+            "skill_id": skill_id,
+            "required_role": role,
+            "name": name
+        })
+        
+    try:
+        embeddings = get_embeddings(documents)
+        collection = get_collection("janus_skills")
+        collection.upsert(
+            documents=documents,
+            metadatas=metadatas,
+            ids=ids,
+            embeddings=embeddings
+        )
+        logger.info(f"Successfully indexed {len(ids)} skills in vector DB.")
+    except Exception as e:
+        logger.error(f"Failed to semantically index dynamic skills: {e}", exc_info=True)

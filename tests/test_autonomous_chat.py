@@ -177,10 +177,12 @@ def test_generate_persona_response_autonomous_react_loop(mock_parse, mock_exec, 
 @patch("src.sandbox_session.get_active_sandbox")
 @patch("src.persona.generate_persona_response")
 @patch("src.persona.execute_chat_sandbox_commands")
-def test_generate_persona_response_autonomous_loop_limit(mock_exec, mock_gen, mock_get_sb):
+@patch("src.persona.parse_proposed_changes")
+def test_generate_persona_response_autonomous_loop_limit(mock_parse, mock_exec, mock_gen, mock_get_sb):
     """Verify that loop cap is enforced (max 5 turns) to prevent runaway execution."""
     mock_get_sb.return_value = {"active_sandbox_path": "/dummy", "active_sandbox_branch": "dummy-branch"}
     mock_exec.return_value = "- test: PASSED"
+    mock_parse.return_value = {}  # Mock parsing to return no file modifications
     
     # Persona always returns a sandbox command, causing an infinite loop if unchecked
     mock_gen.return_value = "Still checking...\n```sandbox\ntest\n```"

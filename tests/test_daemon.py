@@ -45,9 +45,9 @@ def test_user_presence_detection(tmp_path):
         (tmp_path / f).unlink()
 
 @pytest.mark.asyncio
-@patch("src.daemon.add_memory")
-@patch("src.daemon.query_memories")
-@patch("src.daemon.query_agent")
+@patch("src.memory.add_memory")
+@patch("src.memory.query_memories")
+@patch("src.llm.query_agent")
 async def test_heartbeat_loop_execution(mock_query, mock_query_memories, mock_add_memory, tmp_path, monkeypatch):
     """
     Test that the heartbeat daemon loop runs, increments boredom,
@@ -58,7 +58,7 @@ async def test_heartbeat_loop_execution(mock_query, mock_query_memories, mock_ad
     mock_add_memory.return_value = None
 
     # Mock query agent responses dynamically to simulate proposer/critic/archivist debate
-    def side_effect(agent_id, prompt):
+    def side_effect(agent_id, prompt, system_override=None, **kwargs):
         if agent_id == "proposer":
             return "PROPOSED_ACTION: Scan codebase docs"
         elif agent_id == "critic":
@@ -76,6 +76,12 @@ async def test_heartbeat_loop_execution(mock_query, mock_query_memories, mock_ad
     
     # Redirect root dir to a temp path so we don't pick up workspace changes
     monkeypatch.setattr(src.config, "ROOT_DIR", tmp_path)
+    
+    # Update boredom_threshold in DB to match test expectations
+    conn = get_connection()
+    conn.execute("UPDATE system_config SET config_value = '2' WHERE config_key = 'boredom_threshold';")
+    conn.commit()
+    conn.close()
     
     # Start the daemon task
     daemon_task = asyncio.create_task(run_heartbeat_loop())
@@ -107,15 +113,15 @@ async def test_heartbeat_loop_execution(mock_query, mock_query_memories, mock_ad
     assert deliberations_count >= 1
 
 @pytest.mark.asyncio
-@patch("src.daemon.add_memory")
-@patch("src.daemon.query_memories")
-@patch("src.daemon.query_agent")
+@patch("src.memory.add_memory")
+@patch("src.memory.query_memories")
+@patch("src.llm.query_agent")
 async def test_modify_code_path_verification(mock_query, mock_query_memories, mock_add_memory, tmp_path, monkeypatch):
     """Verify that modify_code tool execution validates directories and reports error on invalid parent path."""
     mock_query_memories.return_value = []
     mock_add_memory.return_value = None
 
-    def side_effect(agent_id, prompt):
+    def side_effect(agent_id, prompt, system_override=None, **kwargs):
         if agent_id == "proposer":
             return "PROPOSED_ACTION: modify_code: invalid_parent_dir/new_file.py | print('Hello')"
         elif agent_id == "critic":
@@ -128,6 +134,12 @@ async def test_modify_code_path_verification(mock_query, mock_query_memories, mo
     monkeypatch.setenv("JANUS_TEST_MODE", "1")
     monkeypatch.setattr(src.config, "BOREDOM_THRESHOLD", 1)
     monkeypatch.setattr(src.config, "ROOT_DIR", tmp_path)
+
+    # Update boredom_threshold in DB to match test expectations
+    conn = get_connection()
+    conn.execute("UPDATE system_config SET config_value = '1' WHERE config_key = 'boredom_threshold';")
+    conn.commit()
+    conn.close()
 
     daemon_task = asyncio.create_task(run_heartbeat_loop())
     await asyncio.sleep(2.5) # Allow 1 tick

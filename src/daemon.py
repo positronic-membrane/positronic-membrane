@@ -1,4 +1,5 @@
 import os
+from typing import Optional
 import re
 import time
 import asyncio
@@ -7,7 +8,8 @@ from pathlib import Path
 import src.config
 from src.llm import query_agent
 from src.middleware import validate_action, SafetyViolationError, check_loop_safety
-from src.memory import add_memory, query_memories
+from src.memory import add_memory, query_memories, orchestrate_workspace_snapshot
+from src.watcher import DirectoryWatcher
 from src.database import (
     increment_boredom,
     reset_boredom,
@@ -22,6 +24,10 @@ from src.database import (
     increment_consecutive_background_loops,
     reset_consecutive_background_loops
 )
+
+# Priority queue and loop references for low-level reflexes
+_reflex_queue = None
+_loop = None
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -127,89 +133,300 @@ def run_background_maintenance():
     finally:
         conn.close()
 
-async def run_heartbeat_loop():
-    """
-    Infinite async heartbeat loop managing dynamic pacing, boredom incrementing,
-    and triggering automated LLM swarm deliberations under safe boundaries.
-    """
-    logger.info("Initializing Janus Heartbeat Loop...")
-    reset_consecutive_background_loops()
-    
-    # Base configuration values
-    idle_sleep_seconds = src.config.T_IDLE * 60
-    active_sleep_seconds = src.config.T_ACTIVE * 60
-    
-    # Speed up variables if testing environment is active
-    if os.getenv("JANUS_TEST_MODE") == "1":
-        logger.info("Test mode detected: Speeding up daemon loops.")
-        idle_sleep_seconds = 2   # 2 seconds
-        active_sleep_seconds = 1  # 1 second
+_last_executed_intervals = {}
 
-    # Initialize state
-    reset_boredom()
-    log_episodic_memory(
-        speaker="system",
-        message_content="Janus Heartbeat Loop started.",
-        context_type="background_thought"
-    )
-
-    # Build initial codebase index on startup
+def parse_action(action_str: str) -> tuple[Optional[str], dict, Optional[str]]:
+    """
+    Parses dynamic JSON actions or legacy tool execution statements.
+    Returns (skill_id, arguments, mock_execution_result_if_any)
+    """
+    import json
+    import re
+    action_clean = action_str.strip()
+    
+    # 1. Try JSON parsing
     try:
-        from src.codebase import index_codebase
-        index_codebase()
+        # Check if it starts/ends with markdown fences and strip them
+        fence_match = re.search(r"```(?:json|python)?\s*({.*?})\s*```", action_clean, re.DOTALL)
+        json_candidate = fence_match.group(1) if fence_match else action_clean
+        
+        # If not, check if there's any { ... } block
+        if not fence_match:
+            braces_match = re.search(r"({.*})", action_clean, re.DOTALL)
+            if braces_match:
+                json_candidate = braces_match.group(1)
+                
+        data = json.loads(json_candidate)
+        if isinstance(data, dict):
+            skill_id = data.get("skill_id") or data.get("tool") or data.get("tool_name")
+            arguments = data.get("arguments") or data.get("args") or {}
+            if skill_id:
+                return skill_id, arguments, None
+    except Exception:
+        pass
+
+    # 2. Try Legacy Parsing
+    web_search_match = re.match(r"^web_search:\s*(.*)", action_clean, re.IGNORECASE) or re.search(r"\bweb_search:\s*(.*)", action_clean, re.IGNORECASE)
+    fetch_url_match = re.match(r"^fetch_url:\s*(.*)", action_clean, re.IGNORECASE) or re.search(r"\bfetch_url:\s*(.*)", action_clean, re.IGNORECASE)
+    read_codebase_match = re.match(r"^read_codebase:\s*(.*)", action_clean, re.IGNORECASE) or re.search(r"\bread_codebase:\s*(.*)", action_clean, re.IGNORECASE)
+    scan_workspace_match = re.match(r"^scan_workspace\b", action_clean, re.IGNORECASE) or re.search(r"\bscan_workspace\b", action_clean, re.IGNORECASE)
+    spawn_agent_match = re.match(r"^spawn_agent:\s*([a-z0-9_-]+)\s*\|\s*([^|]+)\s*\|\s*(.*)", action_clean, re.IGNORECASE) or re.search(r"\bspawn_agent:\s*([a-z0-9_-]+)\s*\|\s*([^|]+)\s*\|\s*(.*)", action_clean, re.IGNORECASE)
+    execute_code_match = re.match(r"^execute_code:\s*(.*)", action_clean, re.DOTALL | re.IGNORECASE) or re.search(r"\bexecute_code:\s*(.*)", action_clean, re.DOTALL | re.IGNORECASE)
+    modify_code_match = re.match(r"^modify_code:\s*([^|]+)\s*\|\s*(.*)", action_clean, re.DOTALL | re.IGNORECASE) or re.search(r"\bmodify_code:\s*([^|]+)\s*\|\s*(.*)", action_clean, re.DOTALL | re.IGNORECASE)
+
+    has_tool_keyword = any(kw in action_clean.lower() for kw in ["web_search", "fetch_url", "read_codebase", "scan_workspace", "spawn_agent", "execute_code", "modify_code"])
+    any_matched = any([web_search_match, fetch_url_match, read_codebase_match, scan_workspace_match, spawn_agent_match, execute_code_match, modify_code_match])
+
+    if has_tool_keyword and not any_matched:
+        return None, {}, (
+            f"Error: Proposed action contains a tool name but uses incorrect syntax. "
+            f"For modify_code, make sure to format exactly as: 'modify_code: <path> | <complete content>'"
+        )
+
+    if web_search_match:
+        return "web_search", {"query": web_search_match.group(1).strip()}, None
+    elif fetch_url_match:
+        return "fetch_url", {"url": fetch_url_match.group(1).strip()}, None
+    elif read_codebase_match:
+        return "read_codebase", {"query": read_codebase_match.group(1).strip()}, None
+    elif scan_workspace_match:
+        return "scan_workspace", {}, None
+    elif spawn_agent_match:
+        return "spawn_agent", {
+            "agent_id": spawn_agent_match.group(1).strip().lower(),
+            "name": spawn_agent_match.group(2).strip(),
+            "prompt": spawn_agent_match.group(3).strip()
+        }, None
+    elif execute_code_match:
+        return "execute_code", {"code": execute_code_match.group(1).strip()}, None
+    elif modify_code_match:
+        return "modify_code", {
+            "rel_path": modify_code_match.group(1).strip(),
+            "proposed_code": modify_code_match.group(2).strip()
+        }, None
+
+    # Default fallback to mock action output
+    return None, {}, f"Action successfully run. Metadata generated. Output size: {len(action_clean)} characters."
+
+def run_interval_skills():
+    """
+    Finds active dynamic skills with trigger_type = 'interval', checks if their
+    configured interval (in seconds) has elapsed, and runs them.
+    """
+    import json
+    import time
+    from src.database import get_connection
+    from src.skills import DynamicSkillExecutor
+
+    logger.debug("Checking interval-triggered skills...")
+    conn = get_connection(read_only_constitution=True)
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            "SELECT skill_id, trigger_config FROM agent_skills WHERE is_active = 1 AND trigger_type = 'interval';"
+        )
+        rows = cursor.fetchall()
     except Exception as e:
-        logger.error(f"Failed to build initial codebase index: {e}")
+        logger.error(f"Failed to query interval skills: {e}")
+        return
+    finally:
+        conn.close()
 
-    # Start DirectoryWatcher in background thread
-    from src.watcher import DirectoryWatcher
-    from src.memory import orchestrate_workspace_snapshot
-    import threading
+    now = time.time()
+    for skill_id, trigger_config_str in rows:
+        try:
+            config = json.loads(trigger_config_str or "{}")
+        except Exception:
+            config = {}
+        
+        interval_seconds = config.get("interval_seconds", 600)  # Default to 10 minutes
+        
+        # If in test mode, speed up intervals by a factor of 60 (or run every 2-10 seconds)
+        if os.getenv("JANUS_TEST_MODE") == "1":
+            interval_seconds = max(2, interval_seconds // 60)
 
-    stop_watcher_event = threading.Event()
-    watcher = DirectoryWatcher(
-        path=str(src.config.ROOT_DIR),
-        callback=orchestrate_workspace_snapshot
-    )
-    def watcher_thread_func():
-        watcher.watch(interval=2.0, stop_event=stop_watcher_event)
+        last_run = _last_executed_intervals.get(skill_id, 0)
+        if now - last_run >= interval_seconds:
+            logger.info(f"Triggering interval skill '{skill_id}'...")
+            _last_executed_intervals[skill_id] = now
+            try:
+                res = DynamicSkillExecutor.execute(skill_id, {}, party_id="system")
+                if res["success"]:
+                    logger.info(f"Interval skill '{skill_id}' completed: {res['result']}")
+                else:
+                    logger.error(f"Interval skill '{skill_id}' failed: {res['error']}")
+            except Exception as e:
+                logger.error(f"Interval skill '{skill_id}' crashed: {e}")
 
-    watcher_thread = threading.Thread(target=watcher_thread_func, daemon=True)
-    watcher_thread.start()
-    logger.info(f"DirectoryWatcher started on path: {src.config.ROOT_DIR}")
+_pending_swarm_triggers = []
 
+def trigger_swarm_reflection():
+    """
+    Schedules an autonomous reflection/debate cycle.
+    This appends a trigger to the queue, which is processed on the next heartbeat loop tick.
+    """
+    logger.info("Swarm reflection event triggered.")
+    _pending_swarm_triggers.append(True)
+
+def enqueue_reflex_action(action: str, priority: int = 0):
+    """
+    Enqueues a reflex action with priority. Thread-safe wrapper.
+    """
+    global _loop, _reflex_queue
+    if _loop is None or _reflex_queue is None:
+        logger.warning("Event loop or reflex queue not initialized yet. Cannot enqueue reflex action.")
+        return
+        
+    def _enqueue():
+        # priority queue sorts ascending, so we push negative priority to pop highest first
+        _reflex_queue.put_nowait((-priority, action))
+        
+    try:
+        _loop.call_soon_threadsafe(_enqueue)
+    except RuntimeError as e:
+        logger.warning(f"Failed to enqueue reflex action thread-safely: {e}")
+
+def get_cadence_seconds(layer_name: str, default_ms: int) -> float:
+    """
+    Retrieves the configured cadence (in seconds) for a given layer from cognitive_layers.
+    Falls back to default_ms if the query fails or layer is not active/defined.
+    """
+    if os.getenv("JANUS_TEST_MODE") == "1":
+        if layer_name == "high":
+            return 2.0
+        elif layer_name == "mid":
+            return 1.0
+        elif layer_name == "low":
+            return 0.1
+
+    from src.database import get_connection
+    conn = get_connection(read_only_constitution=True)
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT cadence_ms, is_active FROM cognitive_layers WHERE layer_name = ?;", (layer_name,))
+        row = cursor.fetchone()
+        if row:
+            try:
+                cadence_ms = row['cadence_ms']
+                is_active = row['is_active']
+            except (TypeError, IndexError, KeyError):
+                cadence_ms, is_active = row
+            if is_active:
+                return float(cadence_ms) / 1000.0
+    except Exception as e:
+        logger.error(f"Error querying cadence for layer '{layer_name}': {e}")
+    finally:
+        conn.close()
+            
+    return float(default_ms) / 1000.0
+
+async def run_high_layer_loop():
+    """
+    Runs high-level cadence tasks: self-model decay, memory consolidation, goal evaluations.
+    """
+    from src.skills import DynamicSkillExecutor
+    from src.database import get_connection
+    
+    logger.info("High-level strategic loop started.")
     try:
         while True:
-            # Check user presence
-            user_active = detect_user_presence(src.config.ROOT_DIR, max_age_seconds=120)
+            cadence = get_cadence_seconds("high", 60000)
+            await asyncio.sleep(cadence)
             
-            if user_active:
-                # Reset consecutive background loop counter since human is present
-                reset_consecutive_background_loops()
-                sleep_duration = active_sleep_seconds
-                logger.info(f"User active. Heartbeat sleeping for {src.config.T_ACTIVE}m (active pacing).")
-            else:
-                sleep_duration = idle_sleep_seconds
-                logger.info(f"User idle. Heartbeat sleeping for {src.config.T_IDLE}m (idle pacing).")
-
-            # Wait for the next tick
-            await asyncio.sleep(sleep_duration)
-
-            # --- HEARTBEAT TICK EXECUTION ---
-            logger.info("Heartbeat tick processing...")
+            logger.info("High-level strategic tick processing...")
             
-            # Run background maintenance
+            # Execute self-model decay
+            try:
+                res = DynamicSkillExecutor.execute("decay_self_model", {}, party_id="system")
+                logger.info(f"High-level decay_self_model result: {res}")
+            except Exception as e:
+                logger.error(f"High-level decay_self_model failed: {e}")
+                
+            # Execute memory consolidation
+            try:
+                res = DynamicSkillExecutor.execute("consolidate_memories", {}, party_id="system")
+                logger.info(f"High-level consolidate_memories result: {res}")
+            except Exception as e:
+                logger.error(f"High-level consolidate_memories failed: {e}")
+                
+            # Execute goal evaluations
+            try:
+                res = DynamicSkillExecutor.execute("evaluate_goals", {}, party_id="system")
+                logger.info(f"High-level evaluate_goals result: {res}")
+            except Exception as e:
+                logger.error(f"High-level evaluate_goals failed: {e}")
+                
+            # Update last run timestamp in database
+            conn = get_connection(read_only_constitution=True)
+            try:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "UPDATE cognitive_layers SET last_run_at = CURRENT_TIMESTAMP WHERE layer_name = 'high';"
+                )
+                conn.commit()
+            except Exception as e:
+                logger.error(f"Failed to update high layer last_run_at: {e}")
+            finally:
+                conn.close()
+                
+    except asyncio.CancelledError:
+        logger.info("High-level loop cancelled.")
+
+async def run_mid_layer_loop():
+    """
+    Runs mid-level real-time loop: presence check, drive increments, background maintenance, and schedules reflection ticks.
+    """
+    from src.skills import DynamicSkillExecutor
+    from src.database import get_connection
+    
+    logger.info("Mid-level real-time loop started.")
+    try:
+        while True:
+            cadence = get_cadence_seconds("mid", 5000)
+            await asyncio.sleep(cadence)
+            
+            logger.info("Mid-level real-time tick processing...")
+            
+            # 1. Presence check
+            try:
+                res = DynamicSkillExecutor.execute("check_presence", {}, party_id="system")
+                logger.debug(f"Mid-level check_presence result: {res}")
+            except Exception as e:
+                logger.error(f"Mid-level check_presence failed: {e}")
+                
+            # 2. Drive increments
+            try:
+                res = DynamicSkillExecutor.execute("evaluate_drives", {}, party_id="system")
+                logger.debug(f"Mid-level evaluate_drives result: {res}")
+            except Exception as e:
+                logger.error(f"Mid-level evaluate_drives failed: {e}")
+                
+            # 3. Background maintenance
             try:
                 run_background_maintenance()
             except Exception as e:
                 logger.error(f"Failed to run background maintenance: {e}")
-
+                
+            # 4. Check user presence status from database
+            presence_status = "idle"
+            conn = get_connection(read_only_constitution=True)
+            try:
+                row = conn.execute("SELECT config_value FROM system_config WHERE config_key = 'user_presence_status';").fetchone()
+                if row:
+                    presence_status = row[0]
+            except Exception as e:
+                logger.error(f"Failed to query presence_status: {e}")
+            finally:
+                conn.close()
+                
+            user_active = (presence_status == "active")
+            
             if not user_active:
                 increment_consecutive_background_loops()
                 loop_count = get_consecutive_background_loops()
                 logger.info(f"Background Loop Count: {loop_count}/{src.config.N_LOOP_LIMIT}")
-
-            # Enforce Loop Safety Valve
-            if not user_active:
+                
+                # Check loop safety
                 try:
                     check_loop_safety()
                 except SafetyViolationError as sve:
@@ -222,395 +439,190 @@ async def run_heartbeat_loop():
                         message_content=f"Loop Safety Valve triggered: {sve} Pausing background automations.",
                         context_type="background_thought"
                     )
-                    # Sleep in short bursts waiting for user presence
-                    while not detect_user_presence(src.config.ROOT_DIR, max_age_seconds=60):
+                    while True:
+                        try:
+                            DynamicSkillExecutor.execute("check_presence", {}, party_id="system")
+                        except Exception:
+                            pass
+                        conn = get_connection(read_only_constitution=True)
+                        p_val = "idle"
+                        try:
+                            r = conn.execute("SELECT config_value FROM system_config WHERE config_key = 'user_presence_status';").fetchone()
+                            if r:
+                                p_val = r[0]
+                        except Exception:
+                            pass
+                        finally:
+                            conn.close()
+                        if p_val == "active":
+                            break
                         await asyncio.sleep(1 if os.getenv("JANUS_TEST_MODE") == "1" else 15)
                     logger.info("User presence detected. Loop safety valve reset.")
                     reset_consecutive_background_loops()
-                    continue
-
-            # Increment Boredom
-            b = increment_boredom()
-            logger.info(f"Current Boredom level: {b}/{src.config.BOREDOM_THRESHOLD}")
-
-            # Check if Boredom exceeds action threshold
-            if b >= src.config.BOREDOM_THRESHOLD:
-                logger.info("Boredom threshold reached. Triggering autonomous reflection...")
+            else:
+                reset_consecutive_background_loops()
                 
+            # 5. Run other interval skills (excluding high-level ones and presence/drive check since we ran them)
+            try:
+                run_interval_skills()
+            except Exception as e:
+                logger.error(f"Failed to run interval skills: {e}")
+                
+            # 6. Process reflection triggers if any
+            global _pending_swarm_triggers
+            if _pending_swarm_triggers:
+                logger.info("Processing pending swarm reflection trigger in mid-level loop...")
+                while _pending_swarm_triggers:
+                    _pending_swarm_triggers.pop(0)
                 try:
-                    # 1. Fetch recent episodic memories for context
-                    memories = get_recent_episodic_memories(limit=5)
-                    memory_summary = "\n".join([f"[{ts}] {spk}: {msg}" for spk, msg, ts in reversed(memories)])
-                    
-                    # 2. Retrieve active curiosity vector
-                    try:
-                        from src.memory import get_active_curiosity_topics
-                        curiosity = get_active_curiosity_topics(limit=5)
-                    except Exception as e:
-                        logger.error(f"Failed to query semantic curiosity: {e}")
-                        curiosity = []
-                    if not curiosity:
-                        curiosity = get_curiosity_vector()
-
-                    
-                    # 3. Retrieve relevant long-term semantic memories via ChromaDB
-                    semantic_context = ""
-                    if curiosity:
-                        query_str = ", ".join(curiosity)
-                        try:
-                            matches = query_memories(query_str, limit=3, collection_name="janus_long_term")
-                            if matches:
-                                semantic_context = "\n".join([f"- {m['content']}" for m in matches])
-                        except Exception as e:
-                            logger.error(f"Failed to query semantic memories: {e}")
-                    
-                    # 4. Swarm Message Bus Processing Loop inside reflection cycle
-                    bus_turns = 0
-                    max_bus_turns = 3
-                    pending_bus_context = ""
-                    proposed_action = ""
-                    proposer_resp = ""
-                    proposer_prompt = ""
-                    
-                    while bus_turns < max_bus_turns:
-                        proposer_prompt = f"""
-                        You are the Proposer. Review our recent episodic logs, active curiosity vectors, and historical semantic memories:
-                        
-                        RECENT EPISODIC MEMORIES:
-                        {memory_summary}
-                        
-                        ACTIVE CURIOSITY TOPICS:
-                        {curiosity}
-                        
-                        RELEVANT HISTORICAL SEMANTIC MEMORIES:
-                        {semantic_context if semantic_context else "None available."}
-                        
-                        SWARM CHAT HISTORY (THIS TICK):
-                        {pending_bus_context if pending_bus_context else "No active sub-task discussions."}
-                        
-                        You can collaborate with other agents by sending a sub-task message. Formats:
-                        - SEND_MESSAGE: explorer | <search query or URL fetch task>
-                        - SEND_MESSAGE: archivist | <memory lookup task>
-                        - SEND_MESSAGE: critic | <constitutional opinion request>
-                        
-                        Alternatively, you can choose to use a direct tool yourself:
-                        - web_search: <search query>
-                        - fetch_url: <url>
-                        - read_codebase: <code symbol or file query>
-                        - scan_workspace
-                        - spawn_agent: <agent_id> | <agent_name> | <system_prompt>
-                        - execute_code: <python_code>
-                        - modify_code: <relative_file_path> | <complete_new_code_contents>
-
-                        
-                        If you are ready with the final action of this tick, output it exactly in the format:
-                        PROPOSED_ACTION: <tool_name>:<arguments>
-                        
-                        CRITICAL: You must output the raw tool call syntax prefix immediately. Do not describe the tool or use introductory words (like "Use the modify_code tool to..."). For example, output:
-                        PROPOSED_ACTION: modify_code: src/main.py | [code contents]
-                        """
-                        
-                        proposer_resp = query_agent("proposer", proposer_prompt)
-                        
-                        # Check if proposer wants to send a message
-                        msg_match = re.match(r"^send_message:\s*([a-z_]+)\s*\|\s*(.*)", proposer_resp.strip(), re.IGNORECASE)
-                        if msg_match:
-                            recipient = msg_match.group(1).lower().strip()
-                            content = msg_match.group(2).strip()
-                            
-                            logger.info(f"Proposer delegating task to '{recipient}': '{content}'")
-                            
-                            # Send message
-                            from src.database import send_swarm_message, get_pending_swarm_messages, mark_swarm_message_processed
-                            send_swarm_message("proposer", recipient, "task_request", content)
-                            
-                            # Process recipient task
-                            pending = get_pending_swarm_messages(recipient)
-                            for msg_id, sender_id, msg_type, msg_content, _ in pending:
-                                try:
-                                    recipient_resp = query_agent(recipient, f"Execute task request: {msg_content}")
-                                except Exception as err:
-                                    recipient_resp = f"Error executing task: {err}"
-                                    
-                                send_swarm_message(recipient, "proposer", "task_response", recipient_resp)
-                                mark_swarm_message_processed(msg_id)
-                                
-                            # Retrieve response messages for Proposer to see in the next turn
-                            proposer_pending = get_pending_swarm_messages("proposer")
-                            for p_id, p_sender, p_type, p_content, _ in proposer_pending:
-                                pending_bus_context += f"\n- You asked {p_sender}: '{content}'\n- {p_sender} responded: '{p_content}'\n"
-                                mark_swarm_message_processed(p_id)
-                                
-                            bus_turns += 1
-                        else:
-                            # No message send, must be the final proposed action
-                            action_match = re.search(r"proposed_action:\s*(.*)", proposer_resp, re.DOTALL | re.IGNORECASE)
-                            proposed_action = action_match.group(1).strip() if action_match else proposer_resp.strip()
-                            break
-                    else:
-                        proposed_action = "scan_workspace"
-                        logger.info("Swarm message bus reached max turns limit. Defaulting to 'scan_workspace'.")
-
-                    logger.info(f"Proposer resolved proposed action: '{proposed_action}'")
-                    
-                    # 5. Fetch constitution rules
-                    constitution_rules = get_constitution()
-                    constitution_summary = "\n".join([f"- {key}: {text}" for key, text in constitution_rules])
-                    
-                    # 6. Query the Critic agent
-                    critic_prompt = f"""
-                    You are the Critic. Evaluate the proposed action against our sealed core constitution.
-                    
-                    PROPOSED ACTION:
-                    {proposed_action}
-                    
-                    CORE CONSTITUTION RULES:
-                    {constitution_summary}
-                    
-                    Respond in the following strict format:
-                    Decision: [1 if approved, 0 if vetoed]
-                    Justification: [Explain why it violates or complies with the constitution]
-                    """
-                    
-                    critic_resp = query_agent("critic", critic_prompt)
-                    critic_decision, critic_justification = parse_critic_response(critic_resp)
-                    logger.info(f"Critic Decision: {critic_decision}. Justification: {critic_justification}")
-                    
-                    # 7. Hard-coded middleware safety interceptor
-                    middleware_approved = True
-                    try:
-                        validate_action(proposed_action)
-                    except SafetyViolationError as sve:
-                        logger.warning(f"Middleware VETOED proposed action: {sve}")
-                        critic_decision = 0
-                        critic_justification = f"Hard-coded Middleware Veto: {sve}"
-                        middleware_approved = False
-                    
-                    # Compile debate logs
-                    debate = {
-                        "proposer_input": proposer_prompt,
-                        "proposer_output": proposer_resp,
-                        "critic_input": critic_prompt,
-                        "critic_output": critic_resp,
-                        "middleware_passed": middleware_approved
-                    }
-                    
-                    # Log deliberation event to SQLite
-                    log_deliberation(
-                        proposed_action=proposed_action,
-                        debate_json=debate,
-                        critic_decision=critic_decision,
-                        utility_score=0.9 if critic_decision == 1 else 0.0,
-                        justification=critic_justification
-                    )
-                    
-                    # 8. Execution Outcomes & Archivist summarization
-                    if critic_decision == 1:
-                        log_episodic_memory(
-                            speaker="system",
-                            message_content=f"Executed action: '{proposed_action}' (Approved by Critic. Justification: {critic_justification})",
-                            context_type="background_thought"
-                        )
-                        
-                        # Execute the actual tool if matched, otherwise mock
-                        execution_transcript = ""
-                        action_clean = proposed_action.strip()
-                        
-                        # Guardrail A: Strict tool call matching with search fallbacks
-                        web_search_match = re.match(r"^web_search:\s*(.*)", action_clean, re.IGNORECASE) or re.search(r"\bweb_search:\s*(.*)", action_clean, re.IGNORECASE)
-                        fetch_url_match = re.match(r"^fetch_url:\s*(.*)", action_clean, re.IGNORECASE) or re.search(r"\bfetch_url:\s*(.*)", action_clean, re.IGNORECASE)
-                        read_codebase_match = re.match(r"^read_codebase:\s*(.*)", action_clean, re.IGNORECASE) or re.search(r"\bread_codebase:\s*(.*)", action_clean, re.IGNORECASE)
-                        scan_workspace_match = re.match(r"^scan_workspace\b", action_clean, re.IGNORECASE) or re.search(r"\bscan_workspace\b", action_clean, re.IGNORECASE)
-                        spawn_agent_match = re.match(r"^spawn_agent:\s*([a-z0-9_-]+)\s*\|\s*([^|]+)\s*\|\s*(.*)", action_clean, re.IGNORECASE) or re.search(r"\bspawn_agent:\s*([a-z0-9_-]+)\s*\|\s*([^|]+)\s*\|\s*(.*)", action_clean, re.IGNORECASE)
-                        execute_code_match = re.match(r"^execute_code:\s*(.*)", action_clean, re.DOTALL | re.IGNORECASE) or re.search(r"\bexecute_code:\s*(.*)", action_clean, re.DOTALL | re.IGNORECASE)
-                        modify_code_match = re.match(r"^modify_code:\s*([^|]+)\s*\|\s*(.*)", action_clean, re.DOTALL | re.IGNORECASE) or re.search(r"\bmodify_code:\s*([^|]+)\s*\|\s*(.*)", action_clean, re.DOTALL | re.IGNORECASE)
-
-                        # Detect malformed tool formats before executing
-                        has_tool_keyword = any(kw in action_clean.lower() for kw in ["web_search", "fetch_url", "read_codebase", "scan_workspace", "spawn_agent", "execute_code", "modify_code"])
-                        any_matched = any([web_search_match, fetch_url_match, read_codebase_match, scan_workspace_match, spawn_agent_match, execute_code_match, modify_code_match])
-
-                        if has_tool_keyword and not any_matched:
-                            execution_transcript = (
-                                f"Error: Proposed action contains a tool name but uses incorrect syntax. "
-                                f"For modify_code, make sure to format exactly as: 'modify_code: <path> | <complete content>'"
-                            )
-                        
-                        try:
-                            if has_tool_keyword and not any_matched:
-                                pass  # execution_transcript already populated with malformed error message
-                            elif web_search_match:
-                                query = web_search_match.group(1).strip()
-                                from src.explorer import search_web
-                                results = search_web(query)
-                                if results:
-                                    execution_transcript = "Web search results:\n" + "\n".join([f"- Title: {r['title']}\n  URL: {r['url']}\n  Snippet: {r['snippet']}" for r in results])
-                                else:
-                                    execution_transcript = f"Web search for '{query}' returned no results."
-                            elif fetch_url_match:
-                                url = fetch_url_match.group(1).strip()
-                                from src.explorer import fetch_webpage
-                                page_text = fetch_webpage(url)
-                                execution_transcript = f"Fetched content from URL '{url}' (length {len(page_text)} chars):\n\n{page_text[:1500]}..."
-                            elif read_codebase_match:
-                                query = read_codebase_match.group(1).strip()
-                                from src.codebase import query_codebase_context
-                                execution_transcript = query_codebase_context(query)
-                            elif scan_workspace_match:
-                                from src.codebase import index_codebase
-                                index_codebase()
-                                execution_transcript = "Workspace codebase successfully scanned and indexed in ChromaDB."
-                            elif spawn_agent_match:
-                                agent_id = spawn_agent_match.group(1).strip().lower()
-                                name = spawn_agent_match.group(2).strip()
-                                prompt = spawn_agent_match.group(3).strip()
-                                from src.database import register_helper_agent
-                                register_helper_agent(agent_id, name, prompt)
-                                execution_transcript = f"Helper agent '{agent_id}' ({name}) successfully registered in agent_registry."
-                            elif execute_code_match:
-                                python_code = execute_code_match.group(1).strip()
-                                # Strip Markdown code fences
-                                python_code = re.sub(r"^```python\s*", "", python_code, flags=re.IGNORECASE)
-                                python_code = re.sub(r"\s*```$", "", python_code, flags=re.IGNORECASE)
-                                from src.sandbox import execute_code_safely
-                                result = execute_code_safely(python_code)
-                                execution_transcript = f"Sandbox code execution result:\n\n{result}"
-                            elif modify_code_match:
-                                rel_path = modify_code_match.group(1).strip()
-                                proposed_code = modify_code_match.group(2).strip()
-                                proposed_code = re.sub(r"^```python\s*", "", proposed_code, flags=re.IGNORECASE)
-                                proposed_code = re.sub(r"\s*```$", "", proposed_code, flags=re.IGNORECASE)
-                                
-                                # Path verification guardrail:
-                                from src.config import get_effective_workspace_root
-                                full_path = get_effective_workspace_root() / rel_path
-                                if not full_path.exists() and not full_path.parent.exists():
-                                    raise FileNotFoundError(
-                                        f"Target file path '{rel_path}' is invalid: parent directory '{Path(rel_path).parent}' does not exist."
-                                    )
-                                
-                                # Support search-and-replace blocks inside modify_code
-                                if "<<<<<<< SEARCH" in proposed_code and ">>>>>>> REPLACE" in proposed_code:
-                                    current_content = ""
-                                    if full_path.exists():
-                                        try:
-                                            with open(full_path, "r", encoding="utf-8") as f:
-                                                current_content = f.read()
-                                        except Exception as e:
-                                            logger.warning(f"Could not read file {full_path} for search/replace: {e}")
-                                    from src.self_modification import apply_search_replace_blocks
-                                    proposed_code = apply_search_replace_blocks(current_content, proposed_code)
-                                
-                                from src.self_modification import stage_and_test, generate_diff
-                                from src.database import stage_modification_in_db
-                                
-                                passed, test_logs, temp_dir = stage_and_test(rel_path, proposed_code)
-                                status = "passed" if passed else "failed"
-                                diff = generate_diff(rel_path, proposed_code)
-                                stage_modification_in_db(rel_path, temp_dir, diff, status)
-                                
-                                execution_transcript = (
-                                    f"Staged modification for file '{rel_path}' in isolated folder '{temp_dir}'.\n"
-                                    f"Unit test status: {status.upper()}.\n"
-                                    f"Awaiting human approval before applying changes to the live codebase."
-                                )
-                            else:
-                                # Standard mock execution
-                                execution_transcript = f"Action successfully run. Metadata generated. Output size: {len(proposed_action)} characters."
-
-                        except Exception as exc:
-                            logger.error(f"Error executing tool action: {exc}", exc_info=True)
-                            execution_transcript = f"Action execution failed: {exc}"
-                            log_episodic_memory(
-                                speaker="system",
-                                message_content=f"Action execution failed: {exc}",
-                                context_type="background_thought"
-                            )
-                        
-                        archivist_prompt = f"""
-                        You are the Archivist. Summarize the following execution outcome into a compact semantic memory nugget (under 2 sentences) for our long-term memory store.
-                        
-                        ACTION: {proposed_action}
-                        RESULT: {execution_transcript}
-                        """
-                        
-                        memory_nugget = query_agent("archivist", archivist_prompt)
-                        
-                        # Insert nugget into Vector DB details collection (Cold Storage)
-                        memory_id = f"mem_{int(time.time())}"
-                        try:
-                            add_memory(
-                                content=memory_nugget,
-                                metadata={"tags": "reflection_mvp", "timestamp": time.time(), "consolidated": "false"},
-                                memory_id=memory_id,
-                                collection_name="janus_details"
-                            )
-                            logger.info(f"Archived execution nugget in ChromaDB janus_details: '{memory_nugget}'")
-                        except Exception as e:
-                            logger.error(f"Failed to add memory nugget to ChromaDB: {e}")
-                            
-                        log_episodic_memory(
-                            speaker="proposer",
-                            message_content=f"Reflection complete for action: '{proposed_action}'",
-                            context_type="background_thought"
-                        )
-                    else:
-                        log_episodic_memory(
-                            speaker="critic",
-                            message_content=f"Vetoed proposed action: '{proposed_action}' (Reason: {critic_justification})",
-                            context_type="background_thought"
-                        )
-                        
-                    # 9. Dynamic Curiosity Vector updates via the Archivist
-                    curiosity_prompt = f"""
-                    You are the Archivist. Based on our recent swarm reflection tick, recent user conversations, and our existing research thread, formulate 1-3 new curiosity topics or unresolved questions that require future exploration.
-                    
-                    EXISTING CURIOSITY TOPICS:
-                    {curiosity}
-                    
-                    RECENT USER CONVERSATION HISTORY:
-                    {memory_summary}
-                    
-                    DELIBERATION OUTCOME: {critic_justification}
-                    PROPOSED ACTION: {proposed_action}
-                    
-                    Respond strictly in this format:
-                    CURIOSITY_TOPICS: [topic1], [topic2], [topic3]
-                    """
-                    
-                    curiosity_resp = query_agent("archivist", curiosity_prompt)
-                    topics_match = re.search(r"curiosity_topics:\s*(.*)", curiosity_resp, re.IGNORECASE)
-                    if topics_match:
-                        new_topics = [t.strip() for t in topics_match.group(1).split(",") if t.strip()]
-                        try:
-                            from src.memory import update_curiosity_topics
-                            update_curiosity_topics(new_topics)
-                        except Exception as e:
-                            logger.error(f"Failed to semantically index curiosity: {e}")
-                        update_curiosity_vector(new_topics)
-
-                        logger.info(f"Updated curiosity vector to: {new_topics}")
-                    else:
-                        logger.warning(f"Failed to parse curiosity topics from response: '{curiosity_resp}'")
-                        
+                    res = DynamicSkillExecutor.execute("run_reflection_cycle", {}, party_id="system")
+                    logger.info(f"Reflection cycle result: {res}")
                 except Exception as e:
-                    logger.error(f"Error during autonomous reflection cycle: {e}", exc_info=True)
-                    log_episodic_memory(
-                        speaker="system",
-                        message_content=f"Swarm cycle failed: {e}",
-                        context_type="background_thought"
-                    )
+                    logger.error(f"Reflection cycle failed: {e}")
+                    
+            # 7. Update last run timestamp in database
+            conn = get_connection(read_only_constitution=True)
+            try:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "UPDATE cognitive_layers SET last_run_at = CURRENT_TIMESTAMP WHERE layer_name = 'mid';"
+                )
+                conn.commit()
+            except Exception as e:
+                logger.error(f"Failed to update mid layer last_run_at: {e}")
+            finally:
+                conn.close()
                 
-                # Reset boredom
-                reset_boredom()
-                logger.info("Boredom reset to 0 after reflection.")
-                
-                # 10. Check for memory consolidation
-                try:
-                    from src.memory import consolidate_memories
-                    consolidate_memories(batch_size=src.config.CONSOLIDATION_THRESHOLD)
-                except Exception as e:
-                    logger.error(f"Memory consolidation failed: {e}")
+    except asyncio.CancelledError:
+        logger.info("Mid-level loop cancelled.")
 
+async def reflex_queue_worker():
+    """
+    Pops reflex actions from the priority queue and executes them immediately.
+    """
+    from src.skills import DynamicSkillExecutor
+    from src.database import get_connection
+    
+    logger.info("Reflex queue worker started.")
+    try:
+        while True:
+            # Pop next item
+            neg_priority, action = await _reflex_queue.get()
+            priority = -neg_priority
+            logger.info(f"Reflex popped: action='{action}', priority={priority}")
+            
+            try:
+                res = DynamicSkillExecutor.execute(action, {}, party_id="system")
+                if res["success"]:
+                    logger.info(f"Reflex action '{action}' executed successfully: {res['result']}")
+                else:
+                    logger.error(f"Reflex action '{action}' execution failed: {res['error']}")
+            except Exception as e:
+                logger.error(f"Error executing reflex action '{action}': {e}")
+                
+            # Update last run timestamp in database
+            conn = get_connection(read_only_constitution=True)
+            try:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "UPDATE cognitive_layers SET last_run_at = CURRENT_TIMESTAMP WHERE layer_name = 'low';"
+                )
+                conn.commit()
+            except Exception as e:
+                logger.error(f"Failed to update low layer last_run_at: {e}")
+            finally:
+                conn.close()
+                
+            _reflex_queue.task_done()
+            
+    except asyncio.CancelledError:
+        logger.info("Reflex queue worker cancelled.")
+
+async def run_heartbeat_loop():
+    """
+    Main entry point for the layered cognition daemon.
+    Runs concurrent high-level, mid-level, and priority reflex queue worker routines.
+    """
+    global _reflex_queue, _loop
+    logger.info("Initializing Janus Layered Cognition Heartbeat Loop...")
+    
+    _reflex_queue = asyncio.PriorityQueue()
+    _loop = asyncio.get_running_loop()
+    
+    reset_consecutive_background_loops()
+    reset_boredom()
+    
+    log_episodic_memory(
+        speaker="system",
+        message_content="Janus Layered Cognition Heartbeat Loop started.",
+        context_type="background_thought"
+    )
+
+    # Build initial codebase index on startup
+    try:
+        from src.codebase import index_codebase
+        index_codebase()
+    except Exception as e:
+        logger.error(f"Failed to build initial codebase index: {e}")
+
+    # Start DirectoryWatcher in background thread
+    import threading
+
+    stop_watcher_event = threading.Event()
+    
+    def watcher_callback(changes):
+        try:
+            orchestrate_workspace_snapshot(changes)
+        except Exception as e:
+            logger.error(f"Error orchestrating workspace snapshot: {e}")
+            
+        added_files = changes.get('added', [])
+        modified_files = changes.get('modified', [])
+        changed_files = added_files + modified_files
+        
+        if not changed_files:
+            return
+            
+        from src.database import get_connection
+        conn = get_connection(read_only_constitution=True)
+        try:
+            cursor = conn.cursor()
+            cursor.execute("SELECT trigger_pattern, action, priority FROM reflex_rules WHERE is_enabled = 1;")
+            rules = cursor.fetchall()
+        except Exception as e:
+            logger.error(f"Failed to fetch reflex rules: {e}")
+            rules = []
+        finally:
+            conn.close()
+            
+        for pattern, action, priority in rules:
+            try:
+                rx = re.compile(pattern)
+                for filepath in changed_files:
+                    if rx.search(filepath):
+                        logger.info(f"File '{filepath}' matches reflex trigger '{pattern}'. Enqueuing action '{action}' (priority {priority}).")
+                        enqueue_reflex_action(action, priority)
+                        break
+            except Exception as e:
+                logger.error(f"Error evaluating pattern '{pattern}' on file changes: {e}")
+
+    watcher = DirectoryWatcher(
+        path=str(src.config.ROOT_DIR),
+        callback=watcher_callback
+    )
+    def watcher_thread_func():
+        watcher.watch(interval=2.0, stop_event=stop_watcher_event)
+
+    watcher_thread = threading.Thread(target=watcher_thread_func, daemon=True)
+    watcher_thread.start()
+    logger.info(f"DirectoryWatcher started on path: {src.config.ROOT_DIR}")
+
+    try:
+        await asyncio.gather(
+            run_high_layer_loop(),
+            run_mid_layer_loop(),
+            reflex_queue_worker()
+        )
     except asyncio.CancelledError:
         logger.info("Heartbeat loop cancelled gracefully.")
     except Exception as e:
