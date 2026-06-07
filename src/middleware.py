@@ -65,7 +65,7 @@ def validate_action(proposed_action: str) -> bool:
     # Extract rules from constitution
     banned_boundaries = ""
     for key, text in rules:
-        if key == "banned_boundaries":
+        if key.upper() == "BANNED_BOUNDARIES":
             banned_boundaries = text
             break
             

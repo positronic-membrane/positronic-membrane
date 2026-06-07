@@ -336,7 +336,7 @@ def generate_metacognitive_narrative(user_query: str) -> str:
     if has_veto:
         deliberation_text += (
             "\nNote: If you see background activities blocked by vetoes that you wish to allow, "
-            "you can update my core constitution using the command: /amend <rule_key> | <rule_text>\n"
+            "you can update my core constitution using the command: /amend <rule_key> | <rule_text> or delete a rule with /repeal <rule_key>\n"
         )
 
     prompt = f"""
@@ -2015,6 +2015,27 @@ async def run_persona_chat():
                     print("\nJanus >> Invalid format. Please use: /amend <rule_key> | <rule_text>\n")
                 continue
 
+            # Handle constitutional repeals interceptor
+            if user_msg.lower().startswith("/repeal"):
+                repeal_match = re.match(r"^/repeal\s+([a-z0-9_-]+)", user_msg, re.IGNORECASE)
+                if repeal_match:
+                    rule_key = repeal_match.group(1).strip()
+                    
+                    print(f"\nJanus >> Proposing constitutional repeal:")
+                    print(f"  * Key: '{rule_key}'")
+                    
+                    confirm_input = await loop.run_in_executor(None, get_input, f"Confirm repealing rule '{rule_key}' from core_constitution? (y/n): ")
+                    if confirm_input.strip().lower() in ("y", "yes"):
+                        from src.database import delete_constitution_rule
+                        delete_constitution_rule(rule_key)
+                        print(f"\n[✔] Rule '{rule_key}' successfully repealed from the core constitution.\n")
+                        log_episodic_memory("system", f"User repealed constitutional rule: '{rule_key}'", "user_visible")
+                    else:
+                        print("\nRepeal proposal aborted.\n")
+                else:
+                    print("\nJanus >> Invalid format. Please use: /repeal <rule_key>\n")
+                continue
+
             if user_msg.lower().startswith("/skills"):
                 res = handle_skills_command()
                 print(f"\n{res}\n")
@@ -2415,6 +2436,18 @@ async def handle_web_slash_command(user_msg: str) -> str:
             return f"[✔] Rule '{rule_key}' successfully sealed in the core constitution."
         else:
             return "[Error] Invalid format. Please use: /amend <rule_key> | <rule_text>"
+            
+    # 4.1 /repeal commands
+    elif user_msg.lower().startswith("/repeal"):
+        repeal_match = re.match(r"^/repeal\s+([a-z0-9_-]+)", user_msg, re.IGNORECASE)
+        if repeal_match:
+            rule_key = repeal_match.group(1).strip()
+            from src.database import delete_constitution_rule
+            delete_constitution_rule(rule_key)
+            log_episodic_memory("system", f"User repealed constitutional rule: '{rule_key}'", "user_visible")
+            return f"[✔] Rule '{rule_key}' successfully repealed from the core constitution."
+        else:
+            return "[Error] Invalid format. Please use: /repeal <rule_key>"
             
     # 5. /skills command
     elif user_msg.lower().startswith("/skills"):

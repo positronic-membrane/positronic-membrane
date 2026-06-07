@@ -63,9 +63,9 @@ def run_socratic_wizard():
         sys.exit(0)
 
     # Save to core_constitution table (via admin database access)
-    add_constitution_rule("core_morality_directive", directive)
-    add_constitution_rule("banned_boundaries", boundaries)
-    add_constitution_rule("self_modification_scope", self_mod_rules)
+    add_constitution_rule("CORE_MORALITY_DIRECTIVE", directive)
+    add_constitution_rule("BANNED_BOUNDARIES", boundaries)
+    add_constitution_rule("SELF_MODIFICATION_SCOPE", self_mod_rules)
 
     # Log completion in episodic memory
     log_episodic_memory(

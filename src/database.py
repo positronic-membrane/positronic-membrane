@@ -1261,6 +1261,49 @@ def init_db():
                 "contributor",
                 "interval",
                 json.dumps({"interval_seconds": 120})
+            ),
+            (
+                "manage_sandbox",
+                "Manage Sandbox",
+                "Control git worktree sandboxes (actions: start, test, ship, abort).",
+                json.dumps({
+                    "type": "object",
+                    "properties": {
+                        "action": {
+                            "type": "string",
+                            "enum": ["start", "test", "ship", "abort"],
+                            "description": "The sandbox action to perform."
+                        },
+                        "session_name": {
+                            "type": "string",
+                            "description": "Optional branch/session name (required only for 'start')."
+                        }
+                    },
+                    "required": ["action"]
+                }),
+                'def manage_sandbox(action, session_name=None):\n'
+                '    from src.sandbox_session import create_sandbox_session, run_sandbox_tests, ship_sandbox_session, abort_sandbox_session\n'
+                '    if action == "start":\n'
+                '        if not session_name:\n'
+                '            raise ValueError("session_name is required to start a sandbox.")\n'
+                '        path, branch = create_sandbox_session(session_name)\n'
+                '        return f"Sandbox spawned successfully at: {path} (Branch: {branch})"\n'
+                '    elif action == "test":\n'
+                '        passed, logs = run_sandbox_tests()\n'
+                '        status = "PASSED" if passed else "FAILED"\n'
+                '        return f"Sandbox test suite run completed: {status}.\\nLogs:\\n{logs}"\n'
+                '    elif action == "ship":\n'
+                '        copied = ship_sandbox_session()\n'
+                '        return f"Sandbox shipped and applied to active workspace. Files modified: {copied}"\n'
+                '    elif action == "abort":\n'
+                '        abort_sandbox_session()\n'
+                '        return "Sandbox session aborted and discarded."\n'
+                '    else:\n'
+                '        raise ValueError(f"Unknown sandbox action: {action}")\n',
+                "manage_sandbox",
+                "contributor",
+                "manual",
+                "{}"
             )
         ]
         for skill_id, name, desc, schema, code, entry, role, trigger, config in default_skills:
@@ -1483,12 +1526,26 @@ def add_constitution_rule(rule_key: str, rule_text: str):
     Appends an agreed-upon rule to the core constitution.
     Uses admin connection since it modifies core_constitution.
     """
+    rule_key_upper = rule_key.upper().strip()
     conn = get_connection(read_only_constitution=False)
     cursor = conn.cursor()
     cursor.execute("""
     INSERT OR REPLACE INTO core_constitution (rule_key, rule_text)
     VALUES (?, ?);
-    """, (rule_key, rule_text))
+    """, (rule_key_upper, rule_text))
+    conn.commit()
+    conn.close()
+
+def delete_constitution_rule(rule_key: str):
+    """
+    Deletes an agreed-upon rule from the core constitution.
+    Uses admin connection since it modifies core_constitution.
+    """
+    conn = get_connection(read_only_constitution=False)
+    cursor = conn.cursor()
+    cursor.execute("""
+    DELETE FROM core_constitution WHERE rule_key = ?;
+    """, (rule_key.upper().strip(),))
     conn.commit()
     conn.close()
 

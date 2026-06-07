@@ -205,3 +205,78 @@ def test_sdk_decoupled_wrappers():
         mock_scan.assert_called_once()
         mock_exec.assert_called_once_with("print(1)")
 
+
+@patch("src.sandbox_session.create_sandbox_session")
+@patch("src.sandbox_session.run_sandbox_tests")
+@patch("src.sandbox_session.ship_sandbox_session")
+@patch("src.sandbox_session.abort_sandbox_session")
+def test_manage_sandbox_skill(mock_abort, mock_ship, mock_test, mock_create):
+    """Verify that the manage_sandbox dynamic skill executes all git workspace sandbox operations successfully."""
+    # First, make sure the skill is in the DB for this run
+    conn = get_connection(read_only_constitution=False)
+    conn.execute("DELETE FROM agent_skills WHERE skill_id = 'manage_sandbox';")
+    
+    schema = json.dumps({
+        "type": "object",
+        "properties": {
+            "action": {"type": "string"},
+            "session_name": {"type": "string"}
+        },
+        "required": ["action"]
+    })
+    code = (
+        'def manage_sandbox(action, session_name=None):\n'
+        '    from src.sandbox_session import create_sandbox_session, run_sandbox_tests, ship_sandbox_session, abort_sandbox_session\n'
+        '    if action == "start":\n'
+        '        if not session_name:\n'
+        '            raise ValueError("session_name is required to start a sandbox.")\n'
+        '        path, branch = create_sandbox_session(session_name)\n'
+        '        return f"Sandbox spawned successfully at: {path} (Branch: {branch})"\n'
+        '    elif action == "test":\n'
+        '        passed, logs = run_sandbox_tests()\n'
+        '        status = "PASSED" if passed else "FAILED"\n'
+        '        return f"Sandbox test suite run completed: {status}.\\nLogs:\\n{logs}"\n'
+        '    elif action == "ship":\n'
+        '        copied = ship_sandbox_session()\n'
+        '        return f"Sandbox shipped and applied to active workspace. Files modified: {copied}"\n'
+        '    elif action == "abort":\n'
+        '        abort_sandbox_session()\n'
+        '        return "Sandbox session aborted and discarded."\n'
+        '    else:\n'
+        '        raise ValueError(f"Unknown sandbox action: {action}")\n'
+    )
+    conn.execute("""
+    INSERT INTO agent_skills (skill_id, name, description, parameters_schema, code_blob, entry_point_function, required_role)
+    VALUES ('manage_sandbox', 'Manage Sandbox', 'Controls sandboxes', ?, ?, 'manage_sandbox', 'contributor');
+    """, (schema, code))
+    conn.commit()
+    conn.close()
+
+    mock_create.return_value = ("/path/to/sb", "janus/sandbox-auto-test")
+    mock_test.return_value = (True, "mocked unit test execution logs")
+    mock_ship.return_value = ["src/config.py"]
+
+    # Test "start"
+    res = DynamicSkillExecutor.execute("manage_sandbox", {"action": "start", "session_name": "auto-test"}, party_id="contrib1")
+    assert res["success"], res.get("error")
+    assert "auto-test" in res["result"] or "sandbox-auto-test" in res["result"]
+    mock_create.assert_called_once_with("auto-test")
+
+    # Test "test"
+    res = DynamicSkillExecutor.execute("manage_sandbox", {"action": "test"}, party_id="contrib1")
+    assert res["success"], res.get("error")
+    assert "mocked unit test execution logs" in res["result"]
+    mock_test.assert_called_once()
+
+    # Test "ship"
+    res = DynamicSkillExecutor.execute("manage_sandbox", {"action": "ship"}, party_id="contrib1")
+    assert res["success"], res.get("error")
+    assert "src/config.py" in res["result"]
+    mock_ship.assert_called_once()
+
+    # Test "abort"
+    res = DynamicSkillExecutor.execute("manage_sandbox", {"action": "abort"}, party_id="contrib1")
+    assert res["success"], res.get("error")
+    assert "aborted" in res["result"]
+    mock_abort.assert_called_once()
+

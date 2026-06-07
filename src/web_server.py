@@ -74,6 +74,9 @@ class ConstitutionAmendRequest(BaseModel):
     key: str
     text: str
 
+class ConstitutionDeleteRequest(BaseModel):
+    key: str
+
 class RegistryUpdateRequest(BaseModel):
     agent_id: str
     model: Optional[str] = None
@@ -667,6 +670,21 @@ def amend_constitution(data: ConstitutionAmendRequest, current_party = Depends(r
         from src.database import add_constitution_rule
         add_constitution_rule(key, text)
         log_episodic_memory("system", f"User sealed constitutional rule via Web UI: '{key}' = '{text}'", "user_visible")
+        return {"success": True}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/constitution/delete")
+def delete_constitution(data: ConstitutionDeleteRequest, current_party = Depends(require_role('contributor'))):
+    """Deletes a constitutional rule from SQLite (Requires contributor role)."""
+    key = data.key.strip()
+    if not key:
+        raise HTTPException(status_code=400, detail="Key cannot be empty.")
+    try:
+        from src.database import delete_constitution_rule
+        delete_constitution_rule(key)
+        log_episodic_memory("system", f"User deleted constitutional rule via Web UI: '{key}'", "user_visible")
         return {"success": True}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

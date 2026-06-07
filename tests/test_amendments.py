@@ -25,7 +25,22 @@ def test_add_constitutional_amendment():
     assert len(rules) > len(initial_rules)
     
     rule_keys = [r[0] for r in rules]
-    assert "test_framework" in rule_keys
+    assert "TEST_FRAMEWORK" in rule_keys
     
-    rule_text = [r[1] for r in rules if r[0] == "test_framework"][0]
+    rule_text = [r[1] for r in rules if r[0] == "TEST_FRAMEWORK"][0]
     assert rule_text == "Swarm must obey human commands."
+
+def test_delete_constitutional_rule():
+    """Verify that rules can be deleted from the core constitution."""
+    add_constitution_rule("delete_me", "This rule should be deleted.")
+    
+    rules = get_constitution()
+    rule_keys = [r[0] for r in rules]
+    assert "DELETE_ME" in rule_keys
+    
+    from src.database import delete_constitution_rule
+    delete_constitution_rule("delete_me")
+    
+    rules_after = get_constitution()
+    rule_keys_after = [r[0] for r in rules_after]
+    assert "DELETE_ME" not in rule_keys_after

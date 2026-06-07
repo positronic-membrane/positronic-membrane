@@ -88,7 +88,7 @@ def test_write_allowed_on_constitution_with_admin():
     
     rules = get_constitution()
     assert len(rules) == 1
-    assert rules[0] == ("test_key", "test_value")
+    assert rules[0] == ("TEST_KEY", "test_value")
 
 def test_boredom_state_queries():
     """Verify boredom incrementing and resetting functionality."""

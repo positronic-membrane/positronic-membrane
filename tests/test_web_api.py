@@ -132,6 +132,21 @@ def test_constitution_amend(web_server):
         data = json.loads(resp.read().decode("utf-8"))
         assert data["success"] is True
 
+def test_constitution_delete(web_server):
+    url_amend = f"{web_server}/api/constitution/amend"
+    payload_amend = json.dumps({"key": "DELETE_ME_API", "text": "To be deleted."}).encode("utf-8")
+    req_amend = urllib.request.Request(url_amend, data=payload_amend, method="POST", headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req_amend) as resp:
+        assert resp.status == 200
+
+    url_delete = f"{web_server}/api/constitution/delete"
+    payload_delete = json.dumps({"key": "DELETE_ME_API"}).encode("utf-8")
+    req_delete = urllib.request.Request(url_delete, data=payload_delete, method="POST", headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req_delete) as resp:
+        assert resp.status == 200
+        data = json.loads(resp.read().decode("utf-8"))
+        assert data["success"] is True
+
 def test_registry_update(web_server):
     url = f"{web_server}/api/registry/update"
     payload = json.dumps({"agent_id": "proposer", "model": "qwen2.5-coder:1.5b"}).encode("utf-8")

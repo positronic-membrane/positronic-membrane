@@ -602,11 +602,43 @@ document.addEventListener("DOMContentLoaded", () => {
                 tr.innerHTML = `
                     <td><strong>${r.key}</strong></td>
                     <td>${r.text}</td>
+                    <td>
+                        <button class="btn btn-secondary btn-delete-constitution-rule" data-key="${r.key}">&times;</button>
+                    </td>
                 `;
                 tbody.appendChild(tr);
             });
+
+            // Bind delete rule event
+            document.querySelectorAll(".btn-delete-constitution-rule").forEach(btn => {
+                btn.addEventListener("click", () => {
+                    const ruleKey = btn.getAttribute("data-key");
+                    if (confirm(`Are you sure you want to repeal constitution rule '${ruleKey}'?`)) {
+                        handleConstitutionDelete(ruleKey);
+                    }
+                });
+            });
         } catch (err) {
             console.error("Error loading constitution:", err);
+        }
+    }
+
+    async function handleConstitutionDelete(ruleKey) {
+        try {
+            const res = await fetch("/api/constitution/delete", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ key: ruleKey })
+            });
+            const data = await res.json();
+            if (data.success) {
+                loadConstitution();
+                appendMessage("system", `Repealed constitution rule '${ruleKey}'`);
+            } else {
+                alert(`Error: ${data.error}`);
+            }
+        } catch (err) {
+            console.error(err);
         }
     }
 
