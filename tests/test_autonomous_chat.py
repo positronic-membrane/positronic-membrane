@@ -166,7 +166,7 @@ def test_generate_persona_response_autonomous_react_loop(mock_parse, mock_exec, 
     # Assert generate_persona_response was called twice
     assert mock_gen.call_count == 2
     mock_gen.assert_any_call("Run the test suite please")
-    mock_gen.assert_any_call("Executed requested sandbox actions. Please review the background thought history and continue.")
+    mock_gen.assert_any_call("Executed requested actions/skills. Please review the background thought history and continue.")
     
     # Assert execution result was logged as a background thought in episodic memory
     mems = get_recent_episodic_memories(limit=10, context_type="background_thought")

@@ -1111,11 +1111,7 @@ def generate_persona_response_autonomous(user_msg: str) -> str:
     by executing them, logging to episodic memory, and re-querying the Persona
     up to 5 turns.
     """
-    from src.sandbox_session import get_active_sandbox
-    active_sb = get_active_sandbox()
-    if not active_sb:
-        # No active sandbox, just generate normal response
-        return generate_persona_response(user_msg)
+    # We no longer short-circuit based on active_sb, because the Persona might execute a dynamic skill to create one.
         
     current_query = user_msg
     max_turns = 5
@@ -1136,43 +1132,69 @@ def generate_persona_response_autonomous(user_msg: str) -> str:
             print(f"\n[Janus Daemon] Extracted proposed modifications for {len(proposed_mods)} file(s).")
             print("Applying changes to sandbox...")
             from src.sandbox_session import apply_changes_to_sandbox, run_sandbox_tests
-            apply_changes_to_sandbox(proposed_mods)
-            print("Executing unit tests in sandbox...")
-            passed, logs = run_sandbox_tests()
-            test_status = "PASSED" if passed else "FAILED"
-            print(f"[Janus Daemon] Sandbox unit tests: {test_status}")
+            try:
+                apply_changes_to_sandbox(proposed_mods)
+                print("Executing unit tests in sandbox...")
+                passed, logs = run_sandbox_tests()
+                test_status = "PASSED" if passed else "FAILED"
+                print(f"[Janus Daemon] Sandbox unit tests: {test_status}")
+                
+                # Run tests automatically so the Persona receives feedback
+                log_episodic_memory(
+                    speaker="sandbox_automation",
+                    message_content=f"Auto-applied modifications to {list(proposed_mods.keys())}. Sandbox tests: {test_status}.\nLogs/Errors:\n{logs}",
+                    context_type="background_thought"
+                )
+            except Exception as apply_err:
+                log_episodic_memory(
+                    speaker="sandbox_automation",
+                    message_content=f"Failed to apply modifications. Is there an active sandbox session? Error: {apply_err}",
+                    context_type="background_thought"
+                )
             
-            # Run tests automatically so the Persona receives feedback
-            log_episodic_memory(
-                speaker="sandbox_automation",
-                message_content=f"Auto-applied modifications to {list(proposed_mods.keys())}. Sandbox tests: {test_status}.\nLogs/Errors:\n{logs}",
-                context_type="background_thought"
-            )
-            
-        # 3. Check for sandbox command blocks (```sandbox ... ```)
+        # 3. Check for JSON dynamic skill execution blocks
+        from src.daemon import parse_action
+        from src.skills import DynamicSkillExecutor
+        skill_id, arguments, mock_result = parse_action(response)
+        
+        # 4. Check for legacy sandbox command blocks (```sandbox ... ```)
         sandbox_blocks = re.findall(r"```sandbox\s*\n(.*?)\n```", response, re.DOTALL)
-        if not sandbox_blocks:
-            # No sandbox commands to execute, return the response
+        
+        if not skill_id and not sandbox_blocks:
+            # No actions or sandbox commands to execute, return the response
             break
             
-        print(f"\n[Janus Daemon] Found {len(sandbox_blocks)} sandbox command block(s). Executing...")
-        # Execute sandbox commands
-        execution_results = []
-        for block in sandbox_blocks:
-            res = execute_chat_sandbox_commands(block)
-            execution_results.append(res)
-            
-        execution_summary = "\n\n".join(execution_results)
+        execution_summary = ""
         
-        # 4. Log execution results to SQLite as a background thought
+        if skill_id:
+            print(f"\n[Janus Daemon] Dynamic Skill Block Detected: '{skill_id}'")
+            try:
+                res = DynamicSkillExecutor.execute(skill_id, arguments, party_id=get_session_party_id())
+                if res["success"]:
+                    execution_summary += f"[Dynamic Skill '{skill_id}' Executed Successfully]\nResult: {res['result']}\n\n"
+                else:
+                    execution_summary += f"[Dynamic Skill '{skill_id}' Failed]\nError: {res['error']}\n\n"
+            except Exception as e:
+                execution_summary += f"[Dynamic Skill '{skill_id}' Error]\nException: {e}\n\n"
+
+        if sandbox_blocks:
+            print(f"\n[Janus Daemon] Found {len(sandbox_blocks)} sandbox command block(s). Executing...")
+            # Execute sandbox commands
+            execution_results = []
+            for block in sandbox_blocks:
+                res = execute_chat_sandbox_commands(block)
+                execution_results.append(res)
+            execution_summary += "[Sandbox Commands Executed]\n" + "\n\n".join(execution_results)
+        
+        # 5. Log execution results to SQLite as a background thought
         log_episodic_memory(
             speaker="sandbox_automation",
-            message_content=f"[Sandbox Commands Executed]\n{execution_summary}",
+            message_content=execution_summary.strip(),
             context_type="background_thought"
         )
         
-        # 5. Formulate next turn query to continue conversation
-        current_query = "Executed requested sandbox actions. Please review the background thought history and continue."
+        # 6. Formulate next turn query to continue conversation
+        current_query = "Executed requested actions/skills. Please review the background thought history and continue."
         
     return final_response
 

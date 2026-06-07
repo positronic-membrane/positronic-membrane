@@ -76,6 +76,32 @@ def query_agent(agent_id: str, prompt_content: str, system_override: str = None)
         rules_text = "\n\n### Rules & Guidelines:\n" + "\n".join(f"- {r['text']}" for r in rules)
         system += rules_text
 
+    # Dynamically retrieve and append active skills from SQLite for all agents
+    try:
+        from src.database import get_connection
+        conn = get_connection(read_only_constitution=True)
+        cursor = conn.cursor()
+        cursor.execute("SELECT skill_id, description, parameters_schema FROM agent_skills WHERE is_active = 1;")
+        active_skills = cursor.fetchall()
+        conn.close()
+        
+        if active_skills:
+            skills_docs = []
+            for row in active_skills:
+                try:
+                    sid, desc, schema = row['skill_id'], row['description'], row['parameters_schema']
+                except (TypeError, IndexError, KeyError):
+                    sid, desc, schema = row[0], row[1], row[2]
+                skills_docs.append(f"Skill ID: {sid}\nDescription: {desc}\nParameters Schema:\n{schema}")
+                
+            skills_context = "\n\n### Available Dynamic Skills:\n" + "\n---\n".join(skills_docs)
+            skills_context += "\n\nTo execute a skill, you MUST output a raw JSON block in exactly this format (do not use markdown blocks):\n"
+            skills_context += "{\n  \"skill_id\": \"<skill_id>\",\n  \"arguments\": { <arguments matching schema> }\n}\n"
+            system += skills_context
+            
+    except Exception as e:
+        logger.error(f"Failed to query dynamic skills from SQLite for {agent_id}: {e}", exc_info=True)
+
     # Dynamically retrieve and append active skills for proposer and explorer
     if agent_id in ("proposer", "explorer"):
         try:
@@ -85,7 +111,7 @@ def query_agent(agent_id: str, prompt_content: str, system_override: str = None)
                 skills_docs = []
                 for s in skills:
                     skills_docs.append(f"Skill ID: {s['id']}\n{s['content']}")
-                skills_context = "\n\n### Available Dynamic Skills (Retrieved Semantically):\n" + "\n---\n".join(skills_docs)
+                skills_context = "\n\n### Available Semantic Skills (Retrieved Semantically):\n" + "\n---\n".join(skills_docs)
                 system += skills_context
         except Exception as e:
             logger.error(f"Failed to query semantic skills for {agent_id}: {e}", exc_info=True)
