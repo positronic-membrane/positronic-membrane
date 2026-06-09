@@ -163,21 +163,149 @@ def test_get_sandbox_diff(mock_run, mock_get_session):
 @patch("src.sandbox_session.get_sandbox_session")
 @patch("src.sandbox_session.subprocess.run")
 def test_get_sandbox_modified_files(mock_run, mock_get_session):
-    """Verify get_sandbox_modified_files parses porcelain output."""
+    """Verify get_sandbox_modified_files parses porcelain output (dirty-tree pass)."""
     mock_get_session.return_value = {
         "active_sandbox_path": "/path/to/sandbox",
         "active_sandbox_branch": "janus/sandbox-feat",
-        "active_sandbox_status": "active"
+        "active_sandbox_status": "active",
+        # No fork_sha → only the dirty-tree pass runs
     }
-    
+
+    # Pass 1 (git status --porcelain) returns two files; no Pass 2 since no fork_sha
     mock_res = MagicMock()
+    mock_res.returncode = 0
     mock_res.stdout = " M src/calc.py\n?? tests/test_calc.py\n"
     mock_run.return_value = mock_res
-    
+
     files = get_sandbox_modified_files()
-    
-    assert files == ["src/calc.py", "tests/test_calc.py"]
-    mock_run.assert_called_once_with(["git", "status", "--porcelain"], cwd=Path("/path/to/sandbox"), capture_output=True, text=True)
+
+    assert sorted(files) == ["src/calc.py", "tests/test_calc.py"]
+    # Only one subprocess call because there is no fork_sha to trigger Pass 2
+    mock_run.assert_called_once_with(
+        ["git", "status", "--porcelain"],
+        cwd=Path("/path/to/sandbox"),
+        capture_output=True,
+        text=True
+    )
+
+
+@patch("src.sandbox_session.get_sandbox_session")
+@patch("src.sandbox_session.subprocess.run")
+def test_get_sandbox_modified_files_with_fork_sha(mock_run, mock_get_session):
+    """
+    Regression test: when the worktree is clean (auto-commit ran) but a fork_sha is
+    present, Pass 2 (git diff --name-only) must pick up the committed files.
+    """
+    fork_sha = "abc1234"
+    mock_get_session.return_value = {
+        "active_sandbox_path": "/path/to/sandbox",
+        "active_sandbox_branch": "janus/sandbox-feat",
+        "active_sandbox_status": "passed",
+        "active_sandbox_fork_sha": fork_sha,
+    }
+
+    # Pass 1: clean working tree (the auto-commit already ran)
+    clean_res = MagicMock()
+    clean_res.returncode = 0
+    clean_res.stdout = ""
+
+    # Pass 2: git diff reports the committed file
+    diff_res = MagicMock()
+    diff_res.returncode = 0
+    diff_res.stdout = "docs/pre_cloud_multi_party_hardening.md\n"
+
+    mock_run.side_effect = [clean_res, diff_res]
+
+    files = get_sandbox_modified_files()
+
+    assert files == ["docs/pre_cloud_multi_party_hardening.md"]
+
+    # Verify Pass 2 call used the correct fork SHA
+    call_args_list = mock_run.call_args_list
+    assert len(call_args_list) == 2
+    assert call_args_list[0][0][0] == ["git", "status", "--porcelain"]
+    assert call_args_list[1][0][0] == ["git", "diff", "--name-only", fork_sha, "HEAD"]
+
+
+@patch("src.sandbox_session.get_sandbox_session")
+@patch("src.sandbox_session.subprocess.run")
+def test_get_sandbox_modified_files_union_of_both_passes(mock_run, mock_get_session):
+    """
+    Verify that both dirty-tree files AND committed files are returned together
+    (de-duplicated) when a session has a fork_sha stored.
+    """
+    fork_sha = "deadbeef"
+    mock_get_session.return_value = {
+        "active_sandbox_path": "/path/to/sandbox",
+        "active_sandbox_branch": "janus/sandbox-feat",
+        "active_sandbox_status": "active",
+        "active_sandbox_fork_sha": fork_sha,
+    }
+
+    dirty_res = MagicMock()
+    dirty_res.returncode = 0
+    dirty_res.stdout = "?? src/new_file.py\n"
+
+    diff_res = MagicMock()
+    diff_res.returncode = 0
+    # Includes src/new_file.py (overlap) + a committed file
+    diff_res.stdout = "src/new_file.py\nREADME.md\n"
+
+    mock_run.side_effect = [dirty_res, diff_res]
+
+    files = get_sandbox_modified_files()
+
+    # De-duplicated union
+    assert sorted(files) == ["README.md", "src/new_file.py"]
+
+
+@patch("src.sandbox_session.get_sandbox_session")
+@patch("src.sandbox_session.get_sandbox_modified_files")
+@patch("src.sandbox_session.cleanup_git_sandbox")
+@patch("src.sandbox_session.clear_sandbox_session")
+def test_ship_sandbox_session_after_auto_commit(
+    mock_clear,
+    mock_cleanup,
+    mock_get_modified,
+    mock_get_session,
+    tmp_path
+):
+    """
+    Regression test: ship_sandbox_session must copy files that were auto-committed
+    by run_sandbox_tests (leaving a clean working tree), NOT just dirty-tree files.
+    """
+    import src.config as cfg
+    orig_root = cfg.ROOT_DIR
+    cfg.ROOT_DIR = tmp_path
+
+    sandbox_path = tmp_path / "sandbox"
+    sandbox_path.mkdir()
+
+    mock_get_session.return_value = {
+        "active_sandbox_path": str(sandbox_path),
+        "active_sandbox_branch": "janus/sandbox-feat",
+        "active_sandbox_status": "passed",
+        "active_sandbox_fork_sha": "abc1234",
+    }
+    # Simulate: get_sandbox_modified_files correctly returns the committed file
+    committed_file = "docs/pre_cloud_multi_party_hardening.md"
+    mock_get_modified.return_value = [committed_file]
+
+    # Create the file inside the sandbox so copy2 has something to copy
+    doc_dir = sandbox_path / "docs"
+    doc_dir.mkdir()
+    (doc_dir / "pre_cloud_multi_party_hardening.md").write_text("hardening docs")
+
+    try:
+        copied = ship_sandbox_session()
+
+        # The committed file must be reported as copied
+        assert committed_file in copied
+        # Cleanup must run
+        mock_cleanup.assert_called_once_with(str(sandbox_path), "janus/sandbox-feat")
+        mock_clear.assert_called_once()
+    finally:
+        cfg.ROOT_DIR = orig_root
 
 @patch("src.sandbox_session.get_sandbox_session")
 @patch("src.sandbox_session.get_sandbox_modified_files")

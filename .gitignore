@@ -228,6 +228,7 @@ __marimo__/
 
 # Project Janus Database & runtime data
 janus.db
+janus_test.db
 janus.db-journal
 janus.db-wal
 janus.db-shm

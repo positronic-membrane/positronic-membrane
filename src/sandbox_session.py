@@ -159,6 +159,21 @@ def create_sandbox_session(session_name: str) -> tuple:
     # Ensure parent directory exists
     os.makedirs(sandbox_dir.parent, exist_ok=True)
     
+    # Capture the current HEAD SHA before branching so we can later diff against it
+    fork_sha = ""
+    try:
+        res_sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=src.config.ROOT_DIR,
+            capture_output=True,
+            text=True
+        )
+        if res_sha.returncode == 0:
+            fork_sha = res_sha.stdout.strip()
+            logger.info(f"Captured fork-point SHA: {fork_sha}")
+    except Exception as e:
+        logger.warning(f"Could not capture fork-point SHA: {e}")
+    
     # 2. Run git worktree add
     cmd = ["git", "worktree", "add", "-b", branch_name, sandbox_path_str]
     res = subprocess.run(
@@ -180,8 +195,8 @@ def create_sandbox_session(session_name: str) -> tuple:
         except Exception as e:
             logger.warning(f"Could not isolate database for sandbox session: {e}")
 
-    # 3. Save to database
-    save_sandbox_session(sandbox_path_str, branch_name, "active")
+    # 3. Save to database (persist fork SHA so ship can diff against it later)
+    save_sandbox_session(sandbox_path_str, branch_name, "active", fork_sha=fork_sha)
     
     logger.info(f"Sandbox created successfully.")
     return sandbox_path_str, branch_name
@@ -290,29 +305,56 @@ def get_sandbox_diff() -> str:
 def get_sandbox_modified_files() -> list:
     """
     Returns a list of relative paths for files modified or added in the active sandbox.
+
+    Uses a two-pass strategy to handle both uncommitted and committed changes:
+      Pass 1 – Dirty working tree: ``git status --porcelain`` picks up any files
+               written directly to the worktree that have not yet been committed
+               (e.g. files written via SafeFS.write / modify_code without staging).
+      Pass 2 – Committed-but-not-shipped: ``git diff --name-only <fork_sha>..HEAD``
+               picks up files that were committed by the auto-commit inside
+               run_sandbox_tests(), which leaves the working tree clean and would
+               otherwise cause ship_sandbox_session() to copy nothing.
     """
     session = get_active_sandbox()
     if not session:
         return []
         
     sandbox_root = Path(session["active_sandbox_path"])
-    
-    # git status --porcelain
+    files: set = set()
+
+    # --- Pass 1: uncommitted dirty-tree changes ---
     res = subprocess.run(
         ["git", "status", "--porcelain"],
         cwd=sandbox_root,
         capture_output=True,
         text=True
     )
-    
-    files = []
     for line in res.stdout.splitlines():
         if line.strip():
             # Lines are of format " M path" or "?? path" or "A  path"
             parts = line.strip().split(maxsplit=1)
             if len(parts) == 2:
-                files.append(parts[1])
-    return files
+                files.add(parts[1])
+
+    # --- Pass 2: committed changes since the fork point ---
+    fork_sha = session.get("active_sandbox_fork_sha", "")
+    if fork_sha:
+        try:
+            res2 = subprocess.run(
+                ["git", "diff", "--name-only", fork_sha, "HEAD"],
+                cwd=sandbox_root,
+                capture_output=True,
+                text=True
+            )
+            if res2.returncode == 0:
+                for f in res2.stdout.splitlines():
+                    stripped = f.strip()
+                    if stripped:
+                        files.add(stripped)
+        except Exception as e:
+            logger.warning(f"Could not diff against fork SHA '{fork_sha}': {e}")
+
+    return list(files)
 
 def ship_sandbox_session() -> list:
     """

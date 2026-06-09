@@ -1768,7 +1768,7 @@ def get_pending_modification() -> dict:
     return {}
 
 # Staged Sandbox Session Helpers
-def save_sandbox_session(path: str, branch: str, status: str, test_logs: str = ""):
+def save_sandbox_session(path: str, branch: str, status: str, test_logs: str = "", fork_sha: str = ""):
     """Saves active sandbox session metadata in system_config."""
     conn = get_connection(read_only_constitution=True)
     cursor = conn.cursor()
@@ -1776,8 +1776,12 @@ def save_sandbox_session(path: str, branch: str, status: str, test_logs: str = "
         ("active_sandbox_path", path),
         ("active_sandbox_branch", branch),
         ("active_sandbox_status", status),
-        ("active_sandbox_test_logs", test_logs)
+        ("active_sandbox_test_logs", test_logs),
     ]
+    # Only persist fork_sha when it is supplied (first call from create_sandbox_session);
+    # subsequent status-update calls pass an empty string, so we leave the stored value alone.
+    if fork_sha:
+        configs.append(("active_sandbox_fork_sha", fork_sha))
     for key, val in configs:
         cursor.execute("""
         INSERT OR REPLACE INTO system_config (config_key, config_value, is_agent_modifiable)
@@ -1790,7 +1794,13 @@ def clear_sandbox_session():
     """Clears any active sandbox session from system_config."""
     conn = get_connection(read_only_constitution=True)
     cursor = conn.cursor()
-    keys = ["active_sandbox_path", "active_sandbox_branch", "active_sandbox_status", "active_sandbox_test_logs"]
+    keys = [
+        "active_sandbox_path",
+        "active_sandbox_branch",
+        "active_sandbox_status",
+        "active_sandbox_test_logs",
+        "active_sandbox_fork_sha",
+    ]
     for key in keys:
         cursor.execute("DELETE FROM system_config WHERE config_key = ?;", (key,))
     conn.commit()
@@ -1803,7 +1813,13 @@ def get_sandbox_session() -> dict:
     cursor.execute("""
     SELECT config_key, config_value 
     FROM system_config 
-    WHERE config_key IN ('active_sandbox_path', 'active_sandbox_branch', 'active_sandbox_status', 'active_sandbox_test_logs');
+    WHERE config_key IN (
+        'active_sandbox_path',
+        'active_sandbox_branch',
+        'active_sandbox_status',
+        'active_sandbox_test_logs',
+        'active_sandbox_fork_sha'
+    );
     """)
     rows = cursor.fetchall()
     conn.close()
