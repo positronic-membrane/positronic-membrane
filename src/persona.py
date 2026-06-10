@@ -888,6 +888,82 @@ def handle_goal_command(command_str: str) -> str:
     else:
         return f"[Error] Unknown goal subcommand '{subcommand}'. Available commands: create, status, checkpoint, complete."
 
+def handle_docs_command(command_str: str) -> str:
+    """
+    Handles /docs slash commands for document memory CRUD operations.
+
+    Supported subcommands:
+      /docs list [#tag]         — list all documents, optionally filtered by tag
+      /docs get <title>         — retrieve a document by title
+      /docs create <title> | <content> [#tag1 #tag2 ...]
+      /docs update <title> | <content>
+      /docs delete <title>
+    """
+    from src.skills import DynamicSkillExecutor
+
+    parts = command_str.strip().split(None, 1)
+    subcommand = ""
+    args_str = ""
+    if len(parts) > 1:
+        rest = parts[1].strip()
+        sub_parts = rest.split(None, 1)
+        subcommand = sub_parts[0].lower()
+        if len(sub_parts) > 1:
+            args_str = sub_parts[1].strip()
+
+    party_id = get_session_party_id()
+
+    def _run(action: str, **kwargs) -> str:
+        res = DynamicSkillExecutor.execute("document_memory", {"action": action, **kwargs}, party_id=party_id)
+        if res["success"]:
+            result = res["result"]
+            return result if isinstance(result, str) else str(result)
+        return f"[Error] {res['error']}"
+
+    if not subcommand or subcommand == "list":
+        # optional tag filter: /docs list #tag  or  /docs list tag
+        tag_filter = args_str.lstrip("#").strip() if args_str else None
+        return _run("list", tag_filter=tag_filter)
+
+    elif subcommand == "get":
+        if not args_str:
+            return "[Error] Usage: /docs get <title>"
+        return _run("get", title=args_str)
+
+    elif subcommand == "create":
+        # Format: <title> | <content> [optional #tags]
+        if "|" not in args_str:
+            return "[Error] Usage: /docs create <title> | <content>"
+        title_part, body_part = args_str.split("|", 1)
+        title = title_part.strip()
+        body = body_part.strip()
+
+        # Extract optional trailing hashtags from body: e.g. "Some text #note #work"
+        import re as _re
+        tag_matches = _re.findall(r"#(\w+)", body)
+        content = _re.sub(r"\s*#\w+", "", body).strip()
+        return _run("create", title=title, content=content, tags=tag_matches or [])
+
+    elif subcommand == "update":
+        if "|" not in args_str:
+            return "[Error] Usage: /docs update <title> | <new content>"
+        title_part, body_part = args_str.split("|", 1)
+        title = title_part.strip()
+        new_content = body_part.strip()
+        return _run("update", title=title, content=new_content)
+
+    elif subcommand == "delete":
+        if not args_str:
+            return "[Error] Usage: /docs delete <title>"
+        return _run("delete", title=args_str)
+
+    else:
+        return (
+            f"[Error] Unknown /docs subcommand '{subcommand}'. "
+            "Supported: list, get, create, update, delete."
+        )
+
+
 def generate_persona_response(user_query: str) -> str:
     """
     Queries ChromaDB (Primary Concepts & Codebase) and episodic logs for context,
@@ -2104,6 +2180,11 @@ async def run_persona_chat():
                 print(f"\n{res}\n")
                 continue
 
+            if user_msg_lower == "/docs" or user_msg_lower.startswith("/docs "):
+                res = handle_docs_command(user_msg)
+                print(f"\n{res}\n")
+                continue
+
             # Log user prompt to SQLite
             log_episodic_memory("user", user_msg, "user_visible")
 
@@ -2499,6 +2580,9 @@ async def handle_web_slash_command(user_msg: str) -> str:
 
     elif user_msg.strip().lower() == "/goal" or user_msg.strip().lower().startswith("/goal ") or user_msg.strip().lower() == "/goals" or user_msg.strip().lower().startswith("/goals "):
         return handle_goal_command(user_msg)
+
+    elif user_msg.strip().lower() == "/docs" or user_msg.strip().lower().startswith("/docs "):
+        return handle_docs_command(user_msg)
             
     return "[Error] Unknown slash command."
 
