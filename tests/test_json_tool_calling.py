@@ -67,10 +67,56 @@ def test_parse_action_legacy_and_mock():
     assert args == {"rel_path": "src/main.py", "proposed_code": "print('hello')"}
     assert err is None
 
+    # 2b. Legacy drafts and document memory tools
+    s, args, err = parse_action("write_draft_file: notes.md | hello world")
+    assert s == "write_draft_file"
+    assert args == {"filename": "notes.md", "content": "hello world"}
+    assert err is None
+
+    s, args, err = parse_action("read_draft_file: notes.md")
+    assert s == "read_draft_file"
+    assert args == {"filename": "notes.md"}
+    assert err is None
+
+    s, args, err = parse_action("list_draft_files")
+    assert s == "list_draft_files"
+    assert args == {}
+    assert err is None
+
+    s, args, err = parse_action("commit_draft_to_db: notes.md | My Title")
+    assert s == "commit_draft_to_db"
+    assert args == {"filename": "notes.md", "doc_title": "My Title"}
+    assert err is None
+
+    s, args, err = parse_action("checkout_db_to_draft: My Title | notes.md")
+    assert s == "checkout_db_to_draft"
+    assert args == {"doc_title": "My Title", "filename": "notes.md"}
+    assert err is None
+
+    s, args, err = parse_action("document_memory: get | My Title")
+    assert s == "document_memory"
+    assert args == {"action": "get", "title": "My Title"}
+    assert err is None
+
+    s, args, err = parse_action("document_memory: list")
+    assert s == "document_memory"
+    assert args == {"action": "list", "tag_filter": None}
+    assert err is None
+
+    s, args, err = parse_action("document_memory: list | my-tag")
+    assert s == "document_memory"
+    assert args == {"action": "list", "tag_filter": "my-tag"}
+    assert err is None
+
     # 3. Malformed tool keyword
     s, args, err = parse_action("modify_code without separator or arguments")
     assert s is None
     assert "uses incorrect syntax" in err
+
+    # 3b. Malformed JSON block containing tool keywords
+    s, args, err = parse_action('I will execute: {"skill_id": "web_search", "arguments": "query": "test"}')
+    assert s is None
+    assert "Failed to parse JSON action block" in err
 
     # 4. Completely random mock action
     s, args, err = parse_action("Sing a beautiful song about robots")

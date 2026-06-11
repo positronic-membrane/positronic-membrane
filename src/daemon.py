@@ -156,20 +156,27 @@ def parse_action(action_str: str) -> tuple[Optional[str], dict, Optional[str]]:
     try:
         # Check if it starts/ends with markdown fences and strip them
         fence_match = re.search(r"```(?:json|python)?\s*({.*?})\s*```", action_clean, re.DOTALL)
-        json_candidate = fence_match.group(1) if fence_match else action_clean
+        json_candidate = fence_match.group(1) if fence_match else None
         
-        # If not, check if there's any { ... } block
-        if not fence_match:
+        # If not, check if there's any { ... } block containing tool-like keys
+        if not json_candidate:
             braces_match = re.search(r"({.*})", action_clean, re.DOTALL)
             if braces_match:
-                json_candidate = braces_match.group(1)
-                
-        data = json.loads(json_candidate)
-        if isinstance(data, dict):
-            skill_id = data.get("skill_id") or data.get("tool") or data.get("tool_name")
-            arguments = data.get("arguments") or data.get("args") or {}
-            if skill_id:
-                return skill_id, arguments, None
+                candidate = braces_match.group(1)
+                # Ensure it looks like a tool call dictionary to avoid false positives on random text
+                if any(k in candidate for k in ["skill_id", "tool", "tool_name", "arguments", "args"]):
+                    json_candidate = candidate
+                    
+        if json_candidate:
+            try:
+                data = json.loads(json_candidate)
+                if isinstance(data, dict):
+                    skill_id = data.get("skill_id") or data.get("tool") or data.get("tool_name")
+                    arguments = data.get("arguments") or data.get("args") or {}
+                    if skill_id:
+                        return skill_id, arguments, None
+            except json.JSONDecodeError as jde:
+                return None, {}, f"Error: Failed to parse JSON action block. JSON syntax error: {jde}. Ensure all keys and strings use double quotes and correct syntax."
     except Exception:
         pass
 
@@ -181,14 +188,27 @@ def parse_action(action_str: str) -> tuple[Optional[str], dict, Optional[str]]:
     spawn_agent_match = re.match(r"^spawn_agent:\s*([a-z0-9_-]+)\s*\|\s*([^|]+)\s*\|\s*(.*)", action_clean, re.IGNORECASE) or re.search(r"\bspawn_agent:\s*([a-z0-9_-]+)\s*\|\s*([^|]+)\s*\|\s*(.*)", action_clean, re.IGNORECASE)
     execute_code_match = re.match(r"^execute_code:\s*(.*)", action_clean, re.DOTALL | re.IGNORECASE) or re.search(r"\bexecute_code:\s*(.*)", action_clean, re.DOTALL | re.IGNORECASE)
     modify_code_match = re.match(r"^modify_code:\s*([^|]+)\s*\|\s*(.*)", action_clean, re.DOTALL | re.IGNORECASE) or re.search(r"\bmodify_code:\s*([^|]+)\s*\|\s*(.*)", action_clean, re.DOTALL | re.IGNORECASE)
+    
+    write_draft_file_match = re.match(r"^write_draft_file:\s*([^|]+)\s*\|\s*(.*)", action_clean, re.DOTALL | re.IGNORECASE) or re.search(r"\bwrite_draft_file:\s*([^|]+)\s*\|\s*(.*)", action_clean, re.DOTALL | re.IGNORECASE)
+    read_draft_file_match = re.match(r"^read_draft_file:\s*(.*)", action_clean, re.IGNORECASE) or re.search(r"\bread_draft_file:\s*(.*)", action_clean, re.IGNORECASE)
+    list_draft_files_match = re.match(r"^list_draft_files\b", action_clean, re.IGNORECASE) or re.search(r"\blist_draft_files\b", action_clean, re.IGNORECASE)
+    commit_draft_to_db_match = re.match(r"^commit_draft_to_db:\s*([^|]+)\s*\|\s*(.*)", action_clean, re.IGNORECASE) or re.search(r"\bcommit_draft_to_db:\s*([^|]+)\s*\|\s*(.*)", action_clean, re.IGNORECASE)
+    checkout_db_to_draft_match = re.match(r"^checkout_db_to_draft:\s*([^|]+)\s*\|\s*(.*)", action_clean, re.IGNORECASE) or re.search(r"\bcheckout_db_to_draft:\s*([^|]+)\s*\|\s*(.*)", action_clean, re.IGNORECASE)
+    document_memory_match = re.match(r"^document_memory:\s*([^|]+)(?:\s*\|\s*(.*))?", action_clean, re.IGNORECASE) or re.search(r"\bdocument_memory:\s*([^|]+)(?:\s*\|\s*(.*))?", action_clean, re.IGNORECASE)
 
-    has_tool_keyword = any(kw in action_clean.lower() for kw in ["web_search", "fetch_url", "read_codebase", "scan_workspace", "spawn_agent", "execute_code", "modify_code"])
-    any_matched = any([web_search_match, fetch_url_match, read_codebase_match, scan_workspace_match, spawn_agent_match, execute_code_match, modify_code_match])
+    has_tool_keyword = any(kw in action_clean.lower() for kw in [
+        "web_search", "fetch_url", "read_codebase", "scan_workspace", "spawn_agent", "execute_code", "modify_code",
+        "write_draft_file", "read_draft_file", "list_draft_files", "commit_draft_to_db", "checkout_db_to_draft", "document_memory"
+    ])
+    any_matched = any([
+        web_search_match, fetch_url_match, read_codebase_match, scan_workspace_match, spawn_agent_match, execute_code_match, modify_code_match,
+        write_draft_file_match, read_draft_file_match, list_draft_files_match, commit_draft_to_db_match, checkout_db_to_draft_match, document_memory_match
+    ])
 
     if has_tool_keyword and not any_matched:
         return None, {}, (
             f"Error: Proposed action contains a tool name but uses incorrect syntax. "
-            f"For modify_code, make sure to format exactly as: 'modify_code: <path> | <complete content>'"
+            f"Ensure your action matches standard arguments format."
         )
 
     if web_search_match:
@@ -212,6 +232,35 @@ def parse_action(action_str: str) -> tuple[Optional[str], dict, Optional[str]]:
             "rel_path": modify_code_match.group(1).strip(),
             "proposed_code": modify_code_match.group(2).strip()
         }, None
+    elif write_draft_file_match:
+        return "write_draft_file", {
+            "filename": write_draft_file_match.group(1).strip(),
+            "content": write_draft_file_match.group(2).strip()
+        }, None
+    elif read_draft_file_match:
+        return "read_draft_file", {
+            "filename": read_draft_file_match.group(1).strip()
+        }, None
+    elif list_draft_files_match:
+        return "list_draft_files", {}, None
+    elif commit_draft_to_db_match:
+        return "commit_draft_to_db", {
+            "filename": commit_draft_to_db_match.group(1).strip(),
+            "doc_title": commit_draft_to_db_match.group(2).strip()
+        }, None
+    elif checkout_db_to_draft_match:
+        return "checkout_db_to_draft", {
+            "doc_title": checkout_db_to_draft_match.group(1).strip(),
+            "filename": checkout_db_to_draft_match.group(2).strip()
+        }, None
+    elif document_memory_match:
+        act = document_memory_match.group(1).strip()
+        second_param = document_memory_match.group(2)
+        second_param = second_param.strip() if second_param else None
+        if act.lower() == "get":
+            return "document_memory", {"action": "get", "title": second_param}, None
+        elif act.lower() == "list":
+            return "document_memory", {"action": "list", "tag_filter": second_param}, None
 
     # Default fallback to mock action output
     return None, {}, f"Action successfully run. Metadata generated. Output size: {len(action_clean)} characters."

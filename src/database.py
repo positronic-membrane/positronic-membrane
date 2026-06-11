@@ -635,9 +635,11 @@ def init_db():
     # Populate default agent rules
     default_rules = [
         ('persona', 'verify_live_codebase', "Always check the live code base before answering questions about it. Don't assume knowledge of the code base based on chat history."),
+        ('persona', 'natural_tool_invocation', "When you need to perform actions (e.g. search the web, read files, run tests, or execute code), you must explain your intent naturally to the user and then append the correct JSON skill execution block to execute the action."),
         ('proposer', 'verify_file_existence', "Always confirm that a target file path exists using read_codebase or scan_workspace before proposing modifications to it. Do not guess or hallucinate directories."),
         ('proposer', 'strict_tool_syntax', "Direct tool calls must be formatted exactly as PROPOSED_ACTION: <tool_name>:<arguments>. Do not wrap code content in markdown fences inside tool call arguments, and omit all conversational prefix text."),
-        ('proposer', 'dependency_check', "Ensure any proposed code edits only import libraries defined in requirements.txt or the Python standard library. Verify import paths align with the active project structure.")
+        ('proposer', 'dependency_check', "Ensure any proposed code edits only import libraries defined in requirements.txt or the Python standard library. Verify import paths align with the active project structure."),
+        ('proposer', 'autonomous_document_writing', "When creating, writing, or updating documentation, design specs, roadmaps, logs, thoughts, or notes autonomously, you MUST use the drafts directory skills (e.g. write_draft_file) or document memory skills (e.g. document_memory) rather than modifying files in the codebase via modify_code or execute_code. Code changes should still use modify_code.")
     ]
     for agent_id, rule_key, rule_text in default_rules:
         cursor.execute("""
@@ -974,6 +976,13 @@ def init_db():
             - spawn_agent: <agent_id> | <agent_name> | <system_prompt>
             - execute_code: <python_code>
             - modify_code: <relative_file_path> | <complete_new_code_contents>
+            - write_draft_file: <filename> | <content> (Use this to create or update draft documents/notes/roadmaps/tasks in docs/drafts/ without sandbox constraints)
+            - read_draft_file: <filename> (Read a draft file from docs/drafts/)
+            - list_draft_files (List all drafts in docs/drafts/)
+            - commit_draft_to_db: <filename> | <doc_title> (Commit local draft to persistent database document)
+            - checkout_db_to_draft: <doc_title> | <filename> (Checkout persistent DB document to local draft)
+            - document_memory: get | <title> (Retrieve persistent DB document)
+            - document_memory: list (List all persistent DB documents)
 
             If you are ready with the final action of this tick, output it exactly in the format:
             PROPOSED_ACTION: <tool_name>:<arguments>
@@ -1319,22 +1328,32 @@ def init_db():
             ),
         ]
         for skill_id, name, desc, schema, code, entry, role, trigger, config in default_skills:
-            cursor.execute("""
-            INSERT OR IGNORE INTO agent_skills (
-                skill_id, name, description, parameters_schema, code_blob, 
-                entry_point_function, required_role, trigger_type, trigger_config
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
-            """, (skill_id, name, desc, schema, code, entry, role, trigger, config))
+            if skill_id == "run_reflection_cycle":
+                cursor.execute("""
+                INSERT OR REPLACE INTO agent_skills (
+                    skill_id, name, description, parameters_schema, code_blob, 
+                    entry_point_function, required_role, trigger_type, trigger_config
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
+                """, (skill_id, name, desc, schema, code, entry, role, trigger, config))
+            else:
+                cursor.execute("""
+                INSERT OR IGNORE INTO agent_skills (
+                    skill_id, name, description, parameters_schema, code_blob, 
+                    entry_point_function, required_role, trigger_type, trigger_config
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
+                """, (skill_id, name, desc, schema, code, entry, role, trigger, config))
 
     # Always ensure the document & drafts skills exist and are updated, even in pre-existing databases.
     # This runs unconditionally using INSERT OR REPLACE to migrate live DBs.
     _read_draft_code = """def read_draft_file(filename: str) -> str:
     import os
+    import src.config
     basename = os.path.basename(filename)
-    safe_path = os.path.join("docs", "drafts", basename)
-    if not sdk['fs'].exists(safe_path):
+    safe_path = os.path.join(str(src.config.ROOT_DIR), "docs", "drafts", basename)
+    if not os.path.exists(safe_path):
         return f"[Error] Draft file '{safe_path}' does not exist."
-    return sdk['fs'].read(safe_path)
+    with open(safe_path, "r", encoding="utf-8", errors="ignore") as f:
+        return f.read()
 """
     _read_draft_schema = json.dumps({
         "type": "object",
@@ -1346,9 +1365,12 @@ def init_db():
 
     _write_draft_code = """def write_draft_file(filename: str, content: str) -> str:
     import os
+    import src.config
     basename = os.path.basename(filename)
-    safe_path = os.path.join("docs", "drafts", basename)
-    sdk['fs'].write(safe_path, content)
+    safe_path = os.path.join(str(src.config.ROOT_DIR), "docs", "drafts", basename)
+    os.makedirs(os.path.dirname(safe_path), exist_ok=True)
+    with open(safe_path, "w", encoding="utf-8") as f:
+        f.write(content)
     return f"Draft successfully saved to '{safe_path}'."
 """
     _write_draft_schema = json.dumps({
@@ -1362,8 +1384,8 @@ def init_db():
 
     _list_drafts_code = """def list_draft_files() -> str:
     import os
-    root = str(sdk['fs'].root)
-    drafts_path = os.path.join(root, "docs", "drafts")
+    import src.config
+    drafts_path = os.path.join(str(src.config.ROOT_DIR), "docs", "drafts")
     if not os.path.exists(drafts_path):
         return "Drafts directory does not exist."
     files = [f for f in os.listdir(drafts_path) if os.path.isfile(os.path.join(drafts_path, f))]
@@ -1378,9 +1400,9 @@ def init_db():
 
     _delete_draft_code = """def delete_draft_file(filename: str) -> str:
     import os
+    import src.config
     basename = os.path.basename(filename)
-    root = str(sdk['fs'].root)
-    safe_path = os.path.join(root, "docs", "drafts", basename)
+    safe_path = os.path.join(str(src.config.ROOT_DIR), "docs", "drafts", basename)
     if not os.path.exists(safe_path):
         return f"[Error] Draft file '{safe_path}' does not exist."
     os.remove(safe_path)
@@ -1396,11 +1418,13 @@ def init_db():
 
     _commit_draft_code = '''def commit_draft_to_db(filename: str, doc_title: str, tags: list = None) -> str:
     import os
+    import src.config
     basename = os.path.basename(filename)
-    safe_path = os.path.join("docs", "drafts", basename)
-    if not sdk['fs'].exists(safe_path):
+    safe_path = os.path.join(str(src.config.ROOT_DIR), "docs", "drafts", basename)
+    if not os.path.exists(safe_path):
         return f"[Error] Local draft file '{safe_path}' not found."
-    content = sdk['fs'].read(safe_path)
+    with open(safe_path, "r", encoding="utf-8", errors="ignore") as f:
+        content = f.read()
     
     sdk['documents'].upsert(doc_title, content, tags)
     return f"Successfully committed draft '{basename}' to DB document '{doc_title}' ({len(content)} characters)."
@@ -1417,14 +1441,17 @@ def init_db():
 
     _checkout_db_code = """def checkout_db_to_draft(doc_title: str, filename: str) -> str:
     import os
+    import src.config
     basename = os.path.basename(filename)
-    safe_path = os.path.join("docs", "drafts", basename)
+    safe_path = os.path.join(str(src.config.ROOT_DIR), "docs", "drafts", basename)
     
     doc = sdk['documents'].get(doc_title)
     if not doc:
         return f"[Error] Database document '{doc_title}' not found."
     
-    sdk['fs'].write(safe_path, doc['content'])
+    os.makedirs(os.path.dirname(safe_path), exist_ok=True)
+    with open(safe_path, "w", encoding="utf-8") as f:
+        f.write(doc['content'])
     return f"Successfully checked out DB document '{doc_title}' to local file '{safe_path}'."
 """
     _checkout_db_schema = json.dumps({

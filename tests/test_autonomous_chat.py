@@ -170,9 +170,12 @@ def test_generate_persona_response_autonomous_react_loop(mock_parse, mock_exec, 
     
     # Assert execution result was logged as a background thought in episodic memory
     mems = get_recent_episodic_memories(limit=10, context_type="background_thought")
-    assert len(mems) == 1
+    assert len(mems) == 2
+    # Ordered newest first (descending ID)
     assert mems[0][0] == "sandbox_automation"
     assert "Logs: Green!" in mems[0][1]
+    assert mems[1][0] == "persona"
+    assert "Let me run tests first" in mems[1][1]
 
 @patch("src.sandbox_session.get_active_sandbox")
 @patch("src.persona.generate_persona_response")
@@ -192,3 +195,37 @@ def test_generate_persona_response_autonomous_loop_limit(mock_parse, mock_exec, 
     # Assert it was run 5 times and exited
     assert mock_gen.call_count == 5
     assert res == "Still checking...\n```sandbox\ntest\n```"
+
+@patch("src.sandbox_session.get_active_sandbox")
+@patch("src.persona.generate_persona_response")
+@patch("src.persona.parse_proposed_changes")
+def test_generate_persona_response_autonomous_syntax_retry(mock_parse, mock_gen, mock_get_sb):
+    """Verify that a tool syntax error triggers a retry turn in the ReAct loop."""
+    mock_get_sb.return_value = None
+    mock_parse.return_value = {}
+
+    # Turn 1: Outputs a malformed JSON tool call block
+    resp1 = 'I will execute: {"skill_id": "web_search", "arguments": "query": "test"}'
+    # Turn 2: Outputs final correct response
+    resp2 = 'Apologies, here is the answer: Search results indicate that...'
+
+    mock_gen.side_effect = [resp1, resp2]
+
+    res = generate_persona_response_autonomous("Find info on X")
+
+    assert res == 'Apologies, here is the answer: Search results indicate that...'
+    assert mock_gen.call_count == 2
+    mock_gen.assert_any_call("Find info on X")
+    
+    # Assert that the second call matches the expected retry prompt format
+    second_call_arg = mock_gen.call_args_list[1][0][0]
+    assert "The previous tool execution failed with a syntax error:" in second_call_arg
+    assert "Please correct the syntax and try again" in second_call_arg
+
+    # Verify that the syntax error was logged in episodic memory
+    mems = get_recent_episodic_memories(limit=10, context_type="background_thought")
+    assert len(mems) == 2
+    assert mems[0][0] == "sandbox_automation"
+    assert "Failed to parse JSON action block" in mems[0][1]
+    assert mems[1][0] == "persona"
+    assert 'I will execute: {"skill_id"' in mems[1][1]

@@ -1242,9 +1242,29 @@ def generate_persona_response_autonomous(user_msg: str) -> str:
         # 4. Check for legacy sandbox command blocks (```sandbox ... ```)
         sandbox_blocks = re.findall(r"```sandbox\s*\n(.*?)\n```", response, re.DOTALL)
         
+        # Log the intermediate persona response to episodic memory as background thought
+        # so it is preserved in history for subsequent turns of this autonomous loop
+        is_syntax_error = mock_result and mock_result.startswith("Error:")
+        if skill_id or sandbox_blocks or is_syntax_error:
+            log_episodic_memory(
+                speaker="persona",
+                message_content=response,
+                context_type="background_thought"
+            )
+
         if not skill_id and not sandbox_blocks:
-            # No actions or sandbox commands to execute, return the response
-            break
+            if is_syntax_error:
+                # Log the parse error as a background thought so the agent can see it
+                log_episodic_memory(
+                    speaker="sandbox_automation",
+                    message_content=mock_result,
+                    context_type="background_thought"
+                )
+                current_query = f"The previous tool execution failed with a syntax error:\n{mock_result}\nPlease correct the syntax and try again using the valid JSON format: {{\"skill_id\": \"<skill_id>\", \"arguments\": {{ ... }} }}."
+                continue
+            else:
+                # No actions or sandbox commands to execute, return the response
+                break
             
         execution_summary = ""
         
@@ -1275,8 +1295,12 @@ def generate_persona_response_autonomous(user_msg: str) -> str:
             context_type="background_thought"
         )
         
-        # 6. Formulate next turn query to continue conversation
-        current_query = "Executed requested actions/skills. Please review the background thought history and continue."
+        # 6. Formulate next turn query to continue conversation, highlighting failures if any
+        has_failure = "Failed" in execution_summary or "Error" in execution_summary or "Exception" in execution_summary
+        if has_failure:
+            current_query = "Some actions or skills failed. Please review the background thought history, address the failure, and try again or proceed."
+        else:
+            current_query = "Executed requested actions/skills. Please review the background thought history and continue."
         
     return final_response
 
