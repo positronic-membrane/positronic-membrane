@@ -448,6 +448,109 @@ class SafeGoals:
         finally:
             conn.close()
 
+class SafeDocuments:
+    """Safe document management wrapper for database-backed dynamic skills."""
+    
+    def list(self, tag_filter: Optional[str] = None) -> list:
+        import json
+        conn = get_connection(read_only_constitution=True)
+        try:
+            cursor = conn.cursor()
+            if tag_filter:
+                cursor.execute(
+                    "SELECT id, title, tags, created_at, updated_at FROM janus_documents WHERE tags LIKE ? ORDER BY updated_at DESC;",
+                    (f'%"{tag_filter}"%',)
+                )
+            else:
+                cursor.execute(
+                    "SELECT id, title, tags, created_at, updated_at FROM janus_documents ORDER BY updated_at DESC;"
+                )
+            rows = cursor.fetchall()
+            docs = []
+            for row in rows:
+                try:
+                    did = row['id']
+                    title = row['title']
+                    tags = row['tags']
+                    created = row['created_at']
+                    updated = row['updated_at']
+                except (TypeError, KeyError, IndexError):
+                    did, title, tags, created, updated = row
+                docs.append({
+                    "id": did,
+                    "title": title,
+                    "tags": json.loads(tags) if tags else [],
+                    "created_at": created,
+                    "updated_at": updated
+                })
+            return docs
+        finally:
+            conn.close()
+
+    def get(self, title: str) -> Optional[dict]:
+        import json
+        conn = get_connection(read_only_constitution=True)
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT id, title, content, tags, created_at, updated_at FROM janus_documents WHERE title = ?;",
+                (title,)
+            )
+            row = cursor.fetchone()
+            if not row:
+                return None
+            try:
+                did = row['id']
+                title = row['title']
+                content = row['content']
+                tags = row['tags']
+                created = row['created_at']
+                updated = row['updated_at']
+            except (TypeError, KeyError, IndexError):
+                did, title, content, tags, created, updated = row
+            return {
+                "id": did,
+                "title": title,
+                "content": content,
+                "tags": json.loads(tags) if tags else [],
+                "created_at": created,
+                "updated_at": updated
+            }
+        finally:
+            conn.close()
+
+    def upsert(self, title: str, content: str, tags: Optional[list] = None) -> bool:
+        import json
+        conn = get_connection(read_only_constitution=True)
+        try:
+            cursor = conn.cursor()
+            tags_json = json.dumps(tags if isinstance(tags, list) else [])
+            cursor.execute(
+                """
+                INSERT INTO janus_documents (title, content, tags, updated_at)
+                VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(title) DO UPDATE SET content=excluded.content, tags=excluded.tags, updated_at=excluded.updated_at;
+                """,
+                (title, content, tags_json)
+            )
+            conn.commit()
+            return True
+        finally:
+            conn.close()
+
+    def delete(self, title: str) -> bool:
+        conn = get_connection(read_only_constitution=True)
+        try:
+            cursor = conn.cursor()
+            cursor.execute("SELECT id FROM janus_documents WHERE title = ?;", (title,))
+            if not cursor.fetchone():
+                return False
+            cursor.execute("DELETE FROM janus_documents WHERE title = ?;", (title,))
+            conn.commit()
+            return True
+        finally:
+            conn.close()
+
 class SafeLayeredCognition:
     """Safe layered cognition cadence and reflex controls for dynamic skills."""
     def trigger_reflex(self, action: str, priority: int = 0):
@@ -1213,6 +1316,7 @@ class DynamicSkillExecutor:
             "swarm": SafeSwarm(),
             "self_model": SafeSelfModel(),
             "goals": SafeGoals(),
+            "documents": SafeDocuments(),
             "layered_cognition": SafeLayeredCognition(),
             "agent_orchestration": SafeAgentOrchestration(),
             "replication": SafeReplication(),

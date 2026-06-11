@@ -890,14 +890,15 @@ def handle_goal_command(command_str: str) -> str:
 
 def handle_docs_command(command_str: str) -> str:
     """
-    Handles /docs slash commands for document memory CRUD operations.
+    Handles /docs slash commands for document drafts and memory sync operations.
 
     Supported subcommands:
-      /docs list [#tag]         — list all documents, optionally filtered by tag
-      /docs get <title>         — retrieve a document by title
-      /docs create <title> | <content> [#tag1 #tag2 ...]
-      /docs update <title> | <content>
-      /docs delete <title>
+      /docs list [#tag]                         — list all documents in database
+      /docs get <title>                         — checkout DB document to docs/drafts/<title>.md
+      /docs create <title>                      — create a blank local draft at docs/drafts/<title>.md
+      /docs commit <filename> | <title> [#tags] — publish a draft file to DB memory
+      /docs delete <title>                      — delete a document from the database
+      /docs drafts                              — list all local draft files
     """
     from src.skills import DynamicSkillExecutor
 
@@ -913,54 +914,59 @@ def handle_docs_command(command_str: str) -> str:
 
     party_id = get_session_party_id()
 
-    def _run(action: str, **kwargs) -> str:
-        res = DynamicSkillExecutor.execute("document_memory", {"action": action, **kwargs}, party_id=party_id)
+    def _run(skill: str, **kwargs) -> str:
+        res = DynamicSkillExecutor.execute(skill, kwargs, party_id=party_id)
         if res["success"]:
             result = res["result"]
             return result if isinstance(result, str) else str(result)
         return f"[Error] {res['error']}"
 
     if not subcommand or subcommand == "list":
-        # optional tag filter: /docs list #tag  or  /docs list tag
         tag_filter = args_str.lstrip("#").strip() if args_str else None
-        return _run("list", tag_filter=tag_filter)
+        return _run("document_memory", action="list", tag_filter=tag_filter)
 
     elif subcommand == "get":
         if not args_str:
             return "[Error] Usage: /docs get <title>"
-        return _run("get", title=args_str)
+        import re as _re
+        clean_title = _re.sub(r'[^a-zA-Z0-9_\-\s]', '', args_str)
+        filename = clean_title.strip().replace(" ", "_") + ".md"
+        return _run("checkout_db_to_draft", doc_title=args_str, filename=filename)
 
     elif subcommand == "create":
-        # Format: <title> | <content> [optional #tags]
-        if "|" not in args_str:
-            return "[Error] Usage: /docs create <title> | <content>"
-        title_part, body_part = args_str.split("|", 1)
-        title = title_part.strip()
-        body = body_part.strip()
-
-        # Extract optional trailing hashtags from body: e.g. "Some text #note #work"
+        if not args_str:
+            return "[Error] Usage: /docs create <title>"
         import re as _re
-        tag_matches = _re.findall(r"#(\w+)", body)
-        content = _re.sub(r"\s*#\w+", "", body).strip()
-        return _run("create", title=title, content=content, tags=tag_matches or [])
+        clean_title = _re.sub(r'[^a-zA-Z0-9_\-\s]', '', args_str)
+        filename = clean_title.strip().replace(" ", "_") + ".md"
+        content = f"# {args_str}\n\n[Write draft content here]\n"
+        return _run("write_draft_file", filename=filename, content=content)
 
-    elif subcommand == "update":
+    elif subcommand == "commit" or subcommand == "publish":
         if "|" not in args_str:
-            return "[Error] Usage: /docs update <title> | <new content>"
-        title_part, body_part = args_str.split("|", 1)
-        title = title_part.strip()
-        new_content = body_part.strip()
-        return _run("update", title=title, content=new_content)
+            return "[Error] Usage: /docs commit <filename> | <title> [optional #tags]"
+        file_part, rest_part = args_str.split("|", 1)
+        filename = file_part.strip()
+        rest = rest_part.strip()
+
+        import re as _re
+        tag_matches = _re.findall(r"#(\w+)", rest)
+        title = _re.sub(r"\s*#\w+", "", rest).strip()
+
+        return _run("commit_draft_to_db", filename=filename, doc_title=title, tags=tag_matches or [])
 
     elif subcommand == "delete":
         if not args_str:
             return "[Error] Usage: /docs delete <title>"
-        return _run("delete", title=args_str)
+        return _run("delete_db_document", doc_title=args_str)
+
+    elif subcommand in ("drafts", "list-drafts"):
+        return _run("list_draft_files")
 
     else:
         return (
             f"[Error] Unknown /docs subcommand '{subcommand}'. "
-            "Supported: list, get, create, update, delete."
+            "Supported: list, get, create, commit, delete, drafts."
         )
 
 

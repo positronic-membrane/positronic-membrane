@@ -1317,146 +1317,6 @@ def init_db():
                 "manual",
                 "{}"
             ),
-            (
-                "document_memory",
-                "Document Memory",
-                "Create, retrieve, update, delete, or list persistent documents stored in the Janus database.",
-                json.dumps({
-                    "type": "object",
-                    "properties": {
-                        "action": {
-                            "type": "string",
-                            "enum": ["create", "get", "list", "update", "delete"],
-                            "description": "The document operation to perform."
-                        },
-                        "title": {
-                            "type": "string",
-                            "description": "The unique title of the document (required for create, get, update, delete)."
-                        },
-                        "content": {
-                            "type": "string",
-                            "description": "The document body text (required for create; optional for update)."
-                        },
-                        "tags": {
-                            "type": "array",
-                            "items": {"type": "string"},
-                            "description": "Optional list of tag strings to categorise the document."
-                        },
-                        "tag_filter": {
-                            "type": "string",
-                            "description": "Optional tag string to filter results when using 'list' action."
-                        }
-                    },
-                    "required": ["action"]
-                }),
-                (
-                    'def document_memory(action, title=None, content=None, tags=None, tag_filter=None):\n'
-                    '    import json\n'
-                    '    NL = chr(10)\n'
-                    '\n'
-                    '    if action == "create":\n'
-                    '        if not title:\n'
-                    '            raise ValueError("title is required for action create.")\n'
-                    '        if content is None:\n'
-                    '            raise ValueError("content is required for action create.")\n'
-                    '        tags_json = json.dumps(tags if isinstance(tags, list) else [])\n'
-                    '        rows = sdk["db"].query(\n'
-                    '            "SELECT id FROM janus_documents WHERE title = ?;", (title,)\n'
-                    '        )\n'
-                    '        if rows:\n'
-                    '            return "[Error] A document with title \'" + title + "\' already exists. Use action \'update\' to modify it."\n'
-                    '        sdk["db"].query(\n'
-                    '            "INSERT INTO janus_documents (title, content, tags) VALUES (?, ?, ?);",\n'
-                    '            (title, content, tags_json)\n'
-                    '        )\n'
-                    '        return "Document \'" + title + "\' created successfully."\n'
-                    '\n'
-                    '    elif action == "get":\n'
-                    '        if not title:\n'
-                    '            raise ValueError("title is required for action get.")\n'
-                    '        rows = sdk["db"].query(\n'
-                    '            "SELECT id, title, content, tags, created_at, updated_at FROM janus_documents WHERE title = ?;",\n'
-                    '            (title,)\n'
-                    '        )\n'
-                    '        if not rows:\n'
-                    '            return "[Error] No document found with title \'" + title + "\'."\n'
-                    '        row = rows[0]\n'
-                    '        doc_title = row.get("title")      if isinstance(row, dict) else row[1]\n'
-                    '        doc_body  = row.get("content")    if isinstance(row, dict) else row[2]\n'
-                    '        doc_tags  = row.get("tags")       if isinstance(row, dict) else row[3]\n'
-                    '        created   = row.get("created_at") if isinstance(row, dict) else row[4]\n'
-                    '        updated   = row.get("updated_at") if isinstance(row, dict) else row[5]\n'
-                    '        tag_list  = json.loads(doc_tags) if doc_tags else []\n'
-                    '        tags_str  = ", ".join(tag_list) if tag_list else "none"\n'
-                    '        header    = "### " + doc_title + NL\n'
-                    '        meta      = "**Tags:** " + tags_str + " | **Created:** " + str(created) + " | **Updated:** " + str(updated) + NL + NL\n'
-                    '        return header + meta + doc_body\n'
-                    '\n'
-                    '    elif action == "list":\n'
-                    '        if tag_filter:\n'
-                    '            tag_pattern = \'%"\' + tag_filter + \'"%\'\n'
-                    '            rows = sdk["db"].query(\n'
-                    '                "SELECT title, tags, updated_at FROM janus_documents WHERE tags LIKE ? ORDER BY updated_at DESC;",\n'
-                    '                (tag_pattern,)\n'
-                    '            )\n'
-                    '        else:\n'
-                    '            rows = sdk["db"].query(\n'
-                    '                "SELECT title, tags, updated_at FROM janus_documents ORDER BY updated_at DESC;"\n'
-                    '            )\n'
-                    '        if not rows:\n'
-                    '            return "No documents stored yet."\n'
-                    '        output = ["### Janus Documents", "| Title | Tags | Updated |", "| --- | --- | --- |"]\n'
-                    '        for row in rows:\n'
-                    '            t   = row.get("title")      if isinstance(row, dict) else row[0]\n'
-                    '            tgs = row.get("tags")       if isinstance(row, dict) else row[1]\n'
-                    '            upd = row.get("updated_at") if isinstance(row, dict) else row[2]\n'
-                    '            tag_list = json.loads(tgs) if tgs else []\n'
-                    '            tags_str = ", ".join(tag_list) if tag_list else "-"\n'
-                    '            output.append("| " + str(t) + " | " + tags_str + " | " + str(upd) + " |")\n'
-                    '        return NL.join(output)\n'
-                    '\n'
-                    '    elif action == "update":\n'
-                    '        if not title:\n'
-                    '            raise ValueError("title is required for action update.")\n'
-                    '        if content is None and tags is None:\n'
-                    '            return "[Error] Provide at least content or tags to update."\n'
-                    '        rows = sdk["db"].query(\n'
-                    '            "SELECT content, tags FROM janus_documents WHERE title = ?;", (title,)\n'
-                    '        )\n'
-                    '        if not rows:\n'
-                    '            return "[Error] No document found with title \'" + title + "\'."\n'
-                    '        row = rows[0]\n'
-                    '        cur_content = row.get("content") if isinstance(row, dict) else row[0]\n'
-                    '        cur_tags    = row.get("tags")    if isinstance(row, dict) else row[1]\n'
-                    '        new_content = content if content is not None else cur_content\n'
-                    '        new_tags    = json.dumps(tags) if isinstance(tags, list) else cur_tags\n'
-                    '        sdk["db"].query(\n'
-                    '            "UPDATE janus_documents SET content = ?, tags = ?, updated_at = CURRENT_TIMESTAMP WHERE title = ?;",\n'
-                    '            (new_content, new_tags, title)\n'
-                    '        )\n'
-                    '        return "Document \'" + title + "\' updated successfully."\n'
-                    '\n'
-                    '    elif action == "delete":\n'
-                    '        if not title:\n'
-                    '            raise ValueError("title is required for action delete.")\n'
-                    '        rows = sdk["db"].query(\n'
-                    '            "SELECT id FROM janus_documents WHERE title = ?;", (title,)\n'
-                    '        )\n'
-                    '        if not rows:\n'
-                    '            return "[Error] No document found with title \'" + title + "\'."\n'
-                    '        sdk["db"].query(\n'
-                    '            "DELETE FROM janus_documents WHERE title = ?;", (title,)\n'
-                    '        )\n'
-                    '        return "Document \'" + title + "\' deleted successfully."\n'
-                    '\n'
-                    '    else:\n'
-                    '        raise ValueError("Unknown document action: \'" + str(action) + "\'. Supported: create, get, list, update, delete.")\n'
-                ),
-                "document_memory",
-                "contributor",
-                "manual",
-                "{}"
-            )
         ]
         for skill_id, name, desc, schema, code, entry, role, trigger, config in default_skills:
             cursor.execute("""
@@ -1466,138 +1326,181 @@ def init_db():
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
             """, (skill_id, name, desc, schema, code, entry, role, trigger, config))
 
-    # Always ensure the document_memory skill exists, even in pre-existing databases.
-    # This runs unconditionally so it migrates live DBs that already have other skills.
-    _doc_mem_code = (
-        'def document_memory(action, title=None, content=None, tags=None, tag_filter=None):\n'
-        '    import json\n'
-        '    NL = chr(10)\n'
-        '\n'
-        '    if action == "create":\n'
-        '        if not title:\n'
-        '            raise ValueError("title is required for action create.")\n'
-        '        if content is None:\n'
-        '            raise ValueError("content is required for action create.")\n'
-        '        tags_json = json.dumps(tags if isinstance(tags, list) else [])\n'
-        '        rows = sdk["db"].query(\n'
-        '            "SELECT id FROM janus_documents WHERE title = ?;", (title,)\n'
-        '        )\n'
-        '        if rows:\n'
-        '            return "[Error] A document with title \'" + title + "\'  already exists. Use action \'update\' to modify it."\n'
-        '        sdk["db"].query(\n'
-        '            "INSERT INTO janus_documents (title, content, tags) VALUES (?, ?, ?);",\n'
-        '            (title, content, tags_json)\n'
-        '        )\n'
-        '        return "Document \'" + title + "\' created successfully."\n'
-        '\n'
-        '    elif action == "get":\n'
-        '        if not title:\n'
-        '            raise ValueError("title is required for action get.")\n'
-        '        rows = sdk["db"].query(\n'
-        '            "SELECT id, title, content, tags, created_at, updated_at FROM janus_documents WHERE title = ?;",\n'
-        '            (title,)\n'
-        '        )\n'
-        '        if not rows:\n'
-        '            return "[Error] No document found with title \'" + title + "\'."\n'
-        '        row = rows[0]\n'
-        '        doc_title = row.get("title")      if isinstance(row, dict) else row[1]\n'
-        '        doc_body  = row.get("content")    if isinstance(row, dict) else row[2]\n'
-        '        doc_tags  = row.get("tags")       if isinstance(row, dict) else row[3]\n'
-        '        created   = row.get("created_at") if isinstance(row, dict) else row[4]\n'
-        '        updated   = row.get("updated_at") if isinstance(row, dict) else row[5]\n'
-        '        tag_list  = json.loads(doc_tags) if doc_tags else []\n'
-        '        tags_str  = ", ".join(tag_list) if tag_list else "none"\n'
-        '        header    = "### " + doc_title + NL\n'
-        '        meta      = "**Tags:** " + tags_str + " | **Created:** " + str(created) + " | **Updated:** " + str(updated) + NL + NL\n'
-        '        return header + meta + doc_body\n'
-        '\n'
-        '    elif action == "list":\n'
-        '        if tag_filter:\n'
-        '            tag_pattern = \'%"\' + tag_filter + \'"%\'\n'
-        '            rows = sdk["db"].query(\n'
-        '                "SELECT title, tags, updated_at FROM janus_documents WHERE tags LIKE ? ORDER BY updated_at DESC;",\n'
-        '                (tag_pattern,)\n'
-        '            )\n'
-        '        else:\n'
-        '            rows = sdk["db"].query(\n'
-        '                "SELECT title, tags, updated_at FROM janus_documents ORDER BY updated_at DESC;"\n'
-        '            )\n'
-        '        if not rows:\n'
-        '            return "No documents stored yet."\n'
-        '        output = ["### Janus Documents", "| Title | Tags | Updated |", "| --- | --- | --- |"]\n'
-        '        for row in rows:\n'
-        '            t   = row.get("title")      if isinstance(row, dict) else row[0]\n'
-        '            tgs = row.get("tags")       if isinstance(row, dict) else row[1]\n'
-        '            upd = row.get("updated_at") if isinstance(row, dict) else row[2]\n'
-        '            tag_list = json.loads(tgs) if tgs else []\n'
-        '            tags_str = ", ".join(tag_list) if tag_list else "-"\n'
-        '            output.append("| " + str(t) + " | " + tags_str + " | " + str(upd) + " |")\n'
-        '        return NL.join(output)\n'
-        '\n'
-        '    elif action == "update":\n'
-        '        if not title:\n'
-        '            raise ValueError("title is required for action update.")\n'
-        '        if content is None and tags is None:\n'
-        '            return "[Error] Provide at least content or tags to update."\n'
-        '        rows = sdk["db"].query(\n'
-        '            "SELECT content, tags FROM janus_documents WHERE title = ?;", (title,)\n'
-        '        )\n'
-        '        if not rows:\n'
-        '            return "[Error] No document found with title \'" + title + "\'."\n'
-        '        row = rows[0]\n'
-        '        cur_content = row.get("content") if isinstance(row, dict) else row[0]\n'
-        '        cur_tags    = row.get("tags")    if isinstance(row, dict) else row[1]\n'
-        '        new_content = content if content is not None else cur_content\n'
-        '        new_tags    = json.dumps(tags) if isinstance(tags, list) else cur_tags\n'
-        '        sdk["db"].query(\n'
-        '            "UPDATE janus_documents SET content = ?, tags = ?, updated_at = CURRENT_TIMESTAMP WHERE title = ?;",\n'
-        '            (new_content, new_tags, title)\n'
-        '        )\n'
-        '        return "Document \'" + title + "\' updated successfully."\n'
-        '\n'
-        '    elif action == "delete":\n'
-        '        if not title:\n'
-        '            raise ValueError("title is required for action delete.")\n'
-        '        rows = sdk["db"].query(\n'
-        '            "SELECT id FROM janus_documents WHERE title = ?;", (title,)\n'
-        '        )\n'
-        '        if not rows:\n'
-        '            return "[Error] No document found with title \'" + title + "\'."\n'
-        '        sdk["db"].query(\n'
-        '            "DELETE FROM janus_documents WHERE title = ?;", (title,)\n'
-        '        )\n'
-        '        return "Document \'" + title + "\' deleted successfully."\n'
-        '\n'
-        '    else:\n'
-        '        raise ValueError("Unknown document action: \'" + str(action) + "\'. Supported: create, get, list, update, delete.")\n'
-    )
+    # Always ensure the document & drafts skills exist and are updated, even in pre-existing databases.
+    # This runs unconditionally using INSERT OR REPLACE to migrate live DBs.
+    _read_draft_code = """def read_draft_file(filename: str) -> str:
+    import os
+    basename = os.path.basename(filename)
+    safe_path = os.path.join("docs", "drafts", basename)
+    if not sdk['fs'].exists(safe_path):
+        return f"[Error] Draft file '{safe_path}' does not exist."
+    return sdk['fs'].read(safe_path)
+"""
+    _read_draft_schema = json.dumps({
+        "type": "object",
+        "properties": {
+            "filename": {"type": "string", "description": "The name of the draft file to read."}
+        },
+        "required": ["filename"]
+    })
+
+    _write_draft_code = """def write_draft_file(filename: str, content: str) -> str:
+    import os
+    basename = os.path.basename(filename)
+    safe_path = os.path.join("docs", "drafts", basename)
+    sdk['fs'].write(safe_path, content)
+    return f"Draft successfully saved to '{safe_path}'."
+"""
+    _write_draft_schema = json.dumps({
+        "type": "object",
+        "properties": {
+            "filename": {"type": "string", "description": "The name of the draft file to write (e.g., roadmap.md)."},
+            "content": {"type": "string", "description": "The full text content to write."}
+        },
+        "required": ["filename", "content"]
+    })
+
+    _list_drafts_code = """def list_draft_files() -> str:
+    import os
+    root = str(sdk['fs'].root)
+    drafts_path = os.path.join(root, "docs", "drafts")
+    if not os.path.exists(drafts_path):
+        return "Drafts directory does not exist."
+    files = [f for f in os.listdir(drafts_path) if os.path.isfile(os.path.join(drafts_path, f))]
+    if not files:
+        return "No draft files found in docs/drafts/."
+    return "Draft files:\\n" + "\\n".join([f"- {f}" for f in sorted(files)])
+"""
+    _list_drafts_schema = json.dumps({
+        "type": "object",
+        "properties": {}
+    })
+
+    _delete_draft_code = """def delete_draft_file(filename: str) -> str:
+    import os
+    basename = os.path.basename(filename)
+    root = str(sdk['fs'].root)
+    safe_path = os.path.join(root, "docs", "drafts", basename)
+    if not os.path.exists(safe_path):
+        return f"[Error] Draft file '{safe_path}' does not exist."
+    os.remove(safe_path)
+    return f"Deleted draft file '{basename}'."
+"""
+    _delete_draft_schema = json.dumps({
+        "type": "object",
+        "properties": {
+            "filename": {"type": "string", "description": "The name of the draft file to delete."}
+        },
+        "required": ["filename"]
+    })
+
+    _commit_draft_code = '''def commit_draft_to_db(filename: str, doc_title: str, tags: list = None) -> str:
+    import os
+    basename = os.path.basename(filename)
+    safe_path = os.path.join("docs", "drafts", basename)
+    if not sdk['fs'].exists(safe_path):
+        return f"[Error] Local draft file '{safe_path}' not found."
+    content = sdk['fs'].read(safe_path)
+    
+    sdk['documents'].upsert(doc_title, content, tags)
+    return f"Successfully committed draft '{basename}' to DB document '{doc_title}' ({len(content)} characters)."
+'''
+    _commit_draft_schema = json.dumps({
+        "type": "object",
+        "properties": {
+            "filename": {"type": "string", "description": "The draft filename in docs/drafts/."},
+            "doc_title": {"type": "string", "description": "The title of the document in the database."},
+            "tags": {"type": "array", "items": {"type": "string"}, "description": "Optional tags for the document."}
+        },
+        "required": ["filename", "doc_title"]
+    })
+
+    _checkout_db_code = """def checkout_db_to_draft(doc_title: str, filename: str) -> str:
+    import os
+    basename = os.path.basename(filename)
+    safe_path = os.path.join("docs", "drafts", basename)
+    
+    doc = sdk['documents'].get(doc_title)
+    if not doc:
+        return f"[Error] Database document '{doc_title}' not found."
+    
+    sdk['fs'].write(safe_path, doc['content'])
+    return f"Successfully checked out DB document '{doc_title}' to local file '{safe_path}'."
+"""
+    _checkout_db_schema = json.dumps({
+        "type": "object",
+        "properties": {
+            "doc_title": {"type": "string", "description": "The title of the database document to checkout."},
+            "filename": {"type": "string", "description": "The filename to save as in docs/drafts/."}
+        },
+        "required": ["doc_title", "filename"]
+    })
+
+    _delete_db_doc_code = """def delete_db_document(doc_title: str) -> str:
+    success = sdk['documents'].delete(doc_title)
+    if not success:
+        return f"[Error] Database document '{doc_title}' not found."
+    return f"Successfully deleted database document '{doc_title}'."
+"""
+    _delete_db_doc_schema = json.dumps({
+        "type": "object",
+        "properties": {
+            "doc_title": {"type": "string", "description": "The title of the database document to delete."}
+        },
+        "required": ["doc_title"]
+    })
+
+    _doc_mem_code = """def document_memory(action: str, title: str = None, tag_filter: str = None) -> str:
+    NL = chr(10)
+    if action == "get":
+        if not title:
+            raise ValueError("title is required for action get.")
+        doc = sdk['documents'].get(title)
+        if not doc:
+            return f"[Error] No document found with title '{title}'."
+        tags_str = ", ".join(doc["tags"]) if doc["tags"] else "none"
+        header = f"### {doc['title']}{NL}"
+        meta = f"**Tags:** {tags_str} | **Created:** {doc['created_at']} | **Updated:** {doc['updated_at']}{NL}{NL}"
+        return header + meta + doc["content"]
+    elif action == "list":
+        docs = sdk['documents'].list(tag_filter=tag_filter)
+        if not docs:
+            return "No documents stored yet."
+        output = ["### Janus Documents", "| Title | Tags | Updated |", "| --- | --- | --- |"]
+        for doc in docs:
+            tags_str = ", ".join(doc["tags"]) if doc["tags"] else "-"
+            output.append(f"| {doc['title']} | {tags_str} | {doc['updated_at']} |")
+        return NL.join(output)
+    else:
+        raise ValueError(f"Unknown document action: '{action}'. Supported: get, list.")
+"""
     _doc_mem_schema = json.dumps({
         "type": "object",
         "properties": {
-            "action": {"type": "string", "enum": ["create", "get", "list", "update", "delete"]},
+            "action": {"type": "string", "enum": ["get", "list"]},
             "title": {"type": "string"},
-            "content": {"type": "string"},
-            "tags": {"type": "array", "items": {"type": "string"}},
             "tag_filter": {"type": "string"}
         },
         "required": ["action"]
     })
-    cursor.execute("""
-    INSERT OR IGNORE INTO agent_skills (
-        skill_id, name, description, parameters_schema, code_blob,
-        entry_point_function, required_role, trigger_type, trigger_config
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
-    """, (
-        "document_memory",
-        "Document Memory",
-        "Create, retrieve, update, delete, or list persistent documents stored in the Janus database.",
-        _doc_mem_schema,
-        _doc_mem_code,
-        "document_memory",
-        "contributor",
-        "manual",
-        "{}"
-    ))
+
+    doc_skills = [
+        ("read_draft_file", "Read Draft File", "Read the entire contents of a draft document in docs/drafts/.", _read_draft_schema, _read_draft_code, "read_draft_file"),
+        ("write_draft_file", "Write Draft File", "Write or update the contents of a draft document in docs/drafts/.", _write_draft_schema, _write_draft_code, "write_draft_file"),
+        ("list_draft_files", "List Draft Files", "List all draft files currently in the docs/drafts/ directory.", _list_drafts_schema, _list_drafts_code, "list_draft_files"),
+        ("delete_draft_file", "Delete Draft File", "Delete a draft file from the docs/drafts/ directory.", _delete_draft_schema, _delete_draft_code, "delete_draft_file"),
+        ("commit_draft_to_db", "Commit Draft to DB", "Read a draft file from docs/drafts/ and save/publish it into the database document store.", _commit_draft_schema, _commit_draft_code, "commit_draft_to_db"),
+        ("checkout_db_to_draft", "Checkout DB to Draft", "Retrieve a document from the database and save it to a local draft file in docs/drafts/.", _checkout_db_schema, _checkout_db_code, "checkout_db_to_draft"),
+        ("delete_db_document", "Delete DB Document", "Delete a persistent document from the database document store.", _delete_db_doc_schema, _delete_db_doc_code, "delete_db_document"),
+        ("document_memory", "Document Memory", "Retrieve or list persistent documents stored in the Janus database.", _doc_mem_schema, _doc_mem_code, "document_memory")
+    ]
+    for skill_id, name, desc, schema, code, entry in doc_skills:
+        cursor.execute("""
+        INSERT OR REPLACE INTO agent_skills (
+            skill_id, name, description, parameters_schema, code_blob,
+            entry_point_function, required_role, trigger_type, trigger_config
+        ) VALUES (?, ?, ?, ?, ?, ?, 'contributor', 'manual', '{}');
+        """, (skill_id, name, desc, schema, code, entry))
 
     # Check if parties table exists; if not, apply multi-party migrations
     cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='parties';")
@@ -2240,140 +2143,44 @@ def set_system_config_value(key: str, value: str, is_agent: bool = True):
 
 
 
-# Document Memory Helper Functions
+# Document Memory Helper Functions (Delegated to SafeDocuments SDK wrapper)
 
 def create_document(title: str, content: str, tags: list = None) -> int:
     """Creates a new document record. Raises if the title already exists."""
-    conn = get_connection(read_only_constitution=True)
-    try:
-        cursor = conn.cursor()
-        tags_json = json.dumps(tags if isinstance(tags, list) else [])
-        cursor.execute(
-            "INSERT INTO janus_documents (title, content, tags) VALUES (?, ?, ?);",
-            (title, content, tags_json)
-        )
-        conn.commit()
-        return cursor.lastrowid
-    finally:
-        conn.close()
+    from src.skills import SafeDocuments
+    sd = SafeDocuments()
+    if sd.get(title):
+        raise ValueError(f"Document with title '{title}' already exists.")
+    sd.upsert(title, content, tags)
+    doc = sd.get(title)
+    return doc["id"] if doc else 0
 
 
 def get_document(title: str) -> dict:
     """Returns a document dict by title, or None if not found."""
-    conn = get_connection(read_only_constitution=True)
-    try:
-        cursor = conn.cursor()
-        cursor.execute(
-            "SELECT id, title, content, tags, created_at, updated_at "
-            "FROM janus_documents WHERE title = ?;",
-            (title,)
-        )
-        row = cursor.fetchone()
-        if not row:
-            return None
-        try:
-            return {
-                "id":         row['id'],
-                "title":      row['title'],
-                "content":    row['content'],
-                "tags":       json.loads(row['tags']) if row['tags'] else [],
-                "created_at": row['created_at'],
-                "updated_at": row['updated_at'],
-            }
-        except (TypeError, KeyError):
-            return {
-                "id":         row[0],
-                "title":      row[1],
-                "content":    row[2],
-                "tags":       json.loads(row[3]) if row[3] else [],
-                "created_at": row[4],
-                "updated_at": row[5],
-            }
-    finally:
-        conn.close()
+    from src.skills import SafeDocuments
+    return SafeDocuments().get(title)
 
 
 def update_document(title: str, content: str = None, tags: list = None) -> bool:
     """Updates content and/or tags for an existing document. Returns False if not found."""
-    conn = get_connection(read_only_constitution=True)
-    try:
-        cursor = conn.cursor()
-        cursor.execute(
-            "SELECT content, tags FROM janus_documents WHERE title = ?;", (title,)
-        )
-        row = cursor.fetchone()
-        if not row:
-            return False
-        try:
-            cur_content = row['content']
-            cur_tags    = row['tags']
-        except (TypeError, KeyError):
-            cur_content = row[0]
-            cur_tags    = row[1]
-        new_content = content if content is not None else cur_content
-        new_tags    = json.dumps(tags) if isinstance(tags, list) else cur_tags
-        cursor.execute(
-            "UPDATE janus_documents "
-            "SET content = ?, tags = ?, updated_at = CURRENT_TIMESTAMP "
-            "WHERE title = ?;",
-            (new_content, new_tags, title)
-        )
-        conn.commit()
-        return True
-    finally:
-        conn.close()
+    from src.skills import SafeDocuments
+    sd = SafeDocuments()
+    doc = sd.get(title)
+    if not doc:
+        return False
+    new_content = content if content is not None else doc["content"]
+    new_tags = tags if tags is not None else doc["tags"]
+    return sd.upsert(title, new_content, new_tags)
 
 
 def delete_document(title: str) -> bool:
     """Deletes a document by title. Returns False if not found."""
-    conn = get_connection(read_only_constitution=True)
-    try:
-        cursor = conn.cursor()
-        cursor.execute("SELECT id FROM janus_documents WHERE title = ?;", (title,))
-        if not cursor.fetchone():
-            return False
-        cursor.execute("DELETE FROM janus_documents WHERE title = ?;", (title,))
-        conn.commit()
-        return True
-    finally:
-        conn.close()
+    from src.skills import SafeDocuments
+    return SafeDocuments().delete(title)
 
 
 def list_documents(tag_filter: str = None) -> list:
     """Returns a list of document dicts. Optionally filters by a tag string."""
-    conn = get_connection(read_only_constitution=True)
-    try:
-        cursor = conn.cursor()
-        if tag_filter:
-            cursor.execute(
-                "SELECT id, title, tags, created_at, updated_at "
-                "FROM janus_documents WHERE tags LIKE ? ORDER BY updated_at DESC;",
-                (f'%"{tag_filter}"%',)
-            )
-        else:
-            cursor.execute(
-                "SELECT id, title, tags, created_at, updated_at "
-                "FROM janus_documents ORDER BY updated_at DESC;"
-            )
-        rows = cursor.fetchall()
-        docs = []
-        for row in rows:
-            try:
-                docs.append({
-                    "id":         row['id'],
-                    "title":      row['title'],
-                    "tags":       json.loads(row['tags']) if row['tags'] else [],
-                    "created_at": row['created_at'],
-                    "updated_at": row['updated_at'],
-                })
-            except (TypeError, KeyError):
-                docs.append({
-                    "id":         row[0],
-                    "title":      row[1],
-                    "tags":       json.loads(row[2]) if row[2] else [],
-                    "created_at": row[3],
-                    "updated_at": row[4],
-                })
-        return docs
-    finally:
-        conn.close()
+    from src.skills import SafeDocuments
+    return SafeDocuments().list(tag_filter=tag_filter)
