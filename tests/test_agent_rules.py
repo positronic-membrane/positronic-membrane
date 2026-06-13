@@ -47,6 +47,10 @@ def web_server():
     orig_db_path = src.config.DB_PATH
     src.config.DB_PATH = str(temp_db)
     
+    # Disable authentication requirement during legacy API testing
+    orig_require = src.config.REQUIRE_AUTH
+    src.config.REQUIRE_AUTH = False
+    
     init_db()
     
     port = get_free_port()
@@ -68,6 +72,7 @@ def web_server():
     thread.join(timeout=5)
     
     src.config.DB_PATH = orig_db_path
+    src.config.REQUIRE_AUTH = orig_require
     import shutil
     shutil.rmtree(temp_db_dir, ignore_errors=True)
 

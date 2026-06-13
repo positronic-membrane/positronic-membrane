@@ -91,10 +91,13 @@ def stage_and_test(rel_path: str, proposed_code: str) -> tuple:
             
         logger.info(f"Staged file written. Running pytest in '{temp_dir}'...")
         
-        # 4. Resolve absolute path to python/pytest
-        pytest_path = str(src.config.ROOT_DIR / ".venv" / "bin" / "pytest")
+        # 4. Resolve absolute path to python/pytest relative to active Python interpreter
+        import sys
+        pytest_path = str(Path(sys.executable).parent / "pytest")
         if not os.path.exists(pytest_path):
-            pytest_path = "pytest"  # Fallback to path resolution
+            pytest_path = str(src.config.ROOT_DIR / ".venv" / "bin" / "pytest")
+            if not os.path.exists(pytest_path):
+                pytest_path = "pytest"  # Fallback to path resolution
             
         # 5. Run tests inside staging directory
         # Set JANUS_TEST_MODE to 1 so the tests know they are in an isolated loop
@@ -325,10 +328,13 @@ def stage_and_test_multi(modifications: dict) -> tuple:
             
         logger.info(f"Staged files written. Running pytest in '{temp_dir}'...")
         
-        # 4. Resolve absolute path to python/pytest
-        pytest_path = str(src.config.ROOT_DIR / ".venv" / "bin" / "pytest")
+        # 4. Resolve absolute path to python/pytest relative to active Python interpreter
+        import sys
+        pytest_path = str(Path(sys.executable).parent / "pytest")
         if not os.path.exists(pytest_path):
-            pytest_path = "pytest"  # Fallback to path resolution
+            pytest_path = str(src.config.ROOT_DIR / ".venv" / "bin" / "pytest")
+            if not os.path.exists(pytest_path):
+                pytest_path = "pytest"  # Fallback to path resolution
             
         # 5. Run tests inside staging directory
         env = os.environ.copy()
@@ -524,13 +530,13 @@ def summarize_pytest_logs(logs: str) -> str:
 
 def validate_python_ast(proposed_code: str) -> tuple[bool, str | None]:
     """
-    Validates that the proposed code compiles to a valid Python AST.
-    Returns (True, None) if valid, or (False, error_message) if syntax validation fails.
+    Validates that the proposed code compiles to a valid Python AST and
+    does not contain any forbidden imports or unsafe system calls.
+    Returns (True, None) if valid, or (False, error_message) if validation fails.
     """
     import ast
     try:
-        ast.parse(proposed_code)
-        return True, None
+        tree = ast.parse(proposed_code)
     except SyntaxError as e:
         error_msg = f"SyntaxError: {e.msg} on line {e.lineno}"
         if e.text:
@@ -541,4 +547,32 @@ def validate_python_ast(proposed_code: str) -> tuple[bool, str | None]:
         return False, error_msg
     except Exception as e:
         return False, f"AST compilation failed: {e}"
+
+    # Walk the AST and verify no banned modules or operations are used
+    for node in ast.walk(tree):
+        # 1. Block unsafe import statements
+        if isinstance(node, ast.Import):
+            for name in node.names:
+                if name.name in ("subprocess", "pty", "commands"):
+                    return False, f"Security Violation: Import of unsafe module '{name.name}' is forbidden."
+        elif isinstance(node, ast.ImportFrom):
+            if node.module in ("subprocess", "pty", "commands"):
+                return False, f"Security Violation: Import from unsafe module '{node.module}' is forbidden."
+                
+        # 2. Block builtins / functions that can execute commands
+        elif isinstance(node, ast.Call):
+            func_name = None
+            if isinstance(node.func, ast.Name):
+                func_name = node.func.id
+            elif isinstance(node.func, ast.Attribute):
+                func_name = node.func.attr
+                # Check for os.system, os.popen, os.spawn, etc.
+                if isinstance(node.func.value, ast.Name) and node.func.value.id == "os":
+                    if node.func.attr in ("system", "popen", "spawn", "fork"):
+                        return False, f"Security Violation: Calling os.{node.func.attr} is forbidden."
+                
+            if func_name in ("eval", "exec", "system", "popen", "spawn", "fork"):
+                return False, f"Security Violation: Call to unsafe function '{func_name}' is forbidden."
+                
+    return True, None
 

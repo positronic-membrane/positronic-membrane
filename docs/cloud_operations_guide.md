@@ -130,3 +130,107 @@ Because Janus serves over plain HTTP (`http://<droplet-ip>:5005`), your tokens a
 *   **Reverse Proxy with SSL (For Secure Public Access):**
     If you need to access Janus securely from anywhere, set up a reverse proxy (like **Nginx** or **Caddy**) with Let's Encrypt to enable **HTTPS (Port 443)**, and block direct public access on port `5005`.
 
+---
+
+## Part 5: Database Backups & Disaster Recovery (S3)
+
+To ensure the safety of Project Janus, a dual-database backup system is automated on your droplet.
+
+### 1. What is Backed Up?
+The backup system takes consistent snapshots of both databases used by Janus:
+*   **Main Database (`janus.db`):** Safe SQLite online copy of the active database (safely handling WAL/journal modes).
+*   **Chroma Vector Database (`data/chromadb`):** Safe SQLite online copy of `chroma.sqlite3`, combined with a recursive copy of the semantic vector index directories, packaged as a compressed `.tar.gz` archive.
+
+### 2. S3 Backup Configuration
+Backups are triggered nightly at midnight (`00:00`) via a system crontab entry for the `root` user:
+```bash
+0 0 * * * cd /opt/janus && .venv/bin/python scripts/backup_db.py
+```
+This script reads credentials from `/opt/janus/.env`:
+*   `AWS_ACCESS_KEY_ID`: AWS user access key.
+*   `AWS_SECRET_ACCESS_KEY`: AWS user secret key.
+*   `AWS_S3_BUCKET`: The destination S3 bucket.
+*   `AWS_DEFAULT_REGION`: The S3 bucket region (defaults to `us-east-1`).
+
+If AWS credentials are valid, backups are uploaded to S3 under the prefix `janus-backups/` and immediately deleted from the local disk to save VM space. If credentials are not present, backups are retained locally in `/opt/janus/backups/`.
+
+### 3. Manual Backup Execution (On-Demand)
+To run a backup manually at any time (e.g., before performing system updates or code changes):
+```bash
+cd /opt/janus && .venv/bin/python scripts/backup_db.py
+```
+
+---
+
+### 4. Disaster Recovery & Restore Procedures
+
+In the event of a system failure, database corruption, or when migrating to a new droplet, follow these steps to restore your data from S3.
+
+#### Step A: Stop the Janus Daemon
+Always stop the running application before replacing database files to prevent write collisions and lockouts:
+```bash
+sudo systemctl stop janus
+```
+
+#### Step B: Identify and Download the S3 Backup Files
+1. Log in to your AWS Console or use the AWS CLI to locate the backups in your bucket under the `janus-backups/` folder.
+2. Backups are named with timestamps:
+   *   Main DB: `janus_backup_YYYY-MM-DD_HHMMSS.db`
+   *   Vector DB: `chromadb_backup_YYYY-MM-DD_HHMMSS.tar.gz`
+3. Download the matching pair of files to your server (e.g. into a temporary folder `/tmp/restore/` or directly to `/opt/janus/backups/`).
+   Using the AWS CLI:
+   ```bash
+   aws s3 cp s3://YOUR_S3_BUCKET/janus-backups/janus_backup_2026-06-13_021714.db /opt/janus/backups/janus_backup_restore.db
+   aws s3 cp s3://YOUR_S3_BUCKET/janus-backups/chromadb_backup_2026-06-13_021714.tar.gz /opt/janus/backups/chromadb_restore.tar.gz
+   ```
+
+#### Step C: Restore the Main Database
+1. Move your current active database files (including transient WAL/SHM files) out of the way:
+   ```bash
+   mv /opt/janus/janus.db /opt/janus/janus.db.corrupted
+   rm -f /opt/janus/janus.db-wal /opt/janus/janus.db-shm
+   ```
+2. Copy the downloaded backup database file to the active location:
+   ```bash
+   cp /opt/janus/backups/janus_backup_restore.db /opt/janus/janus.db
+   ```
+3. Apply secure ownership and permission settings:
+   ```bash
+   chmod 600 /opt/janus/janus.db
+   chown root:root /opt/janus/janus.db
+   ```
+
+#### Step D: Restore the Chroma Vector Database
+1. Move the current active vector database directory out of the way:
+   ```bash
+   mv /opt/janus/data/chromadb /opt/janus/data/chromadb.corrupted
+   ```
+2. Create a fresh destination directory and extract the backup archive into it:
+   ```bash
+   mkdir -p /opt/janus/data/chromadb
+   tar -xzf /opt/janus/backups/chromadb_restore.tar.gz -C /opt/janus/data/chromadb/
+   ```
+3. Recursively restore ownership and permissions:
+   ```bash
+   chmod -R 700 /opt/janus/data/chromadb
+   chown -R root:root /opt/janus/data/chromadb
+   ```
+
+#### Step E: Restart the Janus Daemon and Verify
+1. Restart the Janus background systemd service:
+   ```bash
+   sudo systemctl start janus
+   ```
+2. Monitor the system logs to confirm the databases initialized and loaded successfully without error:
+   ```bash
+   sudo systemctl status janus
+   journalctl -u janus -n 50 --no-pager
+   ```
+3. Once verification is complete and the application is stable, you can safely remove the temporary backup files and corrupted directories:
+   ```bash
+   rm -f /opt/janus/backups/janus_backup_restore.db
+   rm -f /opt/janus/backups/chromadb_restore.tar.gz
+   rm -f /opt/janus/janus.db.corrupted
+   rm -rf /opt/janus/data/chromadb.corrupted
+   ```
+

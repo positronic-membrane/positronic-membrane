@@ -40,6 +40,12 @@ SANDBOX_PROVIDER = os.getenv("SANDBOX_PROVIDER", "local")  # "local", "docker", 
 E2B_API_KEY = os.getenv("E2B_API_KEY", "")
 SPAWN_PROVIDER = os.getenv("SPAWN_PROVIDER", "local")      # "local", "docker", or "ecs"
 
+# Security Configuration
+REQUIRE_AUTH = os.getenv("REQUIRE_AUTH", "True").lower() in ("true", "1", "yes")
+ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "http://localhost:5005,http://127.0.0.1:5005").split(",")
+RATE_LIMIT_REQUESTS = int(os.getenv("RATE_LIMIT_REQUESTS", "60"))
+RATE_LIMIT_WINDOW = int(os.getenv("RATE_LIMIT_WINDOW", "60"))
+
 # GitHub Integration Settings
 GITHUB_ENABLED = os.getenv("GITHUB_ENABLED", "False").lower() in ("true", "1", "yes")
 GITHUB_ACCESS_TOKEN = os.getenv("GITHUB_ACCESS_TOKEN", "")

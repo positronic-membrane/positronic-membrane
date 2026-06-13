@@ -15,7 +15,28 @@
     <div class="ambient-glow glow-1"></div>
     <div class="ambient-glow glow-2"></div>
     
-    <div class="app-container">
+    <!-- Login Container -->
+    <div class="login-container glass-panel" id="login-screen" style="display: none;">
+        <div class="login-header">
+            <span class="logo-icon">▲</span>
+            <h2>Access Janus Swarm</h2>
+            <p class="subtitle">Secure Swarm Authentication</p>
+        </div>
+        <form id="login-form">
+            <div class="input-group">
+                <label for="login-username">Party ID or Username</label>
+                <input type="text" id="login-username" placeholder="Enter name or UUID..." required autocomplete="off">
+            </div>
+            <div class="input-group">
+                <label for="login-key">Enrollment Key / Passcode</label>
+                <input type="password" id="login-key" placeholder="Enter secret key..." required autocomplete="off">
+            </div>
+            <div id="login-error-msg" class="error-text" style="display: none;"></div>
+            <button type="submit" class="btn btn-primary login-btn">Authenticate</button>
+        </form>
+    </div>
+
+    <div class="app-container" id="app-wrapper" style="display: none;">
         <!-- Main Header -->
         <header class="app-header">
             <div class="header-logo">
@@ -25,9 +46,12 @@
                     <p class="subtitle">Swarm Cognition Surface</p>
                 </div>
             </div>
-            <div class="system-status">
-                <span class="status-indicator online"></span>
-                <span class="status-text">Daemon Heartbeat Active</span>
+            <div class="header-controls">
+                <div class="system-status">
+                    <span class="status-indicator online"></span>
+                    <span class="status-text">Daemon Heartbeat Active</span>
+                </div>
+                <button id="btn-logout" class="btn btn-logout-header" title="Log Out">Log Out</button>
             </div>
         </header>
 

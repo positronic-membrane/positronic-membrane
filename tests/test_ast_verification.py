@@ -59,3 +59,42 @@ def test_stage_and_test_multi_ast_fail_early(mock_run, mock_copy):
     # Assert staging operations were bypassed completely
     mock_copy.assert_not_called()
     mock_run.assert_not_called()
+
+
+def test_validate_python_ast_unsafe_imports():
+    """Verify that importing forbidden modules is caught by AST validation."""
+    code_sub = "import subprocess\n"
+    valid, err = validate_python_ast(code_sub)
+    assert valid is False
+    assert "Security Violation: Import of unsafe module 'subprocess'" in err
+
+    code_sub_from = "from subprocess import Popen\n"
+    valid, err = validate_python_ast(code_sub_from)
+    assert valid is False
+    assert "Security Violation: Import from unsafe module 'subprocess'" in err
+
+
+def test_validate_python_ast_unsafe_calls():
+    """Verify that unsafe function and system calls are rejected."""
+    code_eval = "eval('1+1')\n"
+    valid, err = validate_python_ast(code_eval)
+    assert valid is False
+    assert "Security Violation: Call to unsafe function 'eval'" in err
+
+    code_exec = "exec('x = 5')\n"
+    valid, err = validate_python_ast(code_exec)
+    assert valid is False
+    assert "Security Violation: Call to unsafe function 'exec'" in err
+
+    code_system = "import os\nos.system('ls')\n"
+    valid, err = validate_python_ast(code_system)
+    assert valid is False
+    assert "Security Violation: Calling os.system is forbidden." in err
+
+
+def test_validate_python_ast_safe_os_calls():
+    """Verify that safe os modules operations like os.path are allowed."""
+    code_safe = "import os\nif os.path.exists('foo'):\n    os.makedirs('bar')\n"
+    valid, err = validate_python_ast(code_safe)
+    assert valid is True
+    assert err is None

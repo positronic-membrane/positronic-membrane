@@ -2,6 +2,30 @@
    PROJECT JANUS: CLIENT-SIDE APP LOGIC
    ============================================================================== */
 
+// Intercept native fetch to inject JWT authorization and handle 401s
+const originalFetch = window.fetch;
+window.fetch = async function (url, options = {}) {
+    const token = localStorage.getItem("janus_token");
+    if (token) {
+        options.headers = options.headers || {};
+        if (!(options.headers instanceof Headers)) {
+            options.headers["Authorization"] = `Bearer ${token}`;
+        } else {
+            options.headers.set("Authorization", `Bearer ${token}`);
+        }
+    }
+    
+    const response = await originalFetch(url, options);
+    
+    // Automatically boot to login screen on 401 Unauthorized
+    if (response.status === 401 && !url.includes("/api/v1/auth/token")) {
+        localStorage.removeItem("janus_token");
+        window.location.reload();
+    }
+    
+    return response;
+};
+
 document.addEventListener("DOMContentLoaded", () => {
     // DOM Elements
     const chatMessages = document.getElementById("chat-messages-container");
@@ -22,9 +46,75 @@ document.addEventListener("DOMContentLoaded", () => {
     let cachedDelibIds = new Set();
 
     // Initialize App
-    init();
+    checkAuthAndInit();
+
+    function checkAuthAndInit() {
+        const token = localStorage.getItem("janus_token");
+        const appWrapper = document.getElementById("app-wrapper");
+        const loginScreen = document.getElementById("login-screen");
+        
+        if (token) {
+            loginScreen.style.display = "none";
+            appWrapper.style.display = "flex";
+            init();
+        } else {
+            appWrapper.style.display = "none";
+            loginScreen.style.display = "flex";
+            setupLoginListeners();
+        }
+    }
+
+    function setupLoginListeners() {
+        const loginForm = document.getElementById("login-form");
+        const loginUsernameInput = document.getElementById("login-username");
+        const loginKeyInput = document.getElementById("login-key");
+        const loginErrorMsg = document.getElementById("login-error-msg");
+        
+        loginForm.addEventListener("submit", async (e) => {
+            e.preventDefault();
+            const usernameOrId = loginUsernameInput.value.trim();
+            const enrollmentKey = loginKeyInput.value.trim();
+            
+            if (!usernameOrId || !enrollmentKey) return;
+            
+            loginErrorMsg.style.display = "none";
+            
+            try {
+                const res = await originalFetch("/api/v1/auth/token", {
+                    method: "POST",
+                    headers: {
+                        "Content-Type": "application/json"
+                    },
+                    body: JSON.stringify({
+                        username_or_id: usernameOrId,
+                        enrollment_key: enrollmentKey
+                    })
+                });
+                
+                if (res.status === 200) {
+                    const data = await res.json();
+                    localStorage.setItem("janus_token", data.access_token);
+                    checkAuthAndInit();
+                } else {
+                    const data = await res.json().catch(() => ({}));
+                    loginErrorMsg.textContent = data.detail || "Authentication failed. Invalid username, ID, or key.";
+                    loginErrorMsg.style.display = "block";
+                }
+            } catch (err) {
+                console.error("Login request failed:", err);
+                loginErrorMsg.textContent = "Unable to connect to security service.";
+                loginErrorMsg.style.display = "block";
+            }
+        });
+    }
 
     function init() {
+        // Logout control
+        document.getElementById("btn-logout").addEventListener("click", () => {
+            localStorage.removeItem("janus_token");
+            window.location.reload();
+        });
+
         // Init Tab Switching
         initTabs();
 

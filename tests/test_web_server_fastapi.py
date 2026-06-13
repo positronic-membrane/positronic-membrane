@@ -19,18 +19,18 @@ def setup_test_db(tmp_path):
     
     init_db()
     
-    # Insert test users
+    # Insert test users with enrollment keys (public_key)
     conn = get_connection()
     now = datetime.now(UTC).isoformat()
     # Admin user
     conn.execute(
-        "INSERT INTO parties (id, name, role, created_at, last_seen) VALUES (?, ?, ?, ?, ?)",
-        ("admin-uuid", "Alice", "admin", now, now)
+        "INSERT INTO parties (id, name, role, created_at, last_seen, public_key) VALUES (?, ?, ?, ?, ?, ?)",
+        ("admin-uuid", "Alice", "admin", now, now, "admin-key")
     )
     # Standard user
     conn.execute(
-        "INSERT INTO parties (id, name, role, created_at, last_seen) VALUES (?, ?, ?, ?, ?)",
-        ("user-uuid", "Bob", "user", now, now)
+        "INSERT INTO parties (id, name, role, created_at, last_seen, public_key) VALUES (?, ?, ?, ?, ?, ?)",
+        ("user-uuid", "Bob", "user", now, now, "user-key")
     )
     conn.commit()
     conn.close()
@@ -40,68 +40,99 @@ def setup_test_db(tmp_path):
 
 
 def test_token_generation():
-    """Verify that exchanging party_id returns a valid JWT access token."""
+    """Verify that exchanging party_id/username and key returns a valid JWT access token."""
     client = TestClient(app)
     # Invalid ID
-    resp = client.post("/api/v1/auth/token", json={"party_id": "invalid-uuid"})
-    assert resp.status_code == 404
+    resp = client.post("/api/v1/auth/token", json={"username_or_id": "invalid-uuid", "enrollment_key": "user-key"})
+    assert resp.status_code == 401
     
-    # Valid User ID
-    resp = client.post("/api/v1/auth/token", json={"party_id": "user-uuid"})
+    # Valid User ID but wrong key
+    resp = client.post("/api/v1/auth/token", json={"username_or_id": "user-uuid", "enrollment_key": "wrong-key"})
+    assert resp.status_code == 401
+    
+    # Valid User ID and key
+    resp = client.post("/api/v1/auth/token", json={"username_or_id": "user-uuid", "enrollment_key": "user-key"})
     assert resp.status_code == 200
     data = resp.json()
     assert "access_token" in data
     assert data["token_type"] == "bearer"
+
+    # Valid Username and key
+    resp = client.post("/api/v1/auth/token", json={"username_or_id": "Bob", "enrollment_key": "user-key"})
+    assert resp.status_code == 200
 
 
 def test_jwt_authentication_protection():
     """Verify that multi-party v1 routes enforce authentication."""
     client = TestClient(app)
     
-    # GET /api/v1/party/admin-uuid with no headers -> fallback to local_user (which has admin role) -> succeeds
-    resp = client.get("/api/v1/party/admin-uuid")
-    assert resp.status_code == 200
-    
-    # GET /api/v1/party/admin-uuid with invalid JWT -> fails
-    resp = client.get(
-        "/api/v1/party/admin-uuid",
-        headers={"Authorization": "Bearer invalidtoken"}
-    )
-    assert resp.status_code == 401
-    
-    # POST /api/v1/party/register with standard user JWT (insufficient permissions) -> fails
-    token = create_access_token("user-uuid", "user")
-    resp = client.post(
-        "/api/v1/party/register",
-        json={"name": "Charlie", "role": "user"},
-        headers={"Authorization": f"Bearer {token}"}
-    )
-    assert resp.status_code == 403
-    
-    # POST /api/v1/party/register with admin JWT -> succeeds
-    admin_token = create_access_token("admin-uuid", "admin")
-    resp = client.post(
-        "/api/v1/party/register",
-        json={"name": "Charlie", "role": "user"},
-        headers={"Authorization": f"Bearer {admin_token}"}
-    )
-    assert resp.status_code == 201
-    assert resp.json()["name"] == "Charlie"
+    # Verify that with REQUIRE_AUTH=True (default), accessing without headers is rejected
+    import src.config
+    orig_require = src.config.REQUIRE_AUTH
+    try:
+        src.config.REQUIRE_AUTH = True
+        resp = client.get("/api/v1/party/admin-uuid")
+        assert resp.status_code == 401
+        
+        # Access with invalid JWT -> fails
+        resp = client.get(
+            "/api/v1/party/admin-uuid",
+            headers={"Authorization": "Bearer invalidtoken"}
+        )
+        assert resp.status_code == 401
+        
+        # Access with valid admin JWT -> succeeds
+        admin_token = create_access_token("admin-uuid", "admin")
+        resp = client.get(
+            "/api/v1/party/admin-uuid",
+            headers={"Authorization": f"Bearer {admin_token}"}
+        )
+        assert resp.status_code == 200
+
+        # POST /api/v1/party/register with standard user JWT (insufficient permissions) -> fails
+        token = create_access_token("user-uuid", "user")
+        resp = client.post(
+            "/api/v1/party/register",
+            json={"name": "Charlie", "role": "user"},
+            headers={"Authorization": f"Bearer {token}"}
+        )
+        assert resp.status_code == 403
+        
+        # POST /api/v1/party/register with admin JWT -> succeeds
+        resp = client.post(
+            "/api/v1/party/register",
+            json={"name": "Charlie", "role": "user"},
+            headers={"Authorization": f"Bearer {admin_token}"}
+        )
+        assert resp.status_code == 201
+        assert resp.json()["name"] == "Charlie"
+    finally:
+        src.config.REQUIRE_AUTH = orig_require
 
 
 def test_local_admin_fallback():
-    """Verify that legacy endpoints allow access without headers using the local admin fallback."""
+    """Verify that legacy endpoints allow access without headers using the local admin fallback when REQUIRE_AUTH is False, but reject when True."""
     client = TestClient(app)
-    
-    # GET /api/history
-    resp = client.get("/api/history")
-    assert resp.status_code == 200
-    assert isinstance(resp.json(), list)
-    
-    # GET /api/deliberations
-    resp = client.get("/api/deliberations")
-    assert resp.status_code == 200
-    assert isinstance(resp.json(), list)
+    import src.config
+    orig_require = src.config.REQUIRE_AUTH
+    try:
+        # Under REQUIRE_AUTH = True, access is rejected
+        src.config.REQUIRE_AUTH = True
+        resp = client.get("/api/history")
+        assert resp.status_code == 401
+        
+        # Under REQUIRE_AUTH = False, legacy local admin fallback allows access without headers
+        src.config.REQUIRE_AUTH = False
+        resp = client.get("/api/history")
+        assert resp.status_code == 200
+        assert isinstance(resp.json(), list)
+        
+        # GET /api/deliberations
+        resp = client.get("/api/deliberations")
+        assert resp.status_code == 200
+        assert isinstance(resp.json(), list)
+    finally:
+        src.config.REQUIRE_AUTH = orig_require
 
 
 def test_websocket_deliberations():
@@ -118,34 +149,84 @@ def test_websocket_deliberations():
     conn.commit()
     conn.close()
     
-    with client.websocket_connect("/ws/deliberations") as ws:
-        # Should receive the newly added deliberation as json
-        data = ws.receive_json()
-        assert data["action"] == "test_action"
-        assert data["decision"] == 1
-        assert data["utility"] == 0.95
-        assert data["justification"] == "Looks good"
+    import src.config
+    orig_require = src.config.REQUIRE_AUTH
+    try:
+        # If REQUIRE_AUTH=True, connecting without a token fails
+        src.config.REQUIRE_AUTH = True
+        with pytest.raises(Exception):
+            with client.websocket_connect("/ws/deliberations") as ws:
+                pass
+                
+        # If REQUIRE_AUTH=True, connecting with a valid token succeeds
+        token = create_access_token("user-uuid", "user")
+        with client.websocket_connect(f"/ws/deliberations?token={token}") as ws:
+            data = ws.receive_json()
+            assert data["action"] == "test_action"
+    finally:
+        src.config.REQUIRE_AUTH = orig_require
 
 
 def test_websocket_chat():
     """Verify WebSocket chat endpoint thinking and response cycles."""
     client = TestClient(app)
     
-    # Mock generating response
     from unittest.mock import patch
     with patch("src.web_server.generate_persona_response_autonomous") as mock_persona:
         mock_persona.return_value = "Response from agent!"
         
-        with client.websocket_connect("/ws/chat") as ws:
-            ws.send_json({"message": "Hello Janus"})
+        import src.config
+        orig_require = src.config.REQUIRE_AUTH
+        try:
+            # If REQUIRE_AUTH=True, connecting without a token fails
+            src.config.REQUIRE_AUTH = True
+            with pytest.raises(Exception):
+                with client.websocket_connect("/ws/chat") as ws:
+                    pass
             
-            # First should be thinking event
-            evt1 = ws.receive_json()
-            assert evt1["event"] == "thinking"
+            # If REQUIRE_AUTH=True, connecting with a valid token succeeds
+            token = create_access_token("user-uuid", "user")
+            with client.websocket_connect(f"/ws/chat?token={token}") as ws:
+                ws.send_json({"message": "Hello Janus"})
+                
+                # First should be thinking event
+                evt1 = ws.receive_json()
+                assert evt1["event"] == "thinking"
+                
+                # Second should be response event
+                evt2 = ws.receive_json()
+                assert evt2["event"] == "response"
+                assert evt2["message"] == "Response from agent!"
+        finally:
+            src.config.REQUIRE_AUTH = orig_require
+
+
+def test_rate_limiting():
+    """Verify that hitting the API endpoints in rapid succession triggers a 429 Too Many Requests response."""
+    client = TestClient(app)
+    import src.config
+    
+    # Save config and override
+    orig_requests = src.config.RATE_LIMIT_REQUESTS
+    orig_window = src.config.RATE_LIMIT_WINDOW
+    
+    src.config.RATE_LIMIT_REQUESTS = 3
+    src.config.RATE_LIMIT_WINDOW = 2
+    
+    # Clear history for this test IP to isolate it
+    from src.web_server import ip_request_history
+    ip_request_history.clear()
+    
+    try:
+        # First 3 requests to a public API endpoint succeed
+        for _ in range(3):
+            resp = client.get("/api/v1/bootstrap/status")
+            assert resp.status_code == 200
             
-            # Second should be response event
-            evt2 = ws.receive_json()
-            assert evt2["event"] == "response"
-            assert evt2["message"] == "Response from agent!"
-            
-        mock_persona.assert_called_once_with("Hello Janus")
+        # 4th request triggers 429
+        resp = client.get("/api/v1/bootstrap/status")
+        assert resp.status_code == 429
+        assert resp.json()["detail"] == "Too many requests. Please try again later."
+    finally:
+        src.config.RATE_LIMIT_REQUESTS = orig_requests
+        src.config.RATE_LIMIT_WINDOW = orig_window

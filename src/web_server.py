@@ -9,7 +9,7 @@ from datetime import datetime, UTC
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 
-from fastapi import FastAPI, Request, Response, Depends, HTTPException, status, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Request, Response, Depends, HTTPException, status, WebSocket, WebSocketDisconnect, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse, HTMLResponse
 from pydantic import BaseModel
@@ -30,6 +30,7 @@ from src.persona import (
 from src.memory_orchestrator import MemoryOrchestrator
 from src.role_bootstrap import RoleBootstrap
 from src.auth import decode_access_token, create_access_token
+import src.config
 
 logger = logging.getLogger("JanusWebServer")
 
@@ -49,11 +50,39 @@ app = FastAPI(title="Project Janus API Layer", version="1.0.0")
 # Setup CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=src.config.ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Simple IP-based Rate Limiter (Sliding Window)
+from collections import defaultdict
+import time
+
+ip_request_history = defaultdict(list)
+
+@app.middleware("http")
+async def rate_limit_middleware(request: Request, call_next):
+    client_ip = request.client.host if request.client else "unknown"
+    
+    # Skip rate limiting for non-API routes (static files, index page, etc.)
+    if request.url.path.startswith("/api/"):
+        now = time.time()
+        requests_limit = getattr(src.config, "RATE_LIMIT_REQUESTS", 60)
+        window = getattr(src.config, "RATE_LIMIT_WINDOW", 60)
+        
+        # Filter request timestamps outside the window
+        ip_request_history[client_ip] = [t for t in ip_request_history[client_ip] if now - t < window]
+        
+        if len(ip_request_history[client_ip]) >= requests_limit:
+            return JSONResponse(
+                status_code=429,
+                content={"detail": "Too many requests. Please try again later."}
+            )
+        ip_request_history[client_ip].append(now)
+        
+    return await call_next(request)
 
 # Path to static directory
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -109,7 +138,8 @@ class PartyRoleUpdateRequest(BaseModel):
     role: str
 
 class TokenRequest(BaseModel):
-    party_id: str
+    username_or_id: str
+    enrollment_key: str
 
 
 def verify_role(party_role: str, minimum_role: str) -> bool:
@@ -149,7 +179,7 @@ def get_current_party(request: Request) -> Dict[str, Any]:
                 conn.close()
 
     # Fallback to local admin user if no auth headers are provided at all (for local/test mode backward compatibility)
-    if not auth_header and not request.headers.get("X-Party-ID"):
+    if not src.config.REQUIRE_AUTH and not auth_header and not request.headers.get("X-Party-ID"):
         party_id = "local_user"
         role = "admin"
                 
@@ -183,6 +213,30 @@ def require_role(minimum_role: str):
             )
         return current_party
     return dependency
+
+
+async def get_websocket_party(token: Optional[str] = None) -> Dict[str, Any]:
+    """Helper to verify WebSocket connection JWT token or fallback to local user when auth is not required."""
+    party_id = None
+    role = None
+    
+    if token:
+        try:
+            payload = decode_access_token(token)
+            party_id = payload.get("sub")
+            role = payload.get("role")
+        except Exception as e:
+            logger.warning(f"WebSocket JWT decode failed: {e}")
+            raise HTTPException(status_code=401, detail=f"Invalid JWT: {e}")
+            
+    if not party_id and not src.config.REQUIRE_AUTH:
+        party_id = "local_user"
+        role = "admin"
+        
+    if not party_id or not role:
+        raise HTTPException(status_code=401, detail="Unauthorized WebSocket connection")
+        
+    return {"party_id": party_id, "role": role}
 
 
 def process_sandbox_updates(response_text: str):
@@ -243,15 +297,24 @@ def process_sandbox_updates(response_text: str):
 
 @app.post("/api/v1/auth/token")
 def login_for_token(data: TokenRequest):
-    """Exchanges a valid party_id (UUID) for a signed JWT access token."""
+    """Exchanges a valid username/party_id and enrollment key for a signed JWT access token."""
     conn = get_connection()
     conn.row_factory = sqlite3.Row
     try:
-        row = conn.execute("SELECT role FROM parties WHERE id = ?", (data.party_id,)).fetchone()
+        row = conn.execute(
+            "SELECT id, role, public_key FROM parties WHERE id = ? OR name = ?",
+            (data.username_or_id, data.username_or_id)
+        ).fetchone()
         if not row:
-            raise HTTPException(status_code=404, detail="Party not found")
+            raise HTTPException(status_code=401, detail="Invalid Party ID/Username or Enrollment Key")
+            
+        stored_key = row["public_key"]
+        if not stored_key or stored_key != data.enrollment_key:
+            raise HTTPException(status_code=401, detail="Invalid Party ID/Username or Enrollment Key")
+            
+        party_id = row["id"]
         role = row["role"]
-        token = create_access_token(data.party_id, role)
+        token = create_access_token(party_id, role)
         return {"access_token": token, "token_type": "bearer"}
     finally:
         conn.close()
@@ -950,9 +1013,17 @@ def rollback_modification(mod_id: str, current_party = Depends(require_role('adm
 # --- WebSockets Event Streaming ---
 
 @app.websocket("/ws/deliberations")
-async def websocket_deliberations(websocket: WebSocket):
+async def websocket_deliberations(websocket: WebSocket, token: Optional[str] = Query(None)):
     """WebSocket: Streams background swarm reflection deliberations in real-time."""
+    try:
+        current_party = await get_websocket_party(token)
+        if not verify_role(current_party["role"], "user"):
+            raise HTTPException(status_code=403, detail="Forbidden")
+    except Exception:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+        
     await websocket.accept()
+        
     last_id = 0
     
     # Initialize last_id to max database id
@@ -1001,9 +1072,17 @@ async def websocket_deliberations(websocket: WebSocket):
 
 
 @app.websocket("/ws/chat")
-async def websocket_chat(websocket: WebSocket):
+async def websocket_chat(websocket: WebSocket, token: Optional[str] = Query(None)):
     """WebSocket: Bidirectional live agent chat interaction stream."""
+    try:
+        current_party = await get_websocket_party(token)
+        if not verify_role(current_party["role"], "user"):
+            raise HTTPException(status_code=403, detail="Forbidden")
+    except Exception:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+        
     await websocket.accept()
+        
     try:
         while True:
             data = await websocket.receive_json()
@@ -1062,4 +1141,4 @@ def run_server(port=5005):
     import uvicorn
     os.makedirs(STATIC_DIR, exist_ok=True)
     logger.info(f"Starting Project Janus FastAPI Web Server on port {port} via Uvicorn...")
-    uvicorn.run(app, host="0.0.0.0", port=port, log_level="warning")
+    uvicorn.run(app, host="127.0.0.1", port=port, log_level="warning")
