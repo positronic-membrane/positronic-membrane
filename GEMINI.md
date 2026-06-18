@@ -5,13 +5,10 @@
 This section documents the non-negotiable architectural boundaries, performance thresholds, and safety limits of the Project Janus system.
 
 ### 1. Performance & Compute Constraints
-* **Compute Overhead:** The background heartbeat loop must consume less than 2% average CPU overhead on Apple Silicon chips.
-* **Idle Pacing Mechanism:** When no human stimulus is received, the loop must toggle into a "Reflective State," slowing its execution pulse to run once every $T_{\text{idle}}$ minutes (default: 15 minutes) to conserve local compute resources.
-* **Multi-Agent Memory Optimization:** The system must run a single local model instance (or query a single remote API endpoint) by default, routing all agent roles (Proposer, Critic, Explorer, Archivist) using system prompt injection to avoid local VRAM swapping latency.
-* **Role-Specific Model Routing (Future Extensibility):** The system architecture must support pluggable routing configuration via the `.env` file or `agent_registry` (e.g., overriding specific agent models like `CRITIC_MODEL` or `PROPOSER_MODEL`). This allows routing simple tasks to smaller models (e.g., a 1.5B model for safety auditing) and complex tasks to larger models, which is optimal for high-performance serverless cloud mode or multi-GPU environments.
-* **Inference Posture (Dual-Mode API Compliance):** The system must use an OpenAI-compatible API standard client interface supporting two modes configured via a `.env` file:
-  * **Local Mode (Offline/Free):** Connects to a local Ollama instance (e.g., `http://localhost:11434/v1` running a model like `qwen2.5-coder:7b`).
-  * **Cloud Serverless Mode (Plugged-In/Pay-as-you-go):** Connects to a low-cost, pay-as-you-go serverless open-weights API provider (e.g., DeepSeek, Groq, or OpenRouter) without relying on monthly flat subscriptions.
+* **Compute Pacing & Efficiency:** The background heartbeat loop must be optimized for cloud resource consumption, leveraging an idle pacing mechanism. When no human stimulus is received, the loop toggles into a "Reflective State," slowing its execution pulse to run once every $T_{\text{idle}}$ minutes (default: 15 minutes) to conserve API and compute costs.
+* **Multi-Agent Memory Optimization:** The system routes agent roles (Proposer, Critic, Explorer, Archivist) using system prompt injection or dedicated remote inference routing to minimize execution latency and context-switching overhead.
+* **Role-Specific Model Routing:** The system architecture must support pluggable routing configuration via the `.env` file or `agent_registry` (e.g., overriding specific agent models like `CRITIC_MODEL` or `PROPOSER_MODEL`), routing simple auditing tasks to smaller cloud endpoints and complex planning tasks to frontier models.
+* **Inference Posture:** The system runs strictly in cloud-native serverless mode, connecting to low-cost, pay-as-you-go API providers (e.g., DeepSeek, Groq, or OpenRouter) configured via a `.env` file.
 
 ### 2. Privacy & Security Gates
 * **Strict Content Blindness:** The codebase must adhere to a strict content-blind policy, processing only localized file structure metadata and size deltas without keylogging or reading raw creative text strings outside of structural system files and the `GEMINI.md` memory canvas itself.
@@ -110,6 +107,59 @@ CREATE TABLE system_config (
 );
 ```
 
+#### Table: `goals`
+Tracks active, in-progress, and historical goals/milestones.
+```sql
+CREATE TABLE goals (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    type TEXT NOT NULL CHECK(type IN ('short','long','stretch','aspirational')),
+    status TEXT NOT NULL DEFAULT 'proposed' CHECK(status IN ('proposed','active','in_progress','completed','abandoned','archived','deleted')),
+    description TEXT NOT NULL,
+    progress_metric TEXT,
+    parent_goal_id INTEGER,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(parent_goal_id) REFERENCES goals(id) ON DELETE SET NULL
+);
+```
+
+#### Table: `goal_checkpoints`
+Tracks checkpoint validation criteria mapped to goal IDs.
+```sql
+CREATE TABLE goal_checkpoints (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    goal_id INTEGER NOT NULL,
+    checkpoint_description TEXT NOT NULL,
+    achieved INTEGER DEFAULT 0 CHECK(achieved IN (0, 1)),
+    achieved_at TIMESTAMP,
+    FOREIGN KEY(goal_id) REFERENCES goals(id) ON DELETE CASCADE
+);
+```
+
+#### Table: `llm_cache`
+Provides prompt-to-response caching to prevent duplicated cost accumulation.
+```sql
+CREATE TABLE llm_cache (
+    prompt_hash TEXT PRIMARY KEY,
+    response TEXT NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+```
+
+#### Table: `llm_call_costs`
+Maintains daily API cost accounting records for spend limits checks.
+```sql
+CREATE TABLE llm_call_costs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    query_id TEXT,
+    model TEXT NOT NULL,
+    input_tokens INTEGER NOT NULL,
+    output_tokens INTEGER NOT NULL,
+    cost REAL NOT NULL,
+    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+```
+
 ### 2. Semantic Memory Layout (ChromaDB / Milvus Lite)
 * **Collection Name:** `janus_long_term`
 * **Metadata Schema:**
@@ -124,30 +174,39 @@ CREATE TABLE system_config (
 
 This execution-focused roadmap outlines immediate technical milestones, preventing premature over-engineering of the active workspace.
 
-### Stage 1: Local Daemon & Database Initialization (MVP)
-* **Goal:** Create directory structures, initialize the SQLite database with WAL mode, and write the core background heartbeat daemon.
+### Stage 1: Cloud Daemon & Database Initialization (MVP) [Completed]
+* **Goal:** Create directory structures, initialize the SQLite database with WAL mode, and write the core background heartbeat daemon for cloud deployment.
 * **Tasks:**
   * Set up database schemas and populate initial configuration parameters.
   * Implement a first-run Socratic Setup CLI wizard to conduct the user-agent alignment interview and write agreed-upon rules to the read-only `core_constitution` table.
   * Implement the Python `asyncio` heartbeat daemon pacing mechanism ($T_{\text{idle}}$ changes between user-presence and idle modes).
   * Build the drive state machine incrementing Boredom ($B$) and triggering mock executive actions when $B \ge B_{\text{threshold}}$.
 
-### Stage 2: Swarm Routing & Safety Guardrails
+### Stage 2: Swarm Routing & Safety Guardrails [Completed]
 * **Goal:** Integrate LLM client interface (Ollama/remote API dual-mode) and run multi-agent prompts.
 * **Tasks:**
   * Implement the OpenAI-compliant client with `.env` switching.
   * Write a dynamic agent prompt factory that reads system prompts from `agent_registry` and resolves targeted models.
   * Build the hard-coded Python middleware safety valve: intercept actions, validate self-modification/config writes, audit `core_constitution` rules, and enforce loop safety valve $N = 5$.
 
-### Stage 3: Vector Memory & Explorer Web Fetching
+### Stage 3: Vector Memory & Explorer Web Fetching [Completed]
 * **Goal:** Connect long-term memory and allow safe background research.
 * **Tasks:**
   * Integrate ChromaDB/Milvus Lite for long-term semantic storage.
   * Hook up the Explorer agent to search and parse restricted domains.
   * Implement self-generating Curiosity Vector updates based on background reflection logs (starting with an empty vector).
 
-### Stage 4: Persona Surface & Metacognitive Auditing
+### Stage 4: Persona Surface & Metacognitive Auditing [Completed]
 * **Goal:** Build the single-voice front-end interface and audit trail.
 * **Tasks:**
   * Build a front-end interface (command line or simple UI) serving the unified Persona voice.
   * Implement metacognitive query handler to retrieve and narrate details from `internal_deliberations`.
+
+### Stage 5: V1 MVP Foundations (Goal System, Smart Loop Governor & LLM Budget Controls) [Completed]
+* **Goal:** Implement primary V1 resilience, caching, context hydration, goal management, and loop governor systems.
+* **Tasks:**
+  * Implement goal context injection dynamically formatting and rendering active goals/checkpoints into Proposer agents context.
+  * Construct a unified `manage_goals` skill registry to support automated CRUD (create, update, soft-delete, checkpoint completion) with CLI prioritization override command.
+  * Build the context hydration layer wrapping self traits, episodic memories, and semantic vectors in XML tags, anchored by instructions prioritizing these as absolute reality.
+  * Integrate the Smart Loop Governor tracking git diffs, DB writes, and checkpoint completions, halting automated execution if stagnation is detected.
+  * Deploy LLM prompt caching (SQLite storage, 1-hour TTL), billing audit controls (daily cost limits yielding to idle daemon status), and dynamic model temperature calibration based on boredom drives.

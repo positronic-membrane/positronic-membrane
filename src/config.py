@@ -32,7 +32,7 @@ DEFAULT_BANNED_WEBSITES = [
 T_IDLE = int(os.getenv("T_IDLE", "15"))  # Default 15 minutes
 T_ACTIVE = int(os.getenv("T_ACTIVE", "1"))  # Default 1 minute
 BOREDOM_THRESHOLD = int(os.getenv("BOREDOM_THRESHOLD", "5"))
-N_LOOP_LIMIT = int(os.getenv("N_LOOP_LIMIT", "5"))
+N_LOOP_LIMIT = int(os.getenv("N_LOOP_LIMIT", "20"))
 
 # Sandbox execution configs
 SANDBOX_TEST_TIMEOUT = int(os.getenv("SANDBOX_TEST_TIMEOUT", "60"))

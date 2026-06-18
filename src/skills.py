@@ -395,8 +395,8 @@ class SafeGoals:
             conn.close()
 
     def update_goal_status(self, goal_id: int, status: str) -> bool:
-        if status not in ('proposed', 'active', 'in_progress', 'completed', 'abandoned'):
-            raise ValueError("Status must be one of: 'proposed', 'active', 'in_progress', 'completed', 'abandoned'")
+        if status not in ('proposed', 'active', 'in_progress', 'completed', 'abandoned', 'archived', 'deleted'):
+            raise ValueError("Status must be one of: 'proposed', 'active', 'in_progress', 'completed', 'abandoned', 'archived', 'deleted'")
             
         conn = get_connection(read_only_constitution=True)
         try:
@@ -447,6 +447,93 @@ class SafeGoals:
             return True
         finally:
             conn.close()
+
+    def manage_goals(self, action: str, params: dict) -> dict:
+        if action == "create":
+            g_type = params.get("type")
+            description = params.get("description")
+            progress_metric = params.get("progress_metric")
+            parent_goal_id = params.get("parent_goal_id")
+            
+            if not g_type or not description:
+                raise ValueError("Both 'type' and 'description' are required to create a goal.")
+            
+            goal_id = self.create_goal(g_type, description, progress_metric, parent_goal_id)
+            return {"success": True, "goal_id": goal_id}
+            
+        elif action == "modify":
+            goal_id = params.get("goal_id")
+            if not goal_id:
+                raise ValueError("'goal_id' is required for modification.")
+            
+            updates = []
+            values = []
+            
+            for field in ("type", "status", "description", "progress_metric", "parent_goal_id"):
+                if field in params:
+                    val = params[field]
+                    if field == "type" and val not in ('short', 'long', 'stretch', 'aspirational'):
+                        raise ValueError("Type must be one of: 'short', 'long', 'stretch', 'aspirational'")
+                    if field == "status" and val not in ('proposed', 'active', 'in_progress', 'completed', 'abandoned', 'archived', 'deleted'):
+                        raise ValueError("Status must be one of: 'proposed', 'active', 'in_progress', 'completed', 'abandoned', 'archived', 'deleted'")
+                    updates.append(f"{field} = ?")
+                    values.append(val)
+                    
+            if not updates:
+                return {"success": True, "message": "No modification parameters provided."}
+                
+            values.append(goal_id)
+            conn = get_connection(read_only_constitution=True)
+            try:
+                cursor = conn.cursor()
+                cursor.execute("SELECT id FROM goals WHERE id = ?;", (goal_id,))
+                if not cursor.fetchone():
+                    raise ValueError(f"Goal ID {goal_id} does not exist.")
+                
+                query = f"UPDATE goals SET {', '.join(updates)}, updated_at = CURRENT_TIMESTAMP WHERE id = ?;"
+                cursor.execute(query, tuple(values))
+                conn.commit()
+                return {"success": True, "message": f"Goal {goal_id} modified successfully."}
+            finally:
+                conn.close()
+                
+        elif action == "archive":
+            goal_id = params.get("goal_id")
+            if not goal_id:
+                raise ValueError("'goal_id' is required for archiving.")
+            success = self.update_goal_status(goal_id, "archived")
+            if not success:
+                raise ValueError(f"Goal ID {goal_id} does not exist.")
+            return {"success": True, "message": f"Goal {goal_id} archived successfully."}
+            
+        elif action == "delete":
+            goal_id = params.get("goal_id")
+            if not goal_id:
+                raise ValueError("'goal_id' is required for deletion.")
+            success = self.update_goal_status(goal_id, "deleted")
+            if not success:
+                raise ValueError(f"Goal ID {goal_id} does not exist.")
+            return {"success": True, "message": f"Goal {goal_id} marked as deleted successfully."}
+            
+        elif action == "checkpoint_create":
+            goal_id = params.get("goal_id")
+            description = params.get("description")
+            if not goal_id or not description:
+                raise ValueError("Both 'goal_id' and 'description' are required to create a checkpoint.")
+            cp_id = self.add_checkpoint(goal_id, description)
+            return {"success": True, "checkpoint_id": cp_id}
+            
+        elif action == "checkpoint_complete":
+            checkpoint_id = params.get("checkpoint_id")
+            if not checkpoint_id:
+                raise ValueError("'checkpoint_id' is required to complete a checkpoint.")
+            success = self.complete_checkpoint(checkpoint_id)
+            if not success:
+                raise ValueError(f"Checkpoint ID {checkpoint_id} does not exist.")
+            return {"success": True, "message": f"Checkpoint {checkpoint_id} completed successfully."}
+            
+        else:
+            raise ValueError(f"Unknown action: '{action}'")
 
 class SafeDocuments:
     """Safe document management wrapper for database-backed dynamic skills."""

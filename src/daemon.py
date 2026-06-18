@@ -29,6 +29,122 @@ from src.database import (
 _reflex_queue = None
 _loop = None
 
+# Smart Loop Governor state tracking
+_consecutive_stagnant_cycles = 0
+_last_git_diff_hash = None
+_last_db_write_count = None
+_last_completed_checkpoints = None
+
+def check_smart_governor_stagnation() -> tuple[bool, str]:
+    """
+    Checks if there is any progress in the current cycle across three metrics:
+    1. Code changes (git diff hash)
+    2. Database writes (episodic_memory + internal_deliberations row count)
+    3. Checkpoint completions (completed checkpoints count)
+    
+    Returns (is_stagnant, justification_string)
+    """
+    global _consecutive_stagnant_cycles, _last_git_diff_hash, _last_db_write_count, _last_completed_checkpoints
+    
+    import subprocess
+    import hashlib
+    
+    # 1. Check Git diff hash
+    current_git_hash = ""
+    try:
+        res = subprocess.run(["git", "diff"], capture_output=True, text=True, cwd=str(src.config.ROOT_DIR), timeout=5)
+        if res.returncode == 0:
+            current_git_hash = hashlib.sha256(res.stdout.encode('utf-8')).hexdigest()
+    except Exception:
+        pass
+
+    # 2. Check Database writes count
+    current_db_writes = 0
+    from src.database import get_connection
+    conn = get_connection(read_only_constitution=True)
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM episodic_memory;")
+        em = cursor.fetchone()[0]
+        cursor.execute("SELECT COUNT(*) FROM internal_deliberations;")
+        id_cnt = cursor.fetchone()[0]
+        current_db_writes = em + id_cnt
+    except Exception:
+        pass
+    finally:
+        conn.close()
+
+    # 3. Check Completed checkpoints count
+    current_completed_checkpoints = 0
+    conn = get_connection(read_only_constitution=True)
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM goal_checkpoints WHERE achieved = 1;")
+        current_completed_checkpoints = cursor.fetchone()[0]
+    except Exception:
+        pass
+    finally:
+        conn.close()
+
+    # If this is the first run, initialize and consider as active progress
+    if _last_git_diff_hash is None or _last_db_write_count is None or _last_completed_checkpoints is None:
+        _last_git_diff_hash = current_git_hash
+        _last_db_write_count = current_db_writes
+        _last_completed_checkpoints = current_completed_checkpoints
+        return False, "Governor initialized."
+
+    # Compare values
+    git_changed = (current_git_hash != _last_git_diff_hash)
+    db_changed = (current_db_writes > _last_db_write_count)
+    checkpoints_changed = (current_completed_checkpoints > _last_completed_checkpoints)
+    
+    # Update states
+    _last_git_diff_hash = current_git_hash
+    _last_db_write_count = current_db_writes
+    _last_completed_checkpoints = current_completed_checkpoints
+
+    if not (git_changed or db_changed or checkpoints_changed):
+        _consecutive_stagnant_cycles += 1
+        justification = (
+            f"Stagnation detected (Consecutive Stagnant Cycles: {_consecutive_stagnant_cycles}). "
+            f"Metrics: git_changed={git_changed}, db_changed={db_changed}, checkpoints_changed={checkpoints_changed}."
+        )
+        return True, justification
+    else:
+        _consecutive_stagnant_cycles = 0
+        justification = (
+            f"Progress registered. "
+            f"Metrics: git_changed={git_changed}, db_changed={db_changed}, checkpoints_changed={checkpoints_changed}."
+        )
+        return False, justification
+
+async def pause_until_user_active():
+    """Waits until user_presence_status is marked active in system_config."""
+    from src.skills import DynamicSkillExecutor
+    from src.database import get_connection
+    while True:
+        try:
+            DynamicSkillExecutor.execute("check_presence", {}, party_id="system")
+        except Exception:
+            pass
+        conn = get_connection(read_only_constitution=True)
+        p_val = "idle"
+        try:
+            r = conn.execute("SELECT config_value FROM system_config WHERE config_key = 'user_presence_status';").fetchone()
+            if r:
+                p_val = r[0]
+        except Exception:
+            pass
+        finally:
+            conn.close()
+        if p_val == "active":
+            break
+        await asyncio.sleep(1 if os.getenv("JANUS_TEST_MODE") == "1" else 15)
+    logger.info("User presence detected. Smart Governor reset.")
+    reset_consecutive_background_loops()
+    global _consecutive_stagnant_cycles
+    _consecutive_stagnant_cycles = 0
+
 # Setup logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("JanusDaemon")
@@ -435,6 +551,7 @@ async def run_mid_layer_loop():
     """
     from src.skills import DynamicSkillExecutor
     from src.database import get_connection
+    global _consecutive_stagnant_cycles
     
     logger.info("Mid-level real-time loop started.")
     try:
@@ -483,41 +600,44 @@ async def run_mid_layer_loop():
                 loop_count = get_consecutive_background_loops()
                 logger.info(f"Background Loop Count: {loop_count}/{src.config.N_LOOP_LIMIT}")
                 
-                # Check loop safety
+                # Check smart governor progress and stagnation
+                is_stagnant, justification = check_smart_governor_stagnation()
+                logger.info(f"Smart Governor: {justification}")
+                
+                stagnant_threshold = 3
+                conn = get_connection(read_only_constitution=True)
                 try:
-                    check_loop_safety()
-                except SafetyViolationError as sve:
-                    logger.warning(
-                        f"Loop Safety Valve triggered! {sve} "
-                        "Automations halted until human presence is detected."
-                    )
+                    r = conn.execute("SELECT config_value FROM system_config WHERE config_key = 'governor.stagnant_threshold';").fetchone()
+                    if r:
+                        stagnant_threshold = int(r[0])
+                except Exception:
+                    pass
+                finally:
+                    conn.close()
+
+                hard_cap = getattr(src.config, "N_LOOP_LIMIT", 20)
+                
+                if _consecutive_stagnant_cycles >= stagnant_threshold:
+                    log_msg = f"Smart Governor Halt: background cycle stagnation threshold of {stagnant_threshold} met. Pausing background automations."
+                    logger.warning(log_msg)
                     log_episodic_memory(
                         speaker="system",
-                        message_content=f"Loop Safety Valve triggered: {sve} Pausing background automations.",
+                        message_content=log_msg,
                         context_type="background_thought"
                     )
-                    while True:
-                        try:
-                            DynamicSkillExecutor.execute("check_presence", {}, party_id="system")
-                        except Exception:
-                            pass
-                        conn = get_connection(read_only_constitution=True)
-                        p_val = "idle"
-                        try:
-                            r = conn.execute("SELECT config_value FROM system_config WHERE config_key = 'user_presence_status';").fetchone()
-                            if r:
-                                p_val = r[0]
-                        except Exception:
-                            pass
-                        finally:
-                            conn.close()
-                        if p_val == "active":
-                            break
-                        await asyncio.sleep(1 if os.getenv("JANUS_TEST_MODE") == "1" else 15)
-                    logger.info("User presence detected. Loop safety valve reset.")
-                    reset_consecutive_background_loops()
+                    await pause_until_user_active()
+                elif loop_count > hard_cap:
+                    log_msg = f"Smart Governor Halt: background loop hard cap of {hard_cap} exceeded. Pausing background automations."
+                    logger.warning(log_msg)
+                    log_episodic_memory(
+                        speaker="system",
+                        message_content=log_msg,
+                        context_type="background_thought"
+                    )
+                    await pause_until_user_active()
             else:
                 reset_consecutive_background_loops()
+                _consecutive_stagnant_cycles = 0
                 
             # 5. Run other interval skills (excluding high-level ones and presence/drive check since we ran them)
             try:

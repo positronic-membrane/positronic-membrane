@@ -14,6 +14,12 @@ logger = logging.getLogger("TestPhase5")
 @pytest.fixture(autouse=True)
 def setup_test_db(tmp_path):
     """Isolate DB settings for testing."""
+    import src.daemon
+    src.daemon._consecutive_stagnant_cycles = 0
+    src.daemon._last_git_diff_hash = None
+    src.daemon._last_db_write_count = None
+    src.daemon._last_completed_checkpoints = None
+
     temp_db = tmp_path / "test_janus.db"
     orig_db_path = src.config.DB_PATH
     src.config.DB_PATH = str(temp_db)
@@ -133,9 +139,11 @@ async def test_cadence_concurrency_and_ratios(tmp_path, monkeypatch):
         
     monkeypatch.setattr(DynamicSkillExecutor, "execute", mock_execute)
     
-    # Set high boredom threshold to prevent reflection triggers during the concurrency test
+    # Set high boredom threshold, stagnant threshold, and user presence to prevent reflection triggers and governor halts during the concurrency test
     conn = get_connection()
     conn.execute("UPDATE system_config SET config_value = '99' WHERE config_key = 'boredom_threshold';")
+    conn.execute("INSERT OR REPLACE INTO system_config (config_key, config_value, is_agent_modifiable) VALUES ('governor.stagnant_threshold', '99', 1);")
+    conn.execute("UPDATE system_config SET config_value = 'active' WHERE config_key = 'user_presence_status';")
     conn.commit()
     conn.close()
 

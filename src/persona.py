@@ -818,7 +818,9 @@ def handle_goal_command(command_str: str) -> str:
                     'active': '🚀',
                     'in_progress': '⚙️',
                     'completed': '✅',
-                    'abandoned': '❌'
+                    'abandoned': '❌',
+                    'archived': '📁',
+                    'deleted': '🗑️'
                 }.get(g['status'], '❓')
                 
                 output.append(f"- **[{g['id']}]** {status_emoji} *{g['description']}* (Status: `{g['status']}`)")
@@ -844,7 +846,7 @@ def handle_goal_command(command_str: str) -> str:
     elif subcommand == "status":
         status_parts = args_str.split(None, 1)
         if len(status_parts) < 2:
-            return "[Error] Usage: /goal status <goal_id> <status>\nStatuses: proposed, active, in_progress, completed, abandoned"
+            return "[Error] Usage: /goal status <goal_id> <status>\nStatuses: proposed, active, in_progress, completed, abandoned, archived, deleted"
         try:
             gid = int(status_parts[0])
             status = status_parts[1].lower()
@@ -885,8 +887,27 @@ def handle_goal_command(command_str: str) -> str:
         except Exception as e:
             return f"[Error] Failed to complete checkpoint: {e}"
 
+    elif subcommand == "prioritize":
+        prioritize_parts = args_str.split(None, 1)
+        if len(prioritize_parts) < 2:
+            return "[Error] Usage: /goal prioritize <goal_id> <priority>\nPriority tiers: short, long, stretch, aspirational"
+        try:
+            gid = int(prioritize_parts[0])
+            priority = prioritize_parts[1].lower()
+            if priority not in ('short', 'long', 'stretch', 'aspirational'):
+                return "[Error] Priority must be one of: short, long, stretch, aspirational"
+            
+            res = sg.manage_goals("modify", {"goal_id": gid, "type": priority})
+            if res.get("success"):
+                return f"[✔] Goal [{gid}] priority tier updated to '{priority}'."
+            return f"[Error] Failed to update goal priority: {res.get('error') or res.get('message')}"
+        except ValueError:
+            return "[Error] Goal ID must be an integer."
+        except Exception as e:
+            return f"[Error] Failed to prioritize goal: {e}"
+
     else:
-        return f"[Error] Unknown goal subcommand '{subcommand}'. Available commands: create, status, checkpoint, complete."
+        return f"[Error] Unknown goal subcommand '{subcommand}'. Available commands: create, status, checkpoint, complete, prioritize."
 
 def handle_docs_command(command_str: str) -> str:
     """
@@ -975,10 +996,49 @@ def generate_persona_response(user_query: str) -> str:
     Queries ChromaDB (Primary Concepts & Codebase) and episodic logs for context,
     performs web searches if requested, and formulates a conversational response.
     """
+    from src.sandbox_session import get_active_sandbox, get_sandbox_modified_files
+    
+    party_id = get_session_party_id()
+    
+    # 1. Fetch self model traits
+    traits_list = []
+    conn = get_connection(read_only_constitution=True)
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT trait_name, value FROM self_model WHERE is_pinned = 1 OR confidence > 0.3;")
+        rows = cursor.fetchall()
+        for row in rows:
+            try:
+                name = row['trait_name']
+                val = row['value']
+            except (TypeError, IndexError, KeyError):
+                name, val = row
+            traits_list.append(f"- {name}: {val}")
+    except Exception as e:
+        logger.error(f"Failed to fetch self model traits: {e}")
+    finally:
+        conn.close()
+    traits_prompt = get_self_model_prompt_guidelines()
+    self_traits_str = ""
+    if traits_list:
+        self_traits_str += "\n".join(traits_list) + "\n\n"
+    if traits_prompt:
+        self_traits_str += traits_prompt
+    else:
+        self_traits_str += "None defined."
+
+    # 2. Fetch episodic memories (last 15)
+    memories = get_recent_episodic_memories(limit=15)
+    chat_history = []
+    for speaker, msg, _ in reversed(memories):
+        if speaker in ("user", "persona", "system", "sandbox_automation"):
+            chat_history.append(f"{speaker.upper()}: {msg}")
+    history_summary = "\n".join(chat_history) if chat_history else "No previous conversation."
+
+    # 3. Assemble semantic/knowledge context (including web searches, codebase queries, active sandbox, ChromaDB)
     semantic_context = ""
     
-    # Inject active sandbox information if present
-    from src.sandbox_session import get_active_sandbox, get_sandbox_modified_files
+    # Active Sandbox Session details
     try:
         active_sb = get_active_sandbox()
         if active_sb:
@@ -999,7 +1059,7 @@ def generate_persona_response(user_query: str) -> str:
     except Exception as sb_err:
         logger.error(f"Failed to inject sandbox session details into prompt: {sb_err}")
     
-    # 1. Check for web search request intent
+    # Live Web Search
     search_query = detect_search_intent(user_query)
     if search_query:
         try:
@@ -1014,7 +1074,7 @@ def generate_persona_response(user_query: str) -> str:
             logger.error(f"Failed to query web search during chat: {e}")
             semantic_context += f"--- Live Web Search Results ---\nFailed to run search: {e}\n\n"
 
-    # 2. Check for codebase query intent
+    # Codebase query
     if detect_codebase_intent(user_query):
         try:
             from src.codebase import query_codebase_context
@@ -1023,15 +1083,13 @@ def generate_persona_response(user_query: str) -> str:
         except Exception as e:
             logger.error(f"Failed to query codebase index: {e}")
 
-    # 3. Query high-level primary memories via ChromaDB
+    # ChromaDB semantic queries
     try:
         matches = query_memories(user_query, limit=2, collection_name="janus_long_term")
         if matches:
             semantic_context += "--- Relevant Primary Concepts & Detailed Memories ---\n"
             for match in matches:
                 semantic_context += f"- Primary Concept: {match['content']}\n"
-                
-                # Fetch detailed records on-demand if this matches a consolidated concept
                 detail_ids = match["metadata"].get("detail_ids", "")
                 if detail_ids:
                     try:
@@ -1047,31 +1105,21 @@ def generate_persona_response(user_query: str) -> str:
     except Exception as e:
         logger.error(f"Failed to query semantic memories: {e}")
 
-    # 4. Fetch recent conversation history from SQLite (user, persona, system, sandbox_automation)
-    memories = get_recent_episodic_memories(limit=15)
-    chat_history = []
-    for speaker, msg, _ in reversed(memories):
-        if speaker in ("user", "persona", "system", "sandbox_automation"):
-            chat_history.append(f"{speaker.upper()}: {msg}")
-    history_summary = "\n".join(chat_history)
+    semantic_str = semantic_context.strip() if semantic_context.strip() else "None available."
 
-    traits_prompt = get_self_model_prompt_guidelines()
+    # Format into XML tags
+    xml_block = (
+        f"<self_traits>\n{self_traits_str}\n</self_traits>\n"
+        f"<episodic_memory>\n{history_summary}\n</episodic_memory>\n"
+        f"<semantic_knowledge>\n{semantic_str}\n</semantic_knowledge>"
+    )
 
     prompt = f"""
-    You are the singular Persona surface of Project Janus, speaking as a cohesive consciousness. Respond to the user's message.
-    
-    PERSONALITY & STYLE INSTRUCTIONS:
-    {traits_prompt if traits_prompt else "Respond naturally."}
-    
-    RELEVANT HISTORICAL DATA:
-    {semantic_context if semantic_context.strip() else "None."}
-    
-    RECENT CHAT HISTORY:
-    {history_summary if history_summary else "No previous conversation."}
-    
-    USER MESSAGE:
-    {user_query}
-    """
+{xml_block}
+
+USER MESSAGE:
+{user_query}
+"""
 
     try:
         return query_agent("persona", prompt)

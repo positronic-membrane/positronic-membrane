@@ -3,6 +3,10 @@ import json
 from datetime import datetime
 import src.config
 import re
+import logging
+
+logger = logging.getLogger("JanusDatabase")
+
 
 # SQLite Authorizer codes
 SQLITE_DENY = 1
@@ -469,7 +473,7 @@ def init_db():
     CREATE TABLE IF NOT EXISTS goals (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         type TEXT NOT NULL CHECK(type IN ('short','long','stretch','aspirational')),
-        status TEXT NOT NULL DEFAULT 'proposed' CHECK(status IN ('proposed','active','in_progress','completed','abandoned')),
+        status TEXT NOT NULL DEFAULT 'proposed' CHECK(status IN ('proposed','active','in_progress','completed','abandoned','archived','deleted')),
         description TEXT NOT NULL,
         progress_metric TEXT,
         parent_goal_id INTEGER,
@@ -479,6 +483,35 @@ def init_db():
     );
     """)
 
+    # Check if we need to migrate the goals table check constraint
+    cursor.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='goals';")
+    goals_table_row = cursor.fetchone()
+    if goals_table_row:
+        goals_sql = goals_table_row[0] or ""
+        if "archived" not in goals_sql:
+            logger.info("Migrating goals table status check constraint...")
+            cursor.execute("ALTER TABLE goals RENAME TO goals_old;")
+            cursor.execute("""
+            CREATE TABLE goals (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                type TEXT NOT NULL CHECK(type IN ('short','long','stretch','aspirational')),
+                status TEXT NOT NULL DEFAULT 'proposed' CHECK(status IN ('proposed','active','in_progress','completed','abandoned','archived','deleted')),
+                description TEXT NOT NULL,
+                progress_metric TEXT,
+                parent_goal_id INTEGER,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(parent_goal_id) REFERENCES goals(id) ON DELETE SET NULL
+            );
+            """)
+            cursor.execute("""
+            INSERT INTO goals (id, type, status, description, progress_metric, parent_goal_id, created_at, updated_at)
+            SELECT id, type, status, description, progress_metric, parent_goal_id, created_at, updated_at FROM goals_old;
+            """)
+            cursor.execute("DROP TABLE goals_old;")
+            conn.commit()
+            logger.info("Goals table migration complete.")
+
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS goal_checkpoints (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -487,6 +520,26 @@ def init_db():
         achieved INTEGER DEFAULT 0 CHECK(achieved IN (0, 1)),
         achieved_at TIMESTAMP,
         FOREIGN KEY(goal_id) REFERENCES goals(id) ON DELETE CASCADE
+    );
+    """)
+
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS llm_cache (
+        prompt_hash TEXT PRIMARY KEY,
+        response TEXT NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    """)
+
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS llm_call_costs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        query_id TEXT,
+        model TEXT NOT NULL,
+        input_tokens INTEGER NOT NULL,
+        output_tokens INTEGER NOT NULL,
+        cost REAL NOT NULL,
+        timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );
     """)
 
@@ -607,9 +660,10 @@ def init_db():
     default_configs = [
         ("setup_complete", "0", 0),  # Strictly human-only modifiable
         ("boredom_threshold", "5", 1),
-        ("n_loop_limit", "5", 0),
+        ("n_loop_limit", "20", 0),
         ("consecutive_background_loops", "0", 0),
-        ("user_presence_status", "idle", 1)
+        ("user_presence_status", "idle", 1),
+        ("governor.stagnant_threshold", "3", 1)
     ]
     for key, value, modifiable in default_configs:
         cursor.execute("""
@@ -940,6 +994,28 @@ def init_db():
             except Exception as e:
                 sdk['logger'].error(f"Failed to query semantic memories: {e}")
 
+        goals_block = "ACTIVE GOALS & CHECKPOINTS:\\nNo active goals or checkpoints."
+        try:
+            active_goals = sdk['db'].query("SELECT id, type, status, description FROM goals WHERE status IN ('active', 'in_progress');")
+            if active_goals:
+                lines = ["ACTIVE GOALS & CHECKPOINTS:"]
+                for g in active_goals:
+                    gid = g.get('id') if isinstance(g, dict) else g[0]
+                    gtype = g.get('type') if isinstance(g, dict) else g[1]
+                    gstatus = g.get('status') if isinstance(g, dict) else g[2]
+                    gdesc = g.get('description') if isinstance(g, dict) else g[3]
+                    lines.append(f"- Goal [ID: {gid}] ({gtype}): {gdesc} (Status: {gstatus})")
+                    cps = sdk['db'].query("SELECT id, checkpoint_description, achieved FROM goal_checkpoints WHERE goal_id = ?;", (gid,))
+                    if cps:
+                        for cp in cps:
+                            cpdesc = cp.get('checkpoint_description') if isinstance(cp, dict) else cp[1]
+                            cpach = cp.get('achieved') if isinstance(cp, dict) else cp[2]
+                            marker = "[x]" if cpach else "[ ]"
+                            lines.append(f"  - {marker} {cpdesc}")
+                goals_block = "\\n".join(lines)
+        except Exception as ge:
+            sdk['logger'].error(f"Failed to query goals in reflection cycle: {ge}")
+
         bus_turns = 0
         max_bus_turns = 3
         pending_bus_context = ""
@@ -959,6 +1035,9 @@ def init_db():
             
             RELEVANT HISTORICAL SEMANTIC MEMORIES:
             {semantic_context if semantic_context else "None available."}
+            
+            ACTIVE GOALS & CHECKPOINTS:
+            {goals_block}
             
             SWARM CHAT HISTORY (THIS TICK):
             {pending_bus_context if pending_bus_context else "No active sub-task discussions."}
@@ -1322,6 +1401,34 @@ def init_db():
                 '    else:\n'
                 '        raise ValueError(f"Unknown sandbox action: {action}")\n',
                 "manage_sandbox",
+                "contributor",
+                "manual",
+                "{}"
+            ),
+            (
+                "manage_goals",
+                "Manage Goals",
+                "Create, modify, archive, delete goals or checkpoints dynamically.",
+                json.dumps({
+                    "type": "object",
+                    "properties": {
+                        "action": {
+                            "type": "string",
+                            "enum": ["create", "modify", "archive", "delete", "checkpoint_create", "checkpoint_complete"],
+                            "description": "The goal action to perform."
+                        },
+                        "params": {
+                            "type": "object",
+                            "description": "Action-specific parameters (e.g. type, status, description, goal_id, checkpoint_id, progress_metric, parent_goal_id)."
+                        }
+                    },
+                    "required": ["action", "params"]
+                }),
+                'def manage_goals(action, params):\n'
+                '    from src.skills import SafeGoals\n'
+                '    sg = SafeGoals()\n'
+                '    return sg.manage_goals(action, params)\n',
+                "manage_goals",
                 "contributor",
                 "manual",
                 "{}"

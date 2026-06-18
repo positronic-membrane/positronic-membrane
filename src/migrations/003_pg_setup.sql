@@ -145,7 +145,7 @@ CREATE TABLE IF NOT EXISTS self_model_history (
 CREATE TABLE IF NOT EXISTS goals (
     id SERIAL PRIMARY KEY,
     type TEXT NOT NULL CHECK(type IN ('short','long','stretch','aspirational')),
-    status TEXT NOT NULL DEFAULT 'proposed' CHECK(status IN ('proposed','active','in_progress','completed','abandoned')),
+    status TEXT NOT NULL DEFAULT 'proposed' CHECK(status IN ('proposed','active','in_progress','completed','abandoned','archived','deleted')),
     description TEXT NOT NULL,
     progress_metric TEXT,
     parent_goal_id INTEGER REFERENCES goals(id) ON DELETE SET NULL,
