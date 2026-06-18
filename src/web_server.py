@@ -147,13 +147,59 @@ def verify_role(party_role: str, minimum_role: str) -> bool:
     return ROLE_HIERARCHY.get(party_role, -1) >= ROLE_HIERARCHY.get(minimum_role, 0)
 
 
+from functools import lru_cache
+
+@lru_cache(maxsize=128)
+def resolve_party_by_api_key(api_key: str) -> Optional[Dict[str, Any]]:
+    conn = get_connection()
+    conn.row_factory = sqlite3.Row
+    try:
+        # 1. Match public_key column
+        row = conn.execute("SELECT id, role FROM parties WHERE public_key = ? LIMIT 1;", (api_key,)).fetchone()
+        if row:
+            return {"party_id": row["id"], "role": row["role"]}
+        # 2. Match metadata JSON key
+        row = conn.execute("SELECT id, role FROM parties WHERE json_extract(metadata, '$.api_key') = ? LIMIT 1;", (api_key,)).fetchone()
+        if row:
+            return {"party_id": row["id"], "role": row["role"]}
+    except Exception as e:
+        logger.error(f"Error resolving party by API key: {e}")
+    finally:
+        conn.close()
+    return None
+
+@lru_cache(maxsize=128)
+def resolve_party_by_fingerprint(fingerprint: str) -> Optional[Dict[str, Any]]:
+    conn = get_connection()
+    conn.row_factory = sqlite3.Row
+    try:
+        row = conn.execute("SELECT id, role FROM parties WHERE json_extract(metadata, '$.device_fingerprint') = ? LIMIT 1;", (fingerprint,)).fetchone()
+        if row:
+            return {"party_id": row["id"], "role": row["role"]}
+    except Exception as e:
+        logger.error(f"Error resolving party by fingerprint: {e}")
+    finally:
+        conn.close()
+    return None
+
 def get_current_party(request: Request) -> Dict[str, Any]:
-    """Dependency to verify JWT access token or fallback to X-Party-ID for backward compatibility."""
+    """Dependency to verify JWT access token or fallback to API Key or Fingerprint checks."""
+    api_key_header = request.headers.get("X-API-Key")
     auth_header = request.headers.get("Authorization")
+    fingerprint_header = request.headers.get("X-Device-Fingerprint")
+    
     party_id = None
     role = None
     
-    if auth_header and auth_header.startswith("Bearer "):
+    # 1. Check X-API-Key
+    if api_key_header:
+        res = resolve_party_by_api_key(api_key_header)
+        if res:
+            party_id = res["party_id"]
+            role = res["role"]
+            
+    # 2. Check Bearer Token (JWT)
+    if not party_id and auth_header and auth_header.startswith("Bearer "):
         token = auth_header[7:]
         try:
             payload = decode_access_token(token)
@@ -165,8 +211,15 @@ def get_current_party(request: Request) -> Dict[str, Any]:
                 detail=f"Invalid JWT access token: {e}"
             )
             
+    # 3. Check X-Device-Fingerprint
+    if not party_id and fingerprint_header:
+        res = resolve_party_by_fingerprint(fingerprint_header)
+        if res:
+            party_id = res["party_id"]
+            role = res["role"]
+            
+    # Fallback to legacy X-Party-ID header for backward compatibility
     if not party_id:
-        # Fallback to X-Party-ID header
         party_id = request.headers.get("X-Party-ID")
         if party_id:
             conn = get_connection()
@@ -175,11 +228,13 @@ def get_current_party(request: Request) -> Dict[str, Any]:
                 row = conn.execute("SELECT role FROM parties WHERE id = ?", (party_id,)).fetchone()
                 if row:
                     role = row["role"]
+            except Exception:
+                pass
             finally:
                 conn.close()
 
     # Fallback to local admin user if no auth headers are provided at all (for local/test mode backward compatibility)
-    if not src.config.REQUIRE_AUTH and not auth_header and not request.headers.get("X-Party-ID"):
+    if not src.config.REQUIRE_AUTH and not auth_header and not api_key_header and not fingerprint_header and not request.headers.get("X-Party-ID"):
         party_id = "local_user"
         role = "admin"
                 
@@ -492,7 +547,8 @@ def post_chat(data: ChatRequest, current_party = Depends(require_role('user'))):
         if not user_msg:
             raise HTTPException(status_code=400, detail="Message cannot be empty")
 
-        log_episodic_memory("user", user_msg, "user_visible")
+        party_id = current_party["party_id"]
+        log_episodic_memory("user", user_msg, "user_visible", party_id=party_id)
 
         if user_msg.startswith("/"):
             from src.persona import handle_web_slash_command
@@ -500,9 +556,9 @@ def post_chat(data: ChatRequest, current_party = Depends(require_role('user'))):
         elif detect_metacognitive_intent(user_msg):
             response = generate_metacognitive_narrative(user_msg)
         else:
-            response = generate_persona_response_autonomous(user_msg)
+            response = generate_persona_response_autonomous(user_msg, party_id=party_id)
 
-        log_episodic_memory("persona", response, "user_visible")
+        log_episodic_memory("persona", response, "user_visible", party_id=party_id)
         process_sandbox_updates(response)
         
         return {"response": response}
@@ -869,6 +925,8 @@ def register_party(data: PartyRegisterRequest, current_party = Depends(require_r
             (new_party_id, data.name, data.role, now, now, data.public_key, metadata_str)
         )
         conn.commit()
+        resolve_party_by_api_key.cache_clear()
+        resolve_party_by_fingerprint.cache_clear()
         return {
             "party_id": new_party_id,
             "name": data.name,
@@ -919,6 +977,8 @@ def update_party_role(target_party_id: str, data: PartyRoleUpdateRequest, curren
     try:
         conn.execute('UPDATE parties SET role = ? WHERE id = ?', (data.role, target_party_id))
         conn.commit()
+        resolve_party_by_api_key.cache_clear()
+        resolve_party_by_fingerprint.cache_clear()
         return {"message": f"Party {target_party_id} role updated to {data.role}"}
     finally:
         conn.close()
@@ -1090,7 +1150,8 @@ async def websocket_chat(websocket: WebSocket, token: Optional[str] = Query(None
             if not user_msg:
                 continue
                 
-            log_episodic_memory("user", user_msg, "user_visible")
+            party_id = current_party["party_id"]
+            log_episodic_memory("user", user_msg, "user_visible", party_id=party_id)
             
             # Send 'thinking' state back to client
             await websocket.send_json({"event": "thinking"})
@@ -1101,9 +1162,9 @@ async def websocket_chat(websocket: WebSocket, token: Optional[str] = Query(None
             elif detect_metacognitive_intent(user_msg):
                 response = generate_metacognitive_narrative(user_msg)
             else:
-                response = generate_persona_response_autonomous(user_msg)
+                response = generate_persona_response_autonomous(user_msg, party_id=party_id)
                 
-            log_episodic_memory("persona", response, "user_visible")
+            log_episodic_memory("persona", response, "user_visible", party_id=party_id)
             process_sandbox_updates(response)
             
             # Stream response back

@@ -1,6 +1,7 @@
 import sqlite3
 import json
 from datetime import datetime
+from typing import Optional, Dict, Any, List
 import src.config
 import re
 import logging
@@ -663,7 +664,9 @@ def init_db():
         ("n_loop_limit", "20", 0),
         ("consecutive_background_loops", "0", 0),
         ("user_presence_status", "idle", 1),
-        ("governor.stagnant_threshold", "3", 1)
+        ("governor.stagnant_threshold", "3", 1),
+        ("memory.retention_days", "30", 1),
+        ("memory.last_cleanup_time", "", 1)
     ]
     for key, value, modifiable in default_configs:
         cursor.execute("""
@@ -1363,6 +1366,54 @@ def init_db():
                 json.dumps({"interval_seconds": 120})
             ),
             (
+                "cleanup_episodic_memory",
+                "Cleanup Episodic Memory",
+                "Applies time-to-live cleanup logic to older episodic memory rows based on retention configs.",
+                json.dumps({"type": "object", "properties": {}}),
+                """def cleanup_episodic_memory():
+    # 1. Fetch memory.retention_days
+    config_row = sdk['db'].query("SELECT config_value FROM system_config WHERE config_key = 'memory.retention_days';")
+    retention_days = 30
+    if config_row:
+        try:
+            val = config_row[0].get('config_value') if isinstance(config_row[0], dict) else config_row[0][0]
+            retention_days = int(val)
+        except Exception:
+            pass
+
+    # 2. Prevent daily duplicates by checking last run time
+    last_run_row = sdk['db'].query("SELECT config_value FROM system_config WHERE config_key = 'memory.last_cleanup_time';")
+    import datetime
+    now_str = datetime.datetime.utcnow().isoformat()
+    if last_run_row:
+        try:
+            last_run_val = last_run_row[0].get('config_value') if isinstance(last_run_row[0], dict) else last_run_row[0][0]
+            if last_run_val:
+                last_run_time = datetime.datetime.fromisoformat(last_run_val)
+                if (datetime.datetime.utcnow() - last_run_time).total_seconds() < 86400:
+                    return f"Episodic memory cleanup skipped. Last run was at {last_run_val}."
+        except Exception:
+            pass
+
+    # 3. Purge expired memories
+    sdk['db'].query(
+        "DELETE FROM episodic_memory WHERE timestamp < datetime('now', '-' || ? || ' days');",
+        (retention_days,)
+    )
+
+    # 4. Save last run time
+    sdk['db'].query(
+        "INSERT OR REPLACE INTO system_config (config_key, config_value, is_agent_modifiable) VALUES ('memory.last_cleanup_time', ?, 1);",
+        (now_str,)
+    )
+    return f"Episodic memory cleanup complete. Purged memories older than {retention_days} days."
+""",
+                "cleanup_episodic_memory",
+                "contributor",
+                "interval",
+                json.dumps({"interval_seconds": 86400})
+            ),
+            (
                 "manage_sandbox",
                 "Manage Sandbox",
                 "Control git worktree sandboxes (actions: start, test, ship, abort).",
@@ -1636,6 +1687,56 @@ def init_db():
         ) VALUES (?, ?, ?, ?, ?, ?, 'contributor', 'manual', '{}');
         """, (skill_id, name, desc, schema, code, entry))
 
+    # Ensure cleanup_episodic_memory is unconditionally updated/registered
+    _cleanup_code = """def cleanup_episodic_memory():
+    # 1. Fetch memory.retention_days
+    config_row = sdk['db'].query("SELECT config_value FROM system_config WHERE config_key = 'memory.retention_days';")
+    retention_days = 30
+    if config_row:
+        try:
+            val = config_row[0].get('config_value') if isinstance(config_row[0], dict) else config_row[0][0]
+            retention_days = int(val)
+        except Exception:
+            pass
+
+    # 2. Prevent daily duplicates by checking last run time
+    last_run_row = sdk['db'].query("SELECT config_value FROM system_config WHERE config_key = 'memory.last_cleanup_time';")
+    import datetime
+    now_str = datetime.datetime.utcnow().isoformat()
+    if last_run_row:
+        try:
+            last_run_val = last_run_row[0].get('config_value') if isinstance(last_run_row[0], dict) else last_run_row[0][0]
+            if last_run_val:
+                last_run_time = datetime.datetime.fromisoformat(last_run_val)
+                if (datetime.datetime.utcnow() - last_run_time).total_seconds() < 86400:
+                    return f"Episodic memory cleanup skipped. Last run was at {last_run_val}."
+        except Exception:
+            pass
+
+    # 3. Purge expired memories
+    sdk['db'].query(
+        "DELETE FROM episodic_memory WHERE timestamp < datetime('now', '-' || ? || ' days');",
+        (retention_days,)
+    )
+
+    # 4. Save last run time
+    sdk['db'].query(
+        "INSERT OR REPLACE INTO system_config (config_key, config_value, is_agent_modifiable) VALUES ('memory.last_cleanup_time', ?, 1);",
+        (now_str,)
+    )
+    return f"Episodic memory cleanup complete. Purged memories older than {retention_days} days."
+"""
+    cursor.execute("""
+    INSERT OR REPLACE INTO agent_skills (
+        skill_id, name, description, parameters_schema, code_blob,
+        entry_point_function, required_role, trigger_type, trigger_config
+    ) VALUES (
+        'cleanup_episodic_memory', 'Cleanup Episodic Memory',
+        'Applies time-to-live cleanup logic to older episodic memory rows based on retention configs.',
+        '{"type": "object", "properties": {}}', ?, 'cleanup_episodic_memory', 'contributor', 'interval', '{"interval_seconds": 86400}'
+    );
+    """, (_cleanup_code,))
+
     # Check if parties table exists; if not, apply multi-party migrations
     cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='parties';")
     if not cursor.fetchone():
@@ -1652,6 +1753,34 @@ def init_db():
             cursor.execute("ALTER TABLE parties ADD COLUMN last_seen TEXT NOT NULL DEFAULT (datetime('now'));")
         if "metadata" not in columns:
             cursor.execute("ALTER TABLE parties ADD COLUMN metadata TEXT NOT NULL DEFAULT '{}';")
+
+    # Ensure interaction_profiles table exists
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS interaction_profiles (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        party_id TEXT NOT NULL UNIQUE,
+        response_style TEXT DEFAULT 'balanced' CHECK(response_style IN ('concise', 'verbose', 'balanced')),
+        tone_bias TEXT DEFAULT 'neutral',
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY(party_id) REFERENCES parties(id) ON DELETE CASCADE
+    );
+    """)
+
+    # Ensure index on parties(public_key) exists
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_parties_public_key ON parties(public_key);")
+
+    # Ensure test_run_baselines table exists
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS test_run_baselines (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        total_tests INTEGER,
+        passed_tests INTEGER,
+        failed_tests INTEGER,
+        coverage_percentage REAL,
+        commit_sha TEXT
+    );
+    """)
 
     # Ensure preferences table exists
     cursor.execute("""
@@ -1933,14 +2062,14 @@ def get_curiosity_vector() -> list:
     conn.close()
     return json.loads(row[0]) if row and row[0] else []
 
-def log_episodic_memory(speaker: str, message_content: str, context_type: str = "user_visible"):
+def log_episodic_memory(speaker: str, message_content: str, context_type: str = "user_visible", party_id: Optional[str] = None):
     """Inserts a record into the episodic memory log."""
     conn = get_connection(read_only_constitution=True)
     cursor = conn.cursor()
     cursor.execute("""
-    INSERT INTO episodic_memory (speaker, message_content, context_type)
-    VALUES (?, ?, ?);
-    """, (speaker, message_content, context_type))
+    INSERT INTO episodic_memory (speaker, message_content, context_type, party_id)
+    VALUES (?, ?, ?, ?);
+    """, (speaker, message_content, context_type, party_id))
     conn.commit()
     conn.close()
 
@@ -1955,25 +2084,43 @@ def log_deliberation(proposed_action: str, debate_json: dict, critic_decision: i
     conn.commit()
     conn.close()
 
-def get_recent_episodic_memories(limit: int = 10, context_type: str = None) -> list:
+def get_recent_episodic_memories(limit: int = 10, context_type: str = None, party_id: Optional[str] = None) -> list:
     """Retrieves the most recent episodic memories."""
     conn = get_connection(read_only_constitution=True)
     cursor = conn.cursor()
-    if context_type:
-        cursor.execute("""
-        SELECT speaker, message_content, timestamp 
-        FROM episodic_memory 
-        WHERE context_type = ?
-        ORDER BY id DESC 
-        LIMIT ?;
-        """, (context_type, limit))
+    if party_id:
+        if context_type:
+            cursor.execute("""
+            SELECT speaker, message_content, timestamp 
+            FROM episodic_memory 
+            WHERE context_type = ? AND (party_id = ? OR party_id IS NULL)
+            ORDER BY id DESC 
+            LIMIT ?;
+            """, (context_type, party_id, limit))
+        else:
+            cursor.execute("""
+            SELECT speaker, message_content, timestamp 
+            FROM episodic_memory 
+            WHERE party_id = ? OR party_id IS NULL
+            ORDER BY id DESC 
+            LIMIT ?;
+            """, (party_id, limit))
     else:
-        cursor.execute("""
-        SELECT speaker, message_content, timestamp 
-        FROM episodic_memory 
-        ORDER BY id DESC 
-        LIMIT ?;
-        """, (limit,))
+        if context_type:
+            cursor.execute("""
+            SELECT speaker, message_content, timestamp 
+            FROM episodic_memory 
+            WHERE context_type = ?
+            ORDER BY id DESC 
+            LIMIT ?;
+            """, (context_type, limit))
+        else:
+            cursor.execute("""
+            SELECT speaker, message_content, timestamp 
+            FROM episodic_memory 
+            ORDER BY id DESC 
+            LIMIT ?;
+            """, (limit,))
     rows = cursor.fetchall()
     conn.close()
     return rows

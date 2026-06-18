@@ -991,14 +991,46 @@ def handle_docs_command(command_str: str) -> str:
         )
 
 
-def generate_persona_response(user_query: str) -> str:
+def generate_persona_response(user_query: str, party_id: Optional[str] = None) -> str:
     """
     Queries ChromaDB (Primary Concepts & Codebase) and episodic logs for context,
     performs web searches if requested, and formulates a conversational response.
     """
     from src.sandbox_session import get_active_sandbox, get_sandbox_modified_files
     
-    party_id = get_session_party_id()
+    if party_id is None:
+        party_id = get_session_party_id()
+        
+    # Fetch interaction profile style guidelines for this party
+    response_style = "balanced"
+    tone_bias = "neutral"
+    if party_id:
+        conn = get_connection(read_only_constitution=True)
+        try:
+            cursor = conn.cursor()
+            cursor.execute("SELECT response_style, tone_bias FROM interaction_profiles WHERE party_id = ? LIMIT 1;", (party_id,))
+            prof_row = cursor.fetchone()
+            if prof_row:
+                try:
+                    response_style = prof_row['response_style']
+                    tone_bias = prof_row['tone_bias']
+                except (TypeError, IndexError, KeyError):
+                    response_style, tone_bias = prof_row
+        except Exception as e:
+            logger.error(f"Failed to fetch interaction profile: {e}")
+        finally:
+            conn.close()
+
+    # Get system prompt for persona and append style guidelines
+    from src.llm import get_agent_settings
+    settings = get_agent_settings("persona")
+    if settings:
+        base_prompt = settings[1]
+    else:
+        base_prompt = "You are the Antigravity Persona agent."
+
+    style_guidelines = f"\n\n### Response Style Guidelines:\n- Response Style: {response_style}\n- Tone Bias: {tone_bias}"
+    system_override = base_prompt + style_guidelines
     
     # 1. Fetch self model traits
     traits_list = []
@@ -1028,7 +1060,7 @@ def generate_persona_response(user_query: str) -> str:
         self_traits_str += "None defined."
 
     # 2. Fetch episodic memories (last 15)
-    memories = get_recent_episodic_memories(limit=15)
+    memories = get_recent_episodic_memories(limit=15, party_id=party_id)
     chat_history = []
     for speaker, msg, _ in reversed(memories):
         if speaker in ("user", "persona", "system", "sandbox_automation"):
@@ -1090,7 +1122,8 @@ def generate_persona_response(user_query: str) -> str:
             semantic_context += "--- Relevant Primary Concepts & Detailed Memories ---\n"
             for match in matches:
                 semantic_context += f"- Primary Concept: {match['content']}\n"
-                detail_ids = match["metadata"].get("detail_ids", "")
+                metadata = match.get("metadata") or {}
+                detail_ids = metadata.get("detail_ids", "")
                 if detail_ids:
                     try:
                         from src.memory import get_collection
@@ -1122,7 +1155,7 @@ USER MESSAGE:
 """
 
     try:
-        return query_agent("persona", prompt)
+        return query_agent("persona", prompt, system_override=system_override)
     except Exception as e:
         logger.error(f"Failed to generate persona response: {e}")
         raise
@@ -1235,7 +1268,7 @@ def execute_chat_sandbox_commands(block: str) -> str:
             
     return "\n".join(results)
 
-def generate_persona_response_autonomous(user_msg: str) -> str:
+def generate_persona_response_autonomous(user_msg: str, party_id: Optional[str] = None) -> str:
     """
     Autonomous ReAct loop for Persona chat. Resolves sandbox command blocks
     by executing them, logging to episodic memory, and re-querying the Persona
@@ -1253,7 +1286,10 @@ def generate_persona_response_autonomous(user_msg: str) -> str:
         logger.info(f"Autonomous loop turn {turn}/{max_turns} for query: {current_query[:50]}")
         
         # 1. Generate Persona response
-        response = generate_persona_response(current_query)
+        if party_id is not None:
+            response = generate_persona_response(current_query, party_id=party_id)
+        else:
+            response = generate_persona_response(current_query)
         final_response = response
         
         # 2. Check for proposed code modifications
@@ -1273,13 +1309,15 @@ def generate_persona_response_autonomous(user_msg: str) -> str:
                 log_episodic_memory(
                     speaker="sandbox_automation",
                     message_content=f"Auto-applied modifications to {list(proposed_mods.keys())}. Sandbox tests: {test_status}.\nLogs/Errors:\n{logs}",
-                    context_type="background_thought"
+                    context_type="background_thought",
+                    party_id=party_id
                 )
             except Exception as apply_err:
                 log_episodic_memory(
                     speaker="sandbox_automation",
                     message_content=f"Failed to apply modifications. Is there an active sandbox session? Error: {apply_err}",
-                    context_type="background_thought"
+                    context_type="background_thought",
+                    party_id=party_id
                 )
             
         # 3. Check for JSON dynamic skill execution blocks
@@ -1297,7 +1335,8 @@ def generate_persona_response_autonomous(user_msg: str) -> str:
             log_episodic_memory(
                 speaker="persona",
                 message_content=response,
-                context_type="background_thought"
+                context_type="background_thought",
+                party_id=party_id
             )
 
         if not skill_id and not sandbox_blocks:
@@ -1306,7 +1345,8 @@ def generate_persona_response_autonomous(user_msg: str) -> str:
                 log_episodic_memory(
                     speaker="sandbox_automation",
                     message_content=mock_result,
-                    context_type="background_thought"
+                    context_type="background_thought",
+                    party_id=party_id
                 )
                 current_query = f"The previous tool execution failed with a syntax error:\n{mock_result}\nPlease correct the syntax and try again using the valid JSON format: {{\"skill_id\": \"<skill_id>\", \"arguments\": {{ ... }} }}."
                 continue
@@ -1319,7 +1359,7 @@ def generate_persona_response_autonomous(user_msg: str) -> str:
         if skill_id:
             print(f"\n[Janus Daemon] Dynamic Skill Block Detected: '{skill_id}'")
             try:
-                res = DynamicSkillExecutor.execute(skill_id, arguments, party_id=get_session_party_id())
+                res = DynamicSkillExecutor.execute(skill_id, arguments, party_id=party_id or get_session_party_id())
                 if res["success"]:
                     execution_summary += f"[Dynamic Skill '{skill_id}' Executed Successfully]\nResult: {res['result']}\n\n"
                 else:
@@ -1340,7 +1380,8 @@ def generate_persona_response_autonomous(user_msg: str) -> str:
         log_episodic_memory(
             speaker="sandbox_automation",
             message_content=execution_summary.strip(),
-            context_type="background_thought"
+            context_type="background_thought",
+            party_id=party_id
         )
         
         # 6. Formulate next turn query to continue conversation, highlighting failures if any

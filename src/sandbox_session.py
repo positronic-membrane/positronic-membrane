@@ -8,7 +8,9 @@ import src.config
 from src.database import (
     save_sandbox_session,
     clear_sandbox_session,
-    get_sandbox_session
+    get_sandbox_session,
+    get_connection,
+    log_episodic_memory
 )
 from abc import ABC, abstractmethod
 
@@ -356,6 +358,56 @@ def get_sandbox_modified_files() -> list:
 
     return list(files)
 
+def parse_pytest_results(logs: str) -> dict:
+    """
+    Parses pytest output logs to extract total, passed, failed, and coverage.
+    """
+    passed = 0
+    failed = 0
+    total = 0
+    coverage = None
+
+    summary_lines = []
+    for line in logs.splitlines():
+        if line.startswith("===") and ("passed" in line or "failed" in line or "error" in line):
+            summary_lines.append(line)
+        if "TOTAL " in line:
+            cov_match = re.search(r"TOTAL\s+\d+\s+\d+\s+(\d+)%", line)
+            if cov_match:
+                try:
+                    coverage = float(cov_match.group(1))
+                except ValueError:
+                    pass
+
+    if summary_lines:
+        last_summary = summary_lines[-1]
+        failed_match = re.search(r"(\d+)\s+failed", last_summary)
+        passed_match = re.search(r"(\d+)\s+passed", last_summary)
+        error_match = re.search(r"(\d+)\s+error", last_summary)
+        skipped_match = re.search(r"(\d+)\s+skipped", last_summary)
+        
+        if failed_match:
+            failed += int(failed_match.group(1))
+        if error_match:
+            failed += int(error_match.group(1))
+        if passed_match:
+            passed = int(passed_match.group(1))
+            
+        total = passed + failed
+        if skipped_match:
+            total += int(skipped_match.group(1))
+    else:
+        if "FAILURES" in logs or "ERRORS" in logs:
+            failed = 1
+            total = 1
+
+    return {
+        "passed": passed,
+        "failed": failed,
+        "total": total,
+        "coverage": coverage
+    }
+
 def ship_sandbox_session() -> list:
     """
     Copies all modified/new files in the sandbox back to the active workspace,
@@ -369,10 +421,92 @@ def ship_sandbox_session() -> list:
     sandbox_root = Path(session["active_sandbox_path"])
     branch_name = session["active_sandbox_branch"]
     
+    # 1. Run tests inside the sandbox before finalizing changes
+    if (sandbox_root / "tests").exists():
+        passed, logs = run_sandbox_tests()
+        stats = parse_pytest_results(logs)
+    else:
+        passed = True
+        logs = "No tests directory found, skipping sandbox tests."
+        stats = {"passed": 0, "failed": 0, "total": 0, "coverage": None}
+    
+    # 2. Compare results against the baseline from test_run_baselines
+    conn = get_connection(read_only_constitution=True)
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT total_tests, passed_tests, failed_tests, coverage_percentage 
+        FROM test_run_baselines 
+        ORDER BY id DESC LIMIT 1;
+    """)
+    baseline_row = cursor.fetchone()
+    conn.close()
+    
+    has_regression = False
+    regression_reason = ""
+    
+    if not passed or stats["failed"] > 0:
+        has_regression = True
+        regression_reason = f"Sandbox tests failed (failed={stats['failed']})."
+    elif baseline_row:
+        # Check coverage drop
+        try:
+            if isinstance(baseline_row, dict):
+                baseline_cov = baseline_row.get("coverage_percentage")
+                baseline_failed = baseline_row.get("failed_tests")
+            else:
+                baseline_cov = baseline_row[3]
+                baseline_failed = baseline_row[2]
+        except Exception:
+            baseline_cov = None
+            baseline_failed = 0
+            
+        if stats["coverage"] is not None and baseline_cov is not None:
+            if stats["coverage"] < baseline_cov:
+                has_regression = True
+                regression_reason = f"Coverage dropped from {baseline_cov}% to {stats['coverage']}%."
+                
+    if has_regression:
+        # Abort shipping flow
+        log_episodic_memory(
+            speaker="system",
+            message_content=f"Regression Watcher aborted sandbox ship flow: {regression_reason}\nLogs:\n{logs}",
+            context_type="background_thought",
+            party_id="system"
+        )
+        abort_sandbox_session()
+        raise RuntimeError(f"Regression detected: {regression_reason}. Sandbox session aborted.")
+        
+    # If successful, insert new baseline row in test_run_baselines
+    commit_sha = ""
+    try:
+        res_sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=sandbox_root,
+            capture_output=True,
+            text=True
+        )
+        if res_sha.returncode == 0:
+            commit_sha = res_sha.stdout.strip()
+    except Exception:
+        pass
+
+    conn = get_connection(read_only_constitution=True)
+    try:
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO test_run_baselines (total_tests, passed_tests, failed_tests, coverage_percentage, commit_sha)
+            VALUES (?, ?, ?, ?, ?);
+        """, (stats["total"], stats["passed"], stats["failed"], stats["coverage"], commit_sha))
+        conn.commit()
+    except Exception as e:
+        logger.error(f"Failed to insert test run baseline: {e}")
+    finally:
+        conn.close()
+        
     modified_files = get_sandbox_modified_files()
     copied_files = []
     
-    # 1. Copy files to main workspace
+    # 3. Copy files to main workspace
     for rel_path in modified_files:
         src_file = sandbox_root / rel_path
         dest_file = src.config.ROOT_DIR / rel_path
@@ -382,10 +516,10 @@ def ship_sandbox_session() -> list:
             copied_files.append(rel_path)
             logger.info(f"Shipped file copy: {rel_path}")
             
-    # 2. Cleanup git worktree and branch
+    # 4. Cleanup git worktree and branch
     cleanup_git_sandbox(str(sandbox_root), branch_name)
     
-    # 3. Clear SQLite session
+    # 5. Clear SQLite session
     clear_sandbox_session()
     
     return copied_files

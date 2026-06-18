@@ -529,6 +529,13 @@ async def run_high_layer_loop():
             except Exception as e:
                 logger.error(f"High-level evaluate_goals failed: {e}")
                 
+            # Execute episodic memory cleanup
+            try:
+                res = DynamicSkillExecutor.execute("cleanup_episodic_memory", {}, party_id="system")
+                logger.info(f"High-level cleanup_episodic_memory result: {res}")
+            except Exception as e:
+                logger.error(f"High-level cleanup_episodic_memory failed: {e}")
+                
             # Update last run timestamp in database
             conn = get_connection(read_only_constitution=True)
             try:

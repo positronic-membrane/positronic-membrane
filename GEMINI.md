@@ -210,3 +210,25 @@ This execution-focused roadmap outlines immediate technical milestones, preventi
   * Build the context hydration layer wrapping self traits, episodic memories, and semantic vectors in XML tags, anchored by instructions prioritizing these as absolute reality.
   * Integrate the Smart Loop Governor tracking git diffs, DB writes, and checkpoint completions, halting automated execution if stagnation is detected.
   * Deploy LLM prompt caching (SQLite storage, 1-hour TTL), billing audit controls (daily cost limits yielding to idle daemon status), and dynamic model temperature calibration based on boredom drives.
+
+### Stage 6: External Agent Orchestration [Completed]
+* **Goal:** Enable Janus to orchestrate tasks across external coding agents, auditing and applying their sandboxed changes safely.
+* **Tasks:**
+  * Build the Epoxy dispatch framework (`SafeAgentOrchestration`) supporting stateless API and stateful CLI execution inside isolated sandboxes.
+  * Secure API credentials by implementing symmetric encryption using `cryptography` or custom XOR fallbacks (`src/security.py`).
+  * Implement dispatch task logs (`dispatch_log`) and review/approval flows (`/dispatch review` & `/dispatch coder-cli`).
+
+### Stage 7: Instincts & Self-Replication [Completed]
+* **Goal:** Enable a Janus instance to bootstrap itself from instincts and spawn child instances.
+* **Tasks:**
+  * Seed instincts table with core categories (schema, constitution, tool, boot, meta) to make the instance self-bootstrappable.
+  * Implement `spawn_child` to copy codebase, bootstrap child databases, and launch processes dynamically.
+  * Segregate child schemas in PostgreSQL mode for secure child spawning.
+
+### Stage 8: Pre-Cloud Hardening & Containment [Completed]
+* **Goal:** Safely isolate returning parties, establish regression watcher safeguards during code deployment, and implement episodic memory database hygiene.
+* **Tasks:**
+  * Implement multi-party request resolution hierarchy (`X-API-Key` -> Bearer JWT -> `X-Device-Fingerprint`) with LRU caching.
+  * Isolate return party logs, interaction profiles, and system prompt style guidelines.
+  * Deploy automated sandbox test execution regression checks matching baselines (`test_run_baselines`).
+  * Add automatic daily dynamic skill execution to purge expired episodic memories based on retention configurations (`memory.retention_days`).
