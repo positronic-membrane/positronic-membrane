@@ -1741,7 +1741,7 @@ def init_db():
     cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='parties';")
     if not cursor.fetchone():
         from pathlib import Path
-        migration_path = Path(__file__).resolve().parent / "migrations" / "002_add_multiparty.sql"
+        migration_path = Path(__file__).resolve().parent / "migrations" / "sqlite_migration_multiparty.sql"
         if migration_path.exists():
             with open(migration_path, "r", encoding="utf-8") as f:
                 migration_sql = f.read()

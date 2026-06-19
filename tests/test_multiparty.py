@@ -19,7 +19,7 @@ from src.database import init_db, get_connection
 
 # --- Load Migration SQL ---
 MIGRATION_SQL_PATH = os.path.join(
-    os.path.dirname(__file__), '..', 'src', 'migrations', '002_add_multiparty.sql'
+    os.path.dirname(__file__), '..', 'src', 'migrations', 'sqlite_migration_multiparty.sql'
 )
 
 with open(MIGRATION_SQL_PATH, 'r') as f:

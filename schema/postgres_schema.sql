@@ -1,4 +1,4 @@
--- Migration 003: PostgreSQL Schema Setup & Privileges Configuration
+-- PostgreSQL Schema Setup & Privileges Configuration
 -- Creates all Janus tables in PostgreSQL and configures role-based access control.
 
 CREATE EXTENSION IF NOT EXISTS vector;

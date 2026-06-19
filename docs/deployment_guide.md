@@ -62,7 +62,7 @@ In production cloud environments, Janus scales using a central PostgreSQL databa
 
 ### Database Setup
 1.  Spin up a cloud PostgreSQL instance (e.g. Supabase, AWS RDS, GCP Cloud SQL).
-2.  Run the DDL schema initialization from `src/migrations/003_pg_setup.sql`. This:
+2.  Run the DDL schema initialization from `schema/postgres_schema.sql`. This:
     *   Enables the `vector` extension.
     *   Creates all system tables.
     *   Enables Postgres schema isolation support for self-replication.

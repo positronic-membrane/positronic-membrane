@@ -1,4 +1,4 @@
--- Migration 002: Multi-Party Continuity Schema
+-- SQLite Multi-Party Continuity Schema Migration
 -- Adds tables for parties, sessions, memories, modifications, feedback aggregates,
 -- and extends episodic_memory with party_id and session_id for context isolation.
 
