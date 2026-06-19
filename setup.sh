@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 # ==============================================================================
-# PROJECT JANUS: ONBOARDING & SETUP BOOTSTRAP SCRIPT (v0.1.0)
+# POSITRONIC MEMBRANE: ONBOARDING & SETUP BOOTSTRAP SCRIPT (v0.1.0)
 # ==============================================================================
 
 set -e
@@ -26,10 +26,10 @@ print_cyan "      ___  ___   _   _  _   _  ___ "
 print_cyan "     |_  |/ _ \\ | \\ | || | | |/ __|"
 print_cyan "       | | /_\\ \\|  \\| || |_| |\\__ \\"
 print_cyan "   \\__/ /_/   \\_\\_|\\__| \\___/ |___/"
-print_cyan "   |___/                 Project Janus v0.1.0"
+print_cyan "   |___/                 Positronic Membrane v0.1.0"
 print_cyan "========================================================"
 echo ""
-print_green "Welcome to Project Janus! Evolving autonomous developer swarms."
+print_green "Welcome to Positronic Membrane! Evolving autonomous developer swarms."
 echo ""
 
 # 1. Verify Python Installation
@@ -46,7 +46,7 @@ print_cyan "Checking environment prerequisites..."
 echo "Found Python version: $PYTHON_VERSION"
 
 if [ "$PYTHON_MAJOR" -ne 3 ] || [ "$PYTHON_MINOR" -lt 10 ]; then
-    print_red "Error: Project Janus requires Python 3.10+. Current version: $PYTHON_VERSION"
+    print_red "Error: Positronic Membrane requires Python 3.10+. Current version: $PYTHON_VERSION"
     exit 1
 fi
 
@@ -82,13 +82,13 @@ print_cyan "--------------------------------------------------------"
 print_green "Setup successfully bootstrapped!"
 print_cyan "--------------------------------------------------------"
 echo ""
-print_yellow "To complete alignment, Project Janus needs to run a first-time"
+print_yellow "To complete alignment, Positronic Membrane needs to run a first-time"
 print_yellow "Socratic setup wizard to write your core constitution rules."
 echo ""
 read -p "Would you like to run the setup wizard right now? (y/n): " RUN_WIZARD
 
 if [[ "$RUN_WIZARD" =~ ^[Yy]$ ]]; then
-    print_green "Launching Janus Setup Wizard..."
+    print_green "Launching Positronic Membrane Setup Wizard..."
     python3 -m src.main
 else
     echo ""
@@ -103,12 +103,17 @@ print_green "Getting Started Instructions:"
 print_cyan "--------------------------------------------------------"
 echo "1. Run the local backend web server:"
 echo "   $ source .venv/bin/activate"
-echo "   $ python3 -m src.web_server"
+echo "   $ janus-server"
 echo ""
-echo "2. Run verification unit tests:"
-echo "   $ pytest"
+echo "2. Run the alignment wizard or console chat:"
+echo "   $ source .venv/bin/activate"
+echo "   $ janus-cli"
 echo ""
-echo "3. Run via Docker Compose:"
+echo "3. Run verification unit tests (tip: select specific test files for speed):"
+echo "   $ source .venv/bin/activate"
+echo "   $ pytest tests/test_web_server_fastapi.py"
+echo ""
+echo "4. Run via Docker Compose:"
 echo "   $ docker-compose up --build"
 echo "--------------------------------------------------------"
 echo ""

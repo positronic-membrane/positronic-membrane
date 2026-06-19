@@ -1,9 +1,11 @@
-import pytest
-from pathlib import Path
 from unittest.mock import patch
+
+import pytest
+
 import src.config
 import src.memory
-from src.codebase import parse_python_structure, generate_file_summary, index_codebase, query_codebase_context
+from src.codebase import index_codebase, parse_python_structure, query_codebase_context
+
 
 @pytest.fixture(autouse=True)
 def setup_test_vector_db(tmp_path):
@@ -40,7 +42,7 @@ def init_db():
     pass
 """
     result = parse_python_structure(code)
-    
+
     assert "Module docstring." in result
     assert "class DatabaseManager" in result
     assert "def __init__(self, db_path)" in result
@@ -52,33 +54,33 @@ def test_index_and_query_codebase(tmp_path, mock_embeddings, monkeypatch):
     # Create temp project structure
     project_root = tmp_path / "project"
     project_root.mkdir()
-    
+
     src_dir = project_root / "src"
     src_dir.mkdir()
-    
+
     file_py = src_dir / "utils.py"
     file_py.write_text("def helper_func(): pass")
-    
+
     file_md = project_root / "README.md"
     file_md.write_text("# Readme content text")
-    
+
     # Ignore folder that should be bypassed
     venv_dir = project_root / ".venv"
     venv_dir.mkdir()
     file_ignored = venv_dir / "lib.py"
     file_ignored.write_text("def should_ignore(): pass")
-    
+
     # Configure config and run indexing
     monkeypatch.setattr(src.config, "ROOT_DIR", project_root)
-    
+
     index_codebase(workspace_dir=project_root)
-    
+
     # Query context
     context = query_codebase_context("helper_func", limit=2)
-    
+
     assert "File: src/utils.py" in context
     assert "def helper_func()" in context
-    
+
     # Check that ignored paths were not indexed
     context_ignored = query_codebase_context("should_ignore", limit=5)
     assert "should_ignore" not in context_ignored

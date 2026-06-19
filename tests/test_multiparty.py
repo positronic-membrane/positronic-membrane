@@ -5,17 +5,17 @@ Uses a real SQLite in-memory database initialized with init_db()
 then the migration is applied to catch schema issues automatically.
 """
 
-import pytest
 import json
+import os
 import sqlite3
 import uuid
-import os
 from datetime import datetime
 
+import pytest
+
+from src.database import init_db
 from src.memory_orchestrator import MemoryOrchestrator
 from src.role_bootstrap import RoleBootstrap
-from src.database import init_db, get_connection
-
 
 # --- Load Migration SQL ---
 MIGRATION_SQL_PATH = os.path.join(
@@ -463,8 +463,9 @@ class TestWebServerEndpoints:
     @pytest.fixture
     def api_client(self, db_conn):
         """Create a TestClient connected to the test database."""
-        import src.web_server as ws_module
         from fastapi.testclient import TestClient
+
+        import src.web_server as ws_module
 
         original_get_connection = ws_module.get_connection
         ws_module.get_connection = _shared_state['mock_get_connection']
@@ -596,7 +597,7 @@ class TestHeartbeatMaintenance:
     def test_maintenance_updates_system_party(self, db_conn):
         """Verify run_background_maintenance updates last_seen for system party."""
         from src.daemon import run_background_maintenance
-        
+
         # Ensure system party exists in the test DB
         row = db_conn.execute("SELECT last_seen FROM parties WHERE name = 'system'").fetchone()
         assert row is not None
@@ -604,7 +605,7 @@ class TestHeartbeatMaintenance:
 
         import time
         time.sleep(0.1) # small delay to guarantee timestamp progression
-        
+
         run_background_maintenance()
 
         row_after = db_conn.execute("SELECT last_seen FROM parties WHERE name = 'system'").fetchone()
@@ -613,9 +614,9 @@ class TestHeartbeatMaintenance:
     def test_maintenance_closes_inactive_sessions(self, db_conn, sample_party):
         """Verify sessions inactive for > 30 minutes are closed."""
         from src.daemon import run_background_maintenance
-        
+
         session_id = str(uuid.uuid4())
-        
+
         # Insert a session that has been inactive:
         # Party was last seen 45 minutes ago
         past_time = "2020-01-01T00:00:00"

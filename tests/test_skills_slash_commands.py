@@ -1,10 +1,12 @@
+from unittest.mock import patch
+
 import pytest
-import json
-from unittest.mock import patch, MagicMock
+
 import src.config
 import src.memory
-from src.database import init_db, get_connection
+from src.database import get_connection, init_db
 from src.persona import handle_web_slash_command
+
 
 @pytest.fixture(autouse=True)
 def setup_test_db(tmp_path):
@@ -13,7 +15,7 @@ def setup_test_db(tmp_path):
     orig_db_path = src.config.DB_PATH
     src.config.DB_PATH = str(temp_db)
     init_db()
-    
+
     # Create test parties
     conn = get_connection(read_only_constitution=False)
     conn.execute("INSERT INTO parties (id, name, role, public_key) VALUES ('user1', 'Alice', 'user', 'key1');")
@@ -21,7 +23,7 @@ def setup_test_db(tmp_path):
     conn.execute("INSERT INTO parties (id, name, role, public_key) VALUES ('admin1', 'Charlie', 'admin', 'key3');")
     conn.commit()
     conn.close()
-    
+
     yield
     src.config.DB_PATH = orig_db_path
 

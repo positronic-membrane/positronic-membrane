@@ -1,24 +1,23 @@
-import os
 import json
 import socket
 import threading
-import urllib.request
 import urllib.error
-import pytest
+import urllib.request
 from unittest.mock import MagicMock, patch
-from http.server import ThreadingHTTPServer
+
+import pytest
 
 import src.config
 from src.database import (
-    init_db,
-    get_connection,
+    add_agent_rule,
+    delete_agent_rule,
     get_agent_rules,
     get_all_agent_rules,
-    add_agent_rule,
+    init_db,
     toggle_agent_rule,
-    delete_agent_rule
 )
 from src.llm import query_agent
+
 
 def get_free_port():
     s = socket.socket()
@@ -46,31 +45,32 @@ def web_server():
     temp_db = Path(temp_db_dir) / "test_janus_rules_web.db"
     orig_db_path = src.config.DB_PATH
     src.config.DB_PATH = str(temp_db)
-    
+
     # Disable authentication requirement during legacy API testing
     orig_require = src.config.REQUIRE_AUTH
     src.config.REQUIRE_AUTH = False
-    
+
     init_db()
-    
+
     port = get_free_port()
     import uvicorn
+
     from src.web_server import app
-    
+
     config = uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning")
     server = uvicorn.Server(config)
-    
+
     thread = threading.Thread(target=server.run, daemon=True)
     thread.start()
-    
+
     import time
     time.sleep(0.5)
-    
+
     yield f"http://127.0.0.1:{port}"
-    
+
     server.should_exit = True
     thread.join(timeout=5)
-    
+
     src.config.DB_PATH = orig_db_path
     src.config.REQUIRE_AUTH = orig_require
     import shutil
@@ -93,26 +93,26 @@ def test_agent_rules_crud_helpers(setup_test_db):
     # Create
     add_agent_rule("proposer", "test_rule_1", "This is rule text 1.")
     add_agent_rule("proposer", "test_rule_2", "This is rule text 2.")
-    
+
     rules = get_agent_rules("proposer")
     # 4 seeded proposer rules + 2 added proposer rules = 6
     assert len(rules) == 6
-    
+
     # Read All
     all_rules = get_all_agent_rules()
     # 2 seeded persona + 4 seeded proposer + 2 added proposer = 8
     assert len(all_rules) >= 8
-    
+
     # Toggle (deactivate)
     toggle_agent_rule("test_rule_1", False)
     rules_after_toggle = get_agent_rules("proposer")
     assert len(rules_after_toggle) == 5
-    
+
     # Toggle (reactivate)
     toggle_agent_rule("test_rule_1", True)
     rules_after_reactivate = get_agent_rules("proposer")
     assert len(rules_after_reactivate) == 6
-    
+
     # Delete
     delete_agent_rule("test_rule_1")
     rules_after_delete = get_agent_rules("proposer")
@@ -123,22 +123,22 @@ def test_query_agent_compiles_rules(mock_openai_class, setup_test_db):
     """Verify that query_agent compiles and appends active rules into the system prompt."""
     mock_client = MagicMock()
     mock_openai_class.return_value = mock_client
-    
+
     mock_choice = MagicMock()
     mock_choice.message.content = "Action response"
     mock_client.chat.completions.create.return_value.choices = [mock_choice]
-    
+
     # Add rules for proposer
     add_agent_rule("proposer", "guideline_a", "Guideline A text.")
     add_agent_rule("proposer", "guideline_b", "Guideline B text.")
-    
+
     resp = query_agent("proposer", "Trigger step")
     assert resp == "Action response"
-    
+
     # Verify the parameters passed to chat completions
     mock_client.chat.completions.create.assert_called_once()
     kwargs = mock_client.chat.completions.create.call_args[1]
-    
+
     system_prompt = kwargs["messages"][0]["content"]
     assert "You are the Proposer" in system_prompt
     assert "### Rules & Guidelines:" in system_prompt
@@ -162,7 +162,7 @@ def test_api_get_rules(web_server):
 def test_api_rules_update(web_server):
     """Verify that POST /api/registry/rules/update executes add, toggle, and delete correctly."""
     url = f"{web_server}/api/registry/rules/update"
-    
+
     # 1. Add rule
     payload_add = {
         "action": "add",

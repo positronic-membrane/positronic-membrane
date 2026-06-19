@@ -1,16 +1,14 @@
 import os
 import shutil
-import pytest
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
+
+import pytest
+
 import src.config
 from src.database import init_db, log_episodic_memory
 from src.persona import get_recent_persona_messages, parse_proposed_changes
-from src.self_modification import (
-    stage_and_test_multi,
-    generate_multi_diff,
-    apply_staged_multi
-)
+from src.self_modification import apply_staged_multi, generate_multi_diff, stage_and_test_multi
 
 if os.environ.get("JANUS_TEST_MODE") == "1":
     pytest.skip("Skip self-modification tests during staged validation runs to avoid nested staging loops", allow_module_level=True)
@@ -30,20 +28,20 @@ def setup_test_workspace(tmp_path):
     """Isolate project root config for staging/testing."""
     project_root = tmp_path / "project_root"
     project_root.mkdir()
-    
+
     src_dir = project_root / "src"
     src_dir.mkdir()
-    
+
     tests_dir = project_root / "tests"
     tests_dir.mkdir()
-    
+
     # Create dummy files
     dummy_file = src_dir / "calc.py"
     dummy_file.write_text("def multiply(a, b): return a * b\n")
-    
+
     dummy_test = tests_dir / "test_calc.py"
     dummy_test.write_text("from src.calc import multiply\ndef test_multiply(): assert multiply(2, 3) == 6\n")
-    
+
     orig_root = src.config.ROOT_DIR
     src.config.ROOT_DIR = project_root
     yield project_root
@@ -55,11 +53,11 @@ def test_get_recent_persona_messages():
     log_episodic_memory("persona", "How can I help you?", "user_visible")
     log_episodic_memory("user", "Do something else", "user_visible")
     log_episodic_memory("persona", "I did something else.", "user_visible")
-    
+
     # Test default/1 limit
     msg1 = get_recent_persona_messages(1)
     assert msg1 == "I did something else."
-    
+
     # Test limit=2
     msg2 = get_recent_persona_messages(2)
     assert msg2 == "How can I help you?\n\nI did something else."
@@ -75,10 +73,10 @@ def test_parse_proposed_changes(mock_query, setup_test_workspace):
       }
     }
     """
-    
+
     msg_content = "Please modify src/calc.py to add an add function and update tests/test_calc.py"
     changes = parse_proposed_changes(msg_content)
-    
+
     assert "src/calc.py" in changes
     assert "tests/test_calc.py" in changes
     assert "def add(a, b):" in changes["src/calc.py"]
@@ -92,7 +90,7 @@ def test_generate_multi_diff(setup_test_workspace):
         "src/new_file.py": "def hello(): print('hello')\n"
     }
     diff = generate_multi_diff(modifications)
-    
+
     assert "a/src/calc.py" in diff
     assert "b/src/calc.py" in diff
     assert "+# added comment" in diff
@@ -106,19 +104,19 @@ def test_stage_and_test_multi(setup_test_workspace):
     modifications = {
         "src/calc.py": "def multiply(a, b): return a * b + 10\n", # will break existing test
     }
-    
+
     passed, logs, temp_dir = stage_and_test_multi(modifications)
     assert not passed
     assert temp_dir is not None
     assert Path(temp_dir).exists()
     shutil.rmtree(temp_dir)
-    
+
     # Write a passing change
     modifications = {
         "src/calc.py": "def multiply(a, b): return a * b\ndef add(a, b): return a + b\n",
         "tests/test_calc.py": "from src.calc import multiply, add\ndef test_multiply(): assert multiply(2, 3) == 6\ndef test_add(): assert add(2, 3) == 5\n"
     }
-    
+
     passed, logs, temp_dir = stage_and_test_multi(modifications)
     assert passed
     assert Path(temp_dir).exists()
@@ -129,18 +127,18 @@ def test_apply_staged_multi(setup_test_workspace):
     # Generate temp folder with changes manually
     staging_dir = setup_test_workspace / "dummy_staging"
     staging_dir.mkdir()
-    
+
     staged_src = staging_dir / "src"
     staged_src.mkdir()
     staged_file = staged_src / "calc.py"
     staged_file.write_text("def multiply(a, b): return a * b * 10\n")
-    
+
     modifications = {
         "src/calc.py": "def multiply(a, b): return a * b * 10\n"
     }
-    
+
     apply_staged_multi(str(staging_dir), modifications)
-    
+
     # Verify change was written back
     calc_path = setup_test_workspace / "src" / "calc.py"
     assert calc_path.read_text() == "def multiply(a, b): return a * b * 10\n"
@@ -185,7 +183,7 @@ async def test_staging_caching_and_self_healing(
     mock_parse_proposed_changes.return_value = {
         "src/calc.py": "def add(a, b): return a + b\n"
     }
-    
+
     # query_agent mock behavior:
     # First, it gets called with "critic" to audit src/calc.py (approved).
     # Then proposer for self-healing tests/test_calc.py.
@@ -197,7 +195,7 @@ async def test_staging_caching_and_self_healing(
             return "def test_add(): assert add(2, 3) == 5\n"
         return "mock response"
     mock_query_agent.side_effect = mock_query_agent_side_effect
-    
+
     # get_input mock behavior:
     # 1. "User >> ": "/stage" -> starts staging
     # 2. "Selection >> ": "y" -> stages and runs tests (which will fail)
@@ -218,7 +216,7 @@ async def test_staging_caching_and_self_healing(
             return inputs.pop(0)
         return "/exit"
     mock_get_input.side_effect = mock_get_input_side_effect
-    
+
     # stage_and_test_multi mock behavior:
     # First call: fails with tests/test_calc.py failing
     # Second call: passes
@@ -230,25 +228,25 @@ async def test_staging_caching_and_self_healing(
             return False, "tests/test_calc.py::test_add FAILED", "dummy_temp_dir"
         return True, "All passed", "dummy_temp_dir"
     mock_stage_and_test_multi.side_effect = mock_stage_and_test_side_effect
-    
+
     mock_generate_multi_diff.return_value = "dummy diff"
-    
+
     # Write a dummy test file in workspace so self-healing can read it
     test_file_path = setup_test_workspace / "tests" / "test_calc.py"
     test_file_path.write_text("def test_add(): assert False\n")
-    
+
     # Run the chat loop
     from src.persona import run_persona_chat
     await run_persona_chat()
-    
+
     # Assertions
     # 1. stage_and_test_multi was called twice
     assert mock_stage_and_test_multi.call_count == 2
-    
+
     # 2. query_agent critic was called for src/calc.py and tests/test_calc.py,
     # but NOT twice for src/calc.py (due to caching)
     critic_calls = [
-        call for call in mock_query_agent.call_args_list 
+        call for call in mock_query_agent.call_args_list
         if call[0][0] == "critic"
     ]
     # Total critic calls should be 2:
@@ -257,7 +255,7 @@ async def test_staging_caching_and_self_healing(
     assert len(critic_calls) == 2
     assert "src/calc.py" in critic_calls[0][0][1]
     assert "tests/test_calc.py" in critic_calls[1][0][1]
-    
+
     # 3. self-healed file was added to proposed_mods
     # The last call to stage_and_test_multi should have both src/calc.py and tests/test_calc.py
     last_mods_tested = mock_stage_and_test_multi.call_args_list[-1][0][0]
@@ -281,7 +279,7 @@ async def test_stage_with_limit_argument(
     """Verify that /stage with a limit argument calls get_recent_persona_messages with that limit."""
     mock_get_recent_persona_messages.return_value = "Modify src/calc.py"
     mock_parse_proposed_changes.return_value = {}  # Trigger early abort
-    
+
     # Input is /stage 3, then exit
     inputs = ["/stage 3", "/exit"]
     def mock_get_input_side_effect(prompt):
@@ -289,10 +287,10 @@ async def test_stage_with_limit_argument(
             return inputs.pop(0)
         return "/exit"
     mock_get_input.side_effect = mock_get_input_side_effect
-    
+
     from src.persona import run_persona_chat
     await run_persona_chat()
-    
+
     mock_get_recent_persona_messages.assert_called_with(3)
 
 
@@ -311,9 +309,9 @@ async def test_stage_with_invalid_limit_argument(
             return inputs.pop(0)
         return "/exit"
     mock_get_input.side_effect = mock_get_input_side_effect
-    
+
     from src.persona import run_persona_chat
     await run_persona_chat()
-    
+
     mock_get_recent_persona_messages.assert_not_called()
 

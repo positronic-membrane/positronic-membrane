@@ -1,11 +1,11 @@
-# Project Janus: User Guide
+# Positronic Membrane: User Guide
 
-Welcome to Project Janus. This guide outlines how to configure, run, and interact with your autonomous agent swarm.
+Welcome to Positronic Membrane. This guide outlines how to configure, run, and interact with your autonomous agent swarm.
 
 ---
 
-## 1. What is Project Janus?
-Janus is a self-modifying, multi-agent developer swarm focused on continuous iteration. It speaks with a single-voice interface ("Journey") while managing specialized background worker roles behind the scenes:
+## 1. What is Positronic Membrane?
+Positronic Membrane is a self-modifying, multi-agent developer swarm focused on continuous iteration. It speaks with a single-voice interface ("Journey") while managing specialized background worker roles behind the scenes:
 *   **Proposer:** Identifies goals and drafts code changes or workspace queries.
 *   **Critic:** Audits all proposals against security constraints and the core constitution.
 *   **Explorer:** Crawls the web and researches unfamiliar symbols.
@@ -16,13 +16,13 @@ Janus is a self-modifying, multi-agent developer swarm focused on continuous ite
 ## 2. Core Concepts
 
 ### A. The Heartbeat Daemon (`src/daemon.py`)
-Janus relies on an asynchronous heartbeat loop:
-1.  **Idle State ($T_{idle}$):** When no user activity is detected, Janus conserves resources by running once every $T_{idle}$ minutes (default: 15 minutes).
-2.  **Boredom Counter ($B$):** While idle, a boredom vector increments. When boredom exceeds `BOREDOM_THRESHOLD`, Janus triggers an autonomous reflection cycle.
-3.  **Active State ($T_{active}$):** When you are editing files, Janus switches to active mode, pulsing every 1 minute to check for updates or linter errors.
+The system relies on an asynchronous heartbeat loop:
+1.  **Idle State ($T_{idle}$):** When no user activity is detected, the daemon conserves resources by running once every $T_{idle}$ minutes (default: 15 minutes).
+2.  **Boredom Counter ($B$):** While idle, a boredom vector increments. When boredom exceeds `BOREDOM_THRESHOLD`, a reflection cycle is triggered.
+3.  **Active State ($T_{active}$):** When you are editing files, the daemon switches to active mode, pulsing every 1 minute to check for updates or linter errors.
 
 ### B. The Socratic Alignment Constitution
-The foundation of Janus's safety is the `core_constitution` table.
+The foundation of Positronic Membrane's safety is the `core_constitution` table.
 *   The system uses an **alignment wizard** (`src/setup_wizard.py`) to interview the user upon first boot.
 *   Your rules are locked as read-only. The Critic agent inspects every code proposal and blocks executions if they violate your constitution.
 
@@ -46,17 +46,22 @@ VECTOR_DB_PATH=/path/to/chromadb
 # executors
 SANDBOX_PROVIDER=local             # "local", "docker", or "e2b"
 SPAWN_PROVIDER=local               # "local", "docker", or "ecs"
+
+# Offline Mock Engine
+LLM_MOCK_MODE=True                 # Set to True to run offline without hitting remote APIs
 ```
 
 ### Initial Run
-Run the setup wizard to configure prompts and write your constitution rules:
+Run the setup wizard/interactive CLI:
 ```bash
-python -m src.main
+# Launches alignment wizard or runs interactive console chat
+janus-cli
 ```
 
 Start the FastAPI API backend:
 ```bash
-python -m src.web_server
+# Starts the FastAPI/Uvicorn server on port 5005
+janus-server
 ```
 
 ---
@@ -76,12 +81,12 @@ When using the CLI (`python -m src.main --cli`), the chat console supports inter
 *   **`/sandbox abort`:** Destroys sandbox branch and discards files.
 
 ### C. Direct Code Modification
-*   **`/modify <path> | <instructions>`:** Instructs Janus to edit a specific file, automatically running tests and diff confirmation before shipping.
+*   **`/modify <path> | <instructions>`:** Instructs the swarm to edit a specific file, automatically running tests and diff confirmation before shipping.
 
 ---
 
 ## 5. Dynamic Skills Management
-Janus stores its own executable capabilities inside the database (`agent_skills` table). This allows agents to write, test, and install **new skills** at runtime.
+Positronic Membrane stores its own executable capabilities inside the database (`agent_skills` table). This allows agents to write, test, and install **new skills** at runtime.
 *   A skill consists of:
     *   **schema:** JSON parameter layout validation.
     *   **code_blob:** Executable Python code containing the implementation.

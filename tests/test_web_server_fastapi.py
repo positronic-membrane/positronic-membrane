@@ -1,14 +1,13 @@
+from datetime import UTC, datetime
+
 import pytest
-import json
-import uuid
-import sqlite3
-from datetime import datetime, UTC
 from fastapi.testclient import TestClient
 
 import src.config
-from src.database import init_db, get_connection
-from src.web_server import app
 from src.auth import create_access_token
+from src.database import get_connection, init_db
+from src.web_server import app
+
 
 @pytest.fixture(autouse=True)
 def setup_test_db(tmp_path):
@@ -16,9 +15,9 @@ def setup_test_db(tmp_path):
     temp_db = tmp_path / "test_janus_fastapi.db"
     orig_db_path = src.config.DB_PATH
     src.config.DB_PATH = str(temp_db)
-    
+
     init_db()
-    
+
     # Insert test users with enrollment keys (public_key)
     conn = get_connection()
     now = datetime.now(UTC).isoformat()
@@ -34,7 +33,7 @@ def setup_test_db(tmp_path):
     )
     conn.commit()
     conn.close()
-    
+
     yield
     src.config.DB_PATH = orig_db_path
 
@@ -45,11 +44,11 @@ def test_token_generation():
     # Invalid ID
     resp = client.post("/api/v1/auth/token", json={"username_or_id": "invalid-uuid", "enrollment_key": "user-key"})
     assert resp.status_code == 401
-    
+
     # Valid User ID but wrong key
     resp = client.post("/api/v1/auth/token", json={"username_or_id": "user-uuid", "enrollment_key": "wrong-key"})
     assert resp.status_code == 401
-    
+
     # Valid User ID and key
     resp = client.post("/api/v1/auth/token", json={"username_or_id": "user-uuid", "enrollment_key": "user-key"})
     assert resp.status_code == 200
@@ -65,7 +64,7 @@ def test_token_generation():
 def test_jwt_authentication_protection():
     """Verify that multi-party v1 routes enforce authentication."""
     client = TestClient(app)
-    
+
     # Verify that with REQUIRE_AUTH=True (default), accessing without headers is rejected
     import src.config
     orig_require = src.config.REQUIRE_AUTH
@@ -73,14 +72,14 @@ def test_jwt_authentication_protection():
         src.config.REQUIRE_AUTH = True
         resp = client.get("/api/v1/party/admin-uuid")
         assert resp.status_code == 401
-        
+
         # Access with invalid JWT -> fails
         resp = client.get(
             "/api/v1/party/admin-uuid",
             headers={"Authorization": "Bearer invalidtoken"}
         )
         assert resp.status_code == 401
-        
+
         # Access with valid admin JWT -> succeeds
         admin_token = create_access_token("admin-uuid", "admin")
         resp = client.get(
@@ -97,7 +96,7 @@ def test_jwt_authentication_protection():
             headers={"Authorization": f"Bearer {token}"}
         )
         assert resp.status_code == 403
-        
+
         # POST /api/v1/party/register with admin JWT -> succeeds
         resp = client.post(
             "/api/v1/party/register",
@@ -120,13 +119,13 @@ def test_local_admin_fallback():
         src.config.REQUIRE_AUTH = True
         resp = client.get("/api/history")
         assert resp.status_code == 401
-        
+
         # Under REQUIRE_AUTH = False, legacy local admin fallback allows access without headers
         src.config.REQUIRE_AUTH = False
         resp = client.get("/api/history")
         assert resp.status_code == 200
         assert isinstance(resp.json(), list)
-        
+
         # GET /api/deliberations
         resp = client.get("/api/deliberations")
         assert resp.status_code == 200
@@ -138,7 +137,7 @@ def test_local_admin_fallback():
 def test_websocket_deliberations():
     """Verify that /ws/deliberations WebSocket connects and polls internal deliberations."""
     client = TestClient(app)
-    
+
     # Write a dummy deliberation to verify polling picks it up
     conn = get_connection()
     conn.execute(
@@ -148,7 +147,7 @@ def test_websocket_deliberations():
     )
     conn.commit()
     conn.close()
-    
+
     import src.config
     orig_require = src.config.REQUIRE_AUTH
     try:
@@ -157,7 +156,7 @@ def test_websocket_deliberations():
         with pytest.raises(Exception):
             with client.websocket_connect("/ws/deliberations") as ws:
                 pass
-                
+
         # If REQUIRE_AUTH=True, connecting with a valid token succeeds
         token = create_access_token("user-uuid", "user")
         with client.websocket_connect(f"/ws/deliberations?token={token}") as ws:
@@ -170,11 +169,11 @@ def test_websocket_deliberations():
 def test_websocket_chat():
     """Verify WebSocket chat endpoint thinking and response cycles."""
     client = TestClient(app)
-    
+
     from unittest.mock import patch
     with patch("src.web_server.generate_persona_response_autonomous") as mock_persona:
         mock_persona.return_value = "Response from agent!"
-        
+
         import src.config
         orig_require = src.config.REQUIRE_AUTH
         try:
@@ -183,16 +182,16 @@ def test_websocket_chat():
             with pytest.raises(Exception):
                 with client.websocket_connect("/ws/chat") as ws:
                     pass
-            
+
             # If REQUIRE_AUTH=True, connecting with a valid token succeeds
             token = create_access_token("user-uuid", "user")
             with client.websocket_connect(f"/ws/chat?token={token}") as ws:
                 ws.send_json({"message": "Hello Janus"})
-                
+
                 # First should be thinking event
                 evt1 = ws.receive_json()
                 assert evt1["event"] == "thinking"
-                
+
                 # Second should be response event
                 evt2 = ws.receive_json()
                 assert evt2["event"] == "response"
@@ -205,24 +204,24 @@ def test_rate_limiting():
     """Verify that hitting the API endpoints in rapid succession triggers a 429 Too Many Requests response."""
     client = TestClient(app)
     import src.config
-    
+
     # Save config and override
     orig_requests = src.config.RATE_LIMIT_REQUESTS
     orig_window = src.config.RATE_LIMIT_WINDOW
-    
+
     src.config.RATE_LIMIT_REQUESTS = 3
     src.config.RATE_LIMIT_WINDOW = 2
-    
+
     # Clear history for this test IP to isolate it
     from src.web_server import ip_request_history
     ip_request_history.clear()
-    
+
     try:
         # First 3 requests to a public API endpoint succeed
         for _ in range(3):
             resp = client.get("/api/v1/bootstrap/status")
             assert resp.status_code == 200
-            
+
         # 4th request triggers 429
         resp = client.get("/api/v1/bootstrap/status")
         assert resp.status_code == 429
@@ -236,7 +235,7 @@ def test_header_resolution_isolation():
     # Enable Auth for test
     import src.config
     from src.database import get_connection
-    
+
     original_require_auth = src.config.REQUIRE_AUTH
     src.config.REQUIRE_AUTH = True
 
@@ -292,6 +291,7 @@ def test_header_resolution_isolation():
         # Key 'api_key_a' (party_a, user) + Fingerprint 'fingerprint_c' (party_c, user)
         # If API Key wins, we authenticate as party_a
         from unittest.mock import MagicMock
+
         import src.web_server as ws_module
         req_mock = MagicMock()
         req_mock.headers = {

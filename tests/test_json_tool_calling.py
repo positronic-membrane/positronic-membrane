@@ -1,10 +1,12 @@
+from unittest.mock import MagicMock, patch
+
 import pytest
-import json
-from unittest.mock import patch, MagicMock
+
 import src.config
 import src.memory
-from src.database import init_db, get_connection
-from src.daemon import parse_action, run_interval_skills, _last_executed_intervals
+from src.daemon import _last_executed_intervals, parse_action, run_interval_skills
+from src.database import get_connection, init_db
+
 
 @pytest.fixture(autouse=True)
 def setup_test_db(tmp_path):

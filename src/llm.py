@@ -63,9 +63,23 @@ class BillingViolationError(Exception):
 
 def query_agent(agent_id: str, prompt_content: str, system_override: str = None) -> str:
     """
-    Queries an agent dynamically from the database registry and calls
+    Queries agent registry in SQLite to load system prompt instructions, resolves 
+    the targeted LLM model, retrieves active rules and skills, and communicates with 
     the OpenAI-compatible LLM endpoint.
     """
+    if getattr(src.config, "LLM_MOCK_MODE", False):
+        logger.info(f"[LLM Mock Mode] Intercepted query for agent '{agent_id}'")
+        if agent_id == "critic":
+            return "critic_decision: 1\nutility_score: 0.95\njustification: Audited modifications are safe, conform to the core constitution, and do not introduce self-modification violations."
+        elif agent_id == "proposer":
+            if "modify" in prompt_content.lower() or "write" in prompt_content.lower() or "change" in prompt_content.lower():
+                return "PROPOSED_MODIFICATIONS:\n```python\n# Mock modified code\n```"
+            return "PROPOSED_ACTION: None necessary."
+        elif agent_id == "explorer":
+            return "RESEARCH_RESULTS:\nFound mock results matching search criteria."
+        else:
+            return "I am operating in offline mock mode. How can I assist you with the Positronic Membrane codebase?"
+
     # 1. Billing Limit Check
     daily_budget = 5.00
     accumulated_cost = 0.0

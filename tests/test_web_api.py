@@ -1,14 +1,15 @@
 import json
 import socket
 import threading
-import urllib.request
 import urllib.error
+import urllib.request
+from unittest.mock import patch
+
 import pytest
-from unittest.mock import patch, MagicMock
-from http.server import ThreadingHTTPServer
 
 import src.config
 from src.database import init_db
+
 
 def get_free_port():
     s = socket.socket()
@@ -26,31 +27,32 @@ def web_server():
     temp_db = Path(temp_db_dir) / "test_janus_web.db"
     orig_db_path = src.config.DB_PATH
     src.config.DB_PATH = str(temp_db)
-    
+
     # Disable authentication requirement during legacy API testing
     orig_require = src.config.REQUIRE_AUTH
     src.config.REQUIRE_AUTH = False
-    
+
     init_db()
-    
+
     port = get_free_port()
     import uvicorn
+
     from src.web_server import app
-    
+
     config = uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning")
     server = uvicorn.Server(config)
-    
+
     thread = threading.Thread(target=server.run, daemon=True)
     thread.start()
-    
+
     import time
     time.sleep(0.5)
-    
+
     yield f"http://127.0.0.1:{port}"
-    
+
     server.should_exit = True
     thread.join(timeout=5)
-    
+
     src.config.DB_PATH = orig_db_path
     src.config.REQUIRE_AUTH = orig_require
     import shutil
@@ -82,7 +84,7 @@ def test_sandbox_status(mock_mod, mock_sb, web_server):
         "active_sandbox_test_logs": "all passed"
     }
     mock_mod.return_value = ["src/config.py"]
-    
+
     url = f"{web_server}/api/sandbox/status"
     req = urllib.request.Request(url, method="GET")
     with urllib.request.urlopen(req) as resp:
@@ -100,7 +102,7 @@ def test_stage_status(mock_pending, web_server):
         "pending_mod_diff": "diff goes here",
         "pending_mod_status": "passed"
     }
-    
+
     url = f"{web_server}/api/stage/status"
     req = urllib.request.Request(url, method="GET")
     with urllib.request.urlopen(req) as resp:
@@ -177,7 +179,7 @@ def test_post_chat_slash_command(mock_slash, web_server):
     async def mock_async_resp(user_msg):
         return "Command completed successfully"
     mock_slash.side_effect = mock_async_resp
-    
+
     url = f"{web_server}/api/chat"
     payload = json.dumps({"message": "/sandbox status"}).encode("utf-8")
     req = urllib.request.Request(url, data=payload, method="POST", headers={"Content-Type": "application/json"})

@@ -1,6 +1,6 @@
-# Project Janus: Cloud & Local Deployment Guide
+# Positronic Membrane: Cloud & Local Deployment Guide
 
-This guide outlines deployment steps to transition Project Janus from a local experiment to a production-grade, containerized cloud swarm.
+This guide outlines deployment steps to transition Positronic Membrane from a local experiment to a production-grade, containerized cloud swarm.
 
 ---
 
@@ -11,14 +11,18 @@ This guide outlines deployment steps to transition Project Janus from a local ex
 *   Local Ollama installation or access keys to OpenRouter / OpenAI compatible endpoint.
 
 ### Steps
-1.  Clone the repository and install requirements:
+1.  Clone the repository and run the setup bootstrap script:
     ```bash
-    pip install -r requirements.txt
+    ./setup.sh
     ```
 2.  Define parameters in your `.env` file (see `.env.example`).
-3.  Boot the application locally:
+3.  Boot the application locally using script entrypoints:
     ```bash
-    python -m src.main
+    # Runs the Socratic setup alignment wizard or interactive console
+    janus-cli
+
+    # Runs the FastAPI API server
+    janus-server
     ```
 
 ---
@@ -51,7 +55,7 @@ COPY tests/ ./tests
 EXPOSE 8000
 
 # Entrypoint script to start Web Server and background Swarm Daemon
-CMD ["sh", "-c", "python -m src.web_server & python -m src.daemon"]
+CMD ["sh", "-c", "janus-server & python -m src.daemon"]
 ```
 
 ---
@@ -76,6 +80,27 @@ In production cloud environments, Janus scales using a central PostgreSQL databa
 The database schema configures two security roles to enforce safety guardrails:
 *   `janus_admin`: Full database owner, used for schema creation, table migrations, and administrative setup.
 *   `janus_agent`: Restrictive runtime agent role. The cursor middleware connects with this role for regular operations. It revokes write permissions (INSERT/UPDATE/DELETE) on the `core_constitution` table, ensuring rules cannot be modified at the database level.
+
+### Database Migrations with Alembic
+Positronic Membrane utilizes **Alembic** to manage database schema evolutions. SQLite databases are automatically initialized using zero-config SQL bootstrapping, but migrations should be run to synchronize updates:
+
+#### 1. Baseline Initialization (Existing Databases)
+If you are deploying updates to an already existing database, stamp the baseline first:
+```bash
+.venv/bin/alembic stamp head
+```
+
+#### 2. Running Pending Migrations
+To bring your database schema up to date with the latest code release:
+```bash
+.venv/bin/alembic upgrade head
+```
+
+#### 3. Generating a New Schema Migration
+If you modify database columns or add tables in python, generate a new migration file:
+```bash
+.venv/bin/alembic revision --autogenerate -m "describe your changes"
+```
 
 ---
 

@@ -4,24 +4,22 @@ Validates the new gitignored drafts folder workflow, DB sync skills, and persona
 
 Mocking respects the GEMINI.md rule: mock in the module where imported/used.
 """
-import pytest
-import json
-import os
 from unittest.mock import patch
+
+import pytest
+
 import src.config
 import src.memory
 from src.database import (
-    init_db,
-    get_connection,
     create_document,
-    get_document,
-    update_document,
     delete_document,
-    list_documents,
+    get_connection,
+    get_document,
+    init_db,
+    update_document,
 )
-from src.skills import DynamicSkillExecutor, SafeDocuments
 from src.persona import handle_docs_command
-
+from src.skills import DynamicSkillExecutor, SafeDocuments
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -52,7 +50,7 @@ def mock_workspace_root(tmp_path):
     """Isolate workspace filesystem for SafeFS and config."""
     # Create the docs/drafts folder inside the temp path
     (tmp_path / "docs" / "drafts").mkdir(parents=True, exist_ok=True)
-    
+
     # Mock get_effective_workspace_root in config
     with patch("src.config.get_effective_workspace_root", return_value=tmp_path):
         yield
@@ -76,11 +74,11 @@ class TestSafeDocumentsWrapper:
         sd = SafeDocuments()
         sd.upsert("Doc A", "Content A", ["finance"])
         sd.upsert("Doc B", "Content B", ["personal"])
-        
+
         all_docs = sd.list()
         # Cleaned DB might have other seeded docs, so >= 2
         assert len(all_docs) >= 2
-        
+
         filtered = sd.list(tag_filter="finance")
         assert len(filtered) == 1
         assert filtered[0]["title"] == "Doc A"
@@ -100,7 +98,7 @@ class TestDatabaseHelpers:
     def test_create_and_get_document(self):
         doc_id = create_document("Helper Doc", "Test content", tags=["test"])
         assert isinstance(doc_id, int)
-        
+
         doc = get_document("Helper Doc")
         assert doc is not None
         assert doc["title"] == "Helper Doc"
@@ -296,7 +294,7 @@ class TestPersonaDocsCommands:
     def test_docs_create_command(self, mock_party):
         res = handle_docs_command("/docs create Setup Instructions")
         assert "saved to" in res.lower()
-        
+
         # Verify draft file was written
         res_read = DynamicSkillExecutor.execute(
             "read_draft_file",
@@ -328,7 +326,7 @@ class TestPersonaDocsCommands:
     @patch("src.persona.get_session_party_id", return_value="contrib1")
     def test_docs_get_command(self, mock_party):
         create_document("Archived Spec", "Database Content")
-        
+
         # Checkout DB document to local draft file
         res = handle_docs_command("/docs get Archived Spec")
         assert "successfully checked out" in res.lower()

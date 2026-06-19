@@ -1,16 +1,10 @@
-import os
-import shutil
-import subprocess
-import pytest
 from pathlib import Path
-from unittest.mock import patch, MagicMock
-import src.config
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+from src.sandbox_session import commit_sandbox_state, discard_sandbox_changes, rollback_sandbox_last_commit
 from src.self_modification import apply_search_replace_blocks, summarize_pytest_logs
-from src.sandbox_session import (
-    commit_sandbox_state,
-    rollback_sandbox_last_commit,
-    discard_sandbox_changes
-)
 
 # -----------------
 # 1. Search-and-Replace Tests
@@ -106,7 +100,7 @@ def test_commit_sandbox_state_no_changes(mock_run, mock_get_active):
     mock_res = MagicMock()
     mock_res.stdout = ""
     mock_run.return_value = mock_res
-    
+
     success = commit_sandbox_state("test commit")
     assert success is True
     # Git add/commit should not have run since status is clean
@@ -124,15 +118,15 @@ def test_commit_sandbox_state_with_changes(mock_run, mock_get_active):
     # 3. git commit -> success
     mock_status = MagicMock()
     mock_status.stdout = " M src/utils.py"
-    
+
     mock_add = MagicMock()
     mock_add.returncode = 0
-    
+
     mock_commit = MagicMock()
     mock_commit.returncode = 0
-    
+
     mock_run.side_effect = [mock_status, mock_add, mock_commit]
-    
+
     success = commit_sandbox_state("Passing changes committed")
     assert success is True
     assert mock_run.call_count == 3
@@ -150,7 +144,7 @@ def test_rollback_sandbox_last_commit(mock_run, mock_get_active):
     mock_res = MagicMock()
     mock_res.returncode = 0
     mock_run.return_value = mock_res
-    
+
     success = rollback_sandbox_last_commit()
     assert success is True
     mock_run.assert_called_once_with(
@@ -170,7 +164,7 @@ def test_discard_sandbox_changes(mock_run, mock_get_active):
     mock_res = MagicMock()
     mock_res.returncode = 0
     mock_run.return_value = mock_res
-    
+
     success = discard_sandbox_changes()
     assert success is True
     assert mock_run.call_count == 2

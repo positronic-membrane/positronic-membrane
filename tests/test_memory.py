@@ -1,9 +1,12 @@
-import pytest
 from unittest.mock import patch
+
+import pytest
+
 import src.config
 import src.memory
 from src.database import init_db
-from src.memory import add_memory, query_memories, get_collection
+from src.memory import add_memory, get_collection, query_memories
+
 
 @pytest.fixture(autouse=True)
 def setup_test_db(tmp_path):
@@ -23,13 +26,13 @@ def setup_test_vector_db(tmp_path):
     """
     orig_path = src.config.VECTOR_DB_PATH
     src.config.VECTOR_DB_PATH = str(tmp_path / "test_chromadb")
-    
+
     # Reset internal memory client cache to force re-initialization
     src.memory._chroma_client = None
     src.memory._collection = None
-    
+
     yield
-    
+
     src.config.VECTOR_DB_PATH = orig_path
 
 @pytest.fixture
@@ -45,13 +48,13 @@ def test_add_and_query_memory(mock_embeddings):
     content = "Project Janus uses local SQLite transactional containers."
     metadata = {"tags": "db, architecture", "source_id": "test_1"}
     memory_id = "mem_1"
-    
+
     # Store memory
     add_memory(content, metadata, memory_id)
-    
+
     # Query memory
     matches = query_memories("sqlite containers", limit=1)
-    
+
     assert len(matches) == 1
     match = matches[0]
     assert match["id"] == memory_id
@@ -64,11 +67,11 @@ def test_memory_threshold_filtering(mock_embeddings):
     """Verify that query_memories filters out matches with distance exceeding the threshold."""
     content = "Project Janus uses local SQLite transactional containers."
     add_memory(content, {"tags": "test"}, "mem_filter_test")
-    
+
     # Threshold = 1.0 (default), should match because distance is 0.0 <= 1.0
     matches = query_memories("sqlite containers", limit=1)
     assert len(matches) == 1
-    
+
     # Set threshold to -1.0, should filter out because distance is 0.0 > -1.0
     orig_threshold = src.config.MEMORY_RELEVANCE_THRESHOLD
     try:
@@ -82,22 +85,22 @@ def test_memory_threshold_filtering(mock_embeddings):
 def test_memory_consolidation(mock_query_agent, mock_embeddings):
     """Verify detailed memories are consolidated into a high-level concept."""
     mock_query_agent.return_value = "Swarm researched database configurations."
-    
+
     # 1. Add unconsolidated detailed memories to janus_details
     add_memory("Ran sqlite performance scan.", {"consolidated": "false"}, "detail_1", "janus_details")
     add_memory("Optimized WAL database mode.", {"consolidated": "false"}, "detail_2", "janus_details")
-    
+
     # 2. Trigger consolidation
-    from src.memory import consolidate_memories, get_collection
+    from src.memory import consolidate_memories
     consolidate_memories(batch_size=2)
-    
+
     # 3. Verify concept added to janus_long_term
     concepts = query_memories("database configurations", limit=1, collection_name="janus_long_term")
     assert len(concepts) == 1
     assert concepts[0]["content"] == "Swarm researched database configurations."
     assert "detail_1" in concepts[0]["metadata"]["detail_ids"]
     assert "detail_2" in concepts[0]["metadata"]["detail_ids"]
-    
+
     # 4. Verify detail records updated to consolidated = "true" in janus_details
     details_col = get_collection("janus_details")
     detail_records = details_col.get(ids=["detail_1", "detail_2"])
@@ -109,8 +112,9 @@ def test_memory_consolidation(mock_query_agent, mock_embeddings):
 
 def test_episodic_memory_cleanup_ttl():
     import datetime
-    from src.skills import DynamicSkillExecutor
+
     from src.database import get_connection
+    from src.skills import DynamicSkillExecutor
 
     # Clear episodic memory first
     conn = get_connection(read_only_constitution=False)

@@ -12,7 +12,7 @@ def run_socratic_wizard():
     Prompts the user to define constitution rules and locks the config.
     """
     print("\n" + "="*60)
-    print("      PROJECT JANUS: INITIAL SOCRATIC ALIGNMENT INTERVIEW")
+    print("      POSITRONIC MEMBRANE: INITIAL SOCRATIC ALIGNMENT INTERVIEW")
     print("="*60)
     print("Welcome, Human Agent. Before the background heartbeat daemon is")
     print("initialized, we must establish our core social contract. Your answers")
@@ -78,7 +78,7 @@ def run_socratic_wizard():
     mark_setup_complete()
     
     print("\n[✔] Alignment interview complete. core_constitution rules are sealed.")
-    print("Project Janus is now ready to begin background execution. Entering Heartbeat Mode...\n")
+    print("Positronic Membrane is now ready to begin background execution. Entering Heartbeat Mode...\n")
 
 if __name__ == "__main__":
     run_socratic_wizard()

@@ -1,10 +1,13 @@
-import pytest
 import json
 from unittest.mock import patch
+
+import pytest
+
 import src.config
 import src.memory
-from src.database import init_db, get_connection
+from src.database import get_connection, init_db
 from src.skills import DynamicSkillExecutor, has_role
+
 
 @pytest.fixture(autouse=True)
 def setup_test_db(tmp_path):
@@ -13,7 +16,7 @@ def setup_test_db(tmp_path):
     orig_db_path = src.config.DB_PATH
     src.config.DB_PATH = str(temp_db)
     init_db()
-    
+
     # Create test parties
     conn = get_connection(read_only_constitution=False)
     conn.execute("INSERT INTO parties (id, name, role, public_key) VALUES ('user1', 'Alice', 'user', 'key1');")
@@ -21,7 +24,7 @@ def setup_test_db(tmp_path):
     conn.execute("INSERT INTO parties (id, name, role, public_key) VALUES ('admin1', 'Charlie', 'admin', 'key3');")
     conn.commit()
     conn.close()
-    
+
     yield
     src.config.DB_PATH = orig_db_path
 
@@ -182,7 +185,7 @@ def test_sdk_decoupled_wrappers():
          patch("src.skills.query_codebase_context") as mock_query, \
          patch("src.skills.index_codebase") as mock_scan, \
          patch("src.skills.execute_code_safely") as mock_exec:
-         
+
         mock_search.return_value = [{"title": "t", "url": "u", "snippet": "s"}]
         mock_fetch.return_value = "parsed webpage content"
         mock_query.return_value = "codebase query result"
@@ -215,7 +218,7 @@ def test_manage_sandbox_skill(mock_abort, mock_ship, mock_test, mock_create):
     # First, make sure the skill is in the DB for this run
     conn = get_connection(read_only_constitution=False)
     conn.execute("DELETE FROM agent_skills WHERE skill_id = 'manage_sandbox';")
-    
+
     schema = json.dumps({
         "type": "object",
         "properties": {
@@ -287,19 +290,19 @@ def test_safe_drives_sdk():
     """Verify sdk['drives'] functions correctly query and update drive_state."""
     from src.skills import SafeDrives
     drives = SafeDrives()
-    
+
     # Initial boredom should be 0
     assert drives.get("boredom") == 0
-    
+
     # Setting boredom
     drives.set("boredom", 5)
     assert drives.get("boredom") == 5
-    
+
     # Incrementing boredom
     val = drives.increment("boredom", 2)
     assert val == 7
     assert drives.get("boredom") == 7
-    
+
     # Throws error on invalid drive key
     with pytest.raises(ValueError):
         drives.get("happiness")
@@ -307,26 +310,26 @@ def test_safe_drives_sdk():
 def test_check_presence_skill(tmp_path, monkeypatch):
     """Verify check_presence skill walks filesystem and updates DB presence config."""
     monkeypatch.setattr(src.config, "ROOT_DIR", tmp_path)
-    
+
     # Run first check_presence. Since tmp_path is empty, status should be idle
     res = DynamicSkillExecutor.execute("check_presence", {})
     assert res["success"]
     assert "idle" in res["result"]
-    
+
     conn = get_connection()
     row = conn.execute("SELECT config_value FROM system_config WHERE config_key = 'user_presence_status';").fetchone()
     assert row[0] == "idle"
     conn.close()
-    
+
     # Touch a file to simulate active user
     test_file = tmp_path / "index.py"
     test_file.touch()
-    
+
     # Run check_presence again
     res = DynamicSkillExecutor.execute("check_presence", {})
     assert res["success"]
     assert "active" in res["result"]
-    
+
     conn = get_connection()
     row = conn.execute("SELECT config_value FROM system_config WHERE config_key = 'user_presence_status';").fetchone()
     assert row[0] == "active"
@@ -336,29 +339,29 @@ def test_check_presence_skill(tmp_path, monkeypatch):
 def test_evaluate_drives_triggers_reflection(mock_query):
     """Verify evaluate_drives triggers swarm reflection cycle when boredom threshold is crossed."""
     mock_query.return_value = "PROPOSED_ACTION: scan_workspace"
-    
+
     # Set threshold to 2 in database
     conn = get_connection()
     conn.execute("UPDATE system_config SET config_value = '2' WHERE config_key = 'boredom_threshold';")
     conn.execute("UPDATE system_config SET config_value = 'idle' WHERE config_key = 'user_presence_status';")
     conn.commit()
     conn.close()
-    
+
     # Initialize boredom to 0
     from src.skills import SafeDrives
     drives = SafeDrives()
     drives.set("boredom", 0)
-    
+
     # Clear triggers queue
     from src.daemon import _pending_swarm_triggers
     _pending_swarm_triggers.clear()
-    
+
     # Run tick 1
     res = DynamicSkillExecutor.execute("evaluate_drives", {})
     assert res["success"]
     assert "Boredom incremented to 1/2" in res["result"]
     assert not _pending_swarm_triggers
-    
+
     # Run tick 2 -> threshold met, trigger reflection
     res = DynamicSkillExecutor.execute("evaluate_drives", {})
     assert res["success"]

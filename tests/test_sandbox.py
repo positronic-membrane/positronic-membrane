@@ -1,5 +1,5 @@
-import pytest
 from src.sandbox import execute_code_safely
+
 
 def test_sandbox_safe_execution():
     """Verify that safe Python code compiles and runs, yielding correct stdout."""
@@ -18,7 +18,7 @@ def test_sandbox_blocked_imports():
     result_os = execute_code_safely(code_os)
     assert "Safety Violation" in result_os
     assert "Import of module 'os'" in result_os
-    
+
     code_sys = "from sys import exit; exit(1)"
     result_sys = execute_code_safely(code_sys)
     assert "Safety Violation" in result_sys

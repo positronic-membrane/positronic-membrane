@@ -17,6 +17,7 @@ DATABASE_URL = os.getenv("DATABASE_URL", "")  # e.g., postgresql://user:pass@hos
 LLM_MODEL = os.getenv("LLM_MODEL", "qwen2.5-coder:7b")
 LLM_BASE_URL = os.getenv("LLM_BASE_URL", "http://localhost:11434/v1")
 LLM_API_KEY = os.getenv("LLM_API_KEY", "ollama")
+LLM_MOCK_MODE = os.getenv("LLM_MOCK_MODE", "False").lower() in ("true", "1", "yes")
 
 # Embedding & Vector DB Configs
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "nomic-embed-text")

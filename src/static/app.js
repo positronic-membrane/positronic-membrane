@@ -632,7 +632,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
     async function handleStageHeal() {
         const logsBox = document.getElementById("stage-val-logs");
-        logsBox.textContent = "Janus is self-healing pre-existing test failures asynchronously...\n(This might take several seconds)";
+        logsBox.textContent = "The Membrane is self-healing pre-existing test failures asynchronously...\n(This might take several seconds)";
         try {
             const res = await fetch("/api/stage/action", {
                 method: "POST",

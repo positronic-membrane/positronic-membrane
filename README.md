@@ -1,6 +1,6 @@
-# Positronic Membrane: Project Janus
+# Positronic Membrane
 
-Swarm AI experimentation and local autonomous agent daemon orchestration (Project Janus). Designed to run as an autonomous, self-modifying developer swarm. It is now fully cloud-ready with decoupled API, persistence, and execution sandboxing layers.
+Swarm AI experimentation and local autonomous agent daemon orchestration. Designed to run as an autonomous, self-modifying developer swarm. It is now fully cloud-ready with decoupled API, persistence, and execution sandboxing layers.
 
 ---
 
@@ -18,11 +18,11 @@ Swarm AI experimentation and local autonomous agent daemon orchestration (Projec
 
 ## Documentation
 
-*   **[User Guide](docs/user_guide.md)**: Guide on how to run, configure, and align Janus instances.
+*   **[User Guide](docs/user_guide.md)**: Guide on how to run, configure, and align Positronic Membrane instances.
 *   **[Deployment Guide](docs/deployment_guide.md)**: Cloud provisioning, Docker builds, and Postgres schema setups.
 *   **[Future Roadmap](docs/archive/future_roadmap.md)**: Prerequisites and plans for GitHub integrations, parallel releases, and token cost caps.
 *   **[Ollama Setup & Model Guide](docs/ollama_setup.md)**: Steps to download, install, run, and integrate local LLMs.
-*   **[Gemini.md Specification](docs/gemini_md_specification.md)**: Core rules, schema specifications, and constraints for the Janus system.
+*   **[Gemini.md Specification](docs/gemini_md_specification.md)**: Core rules, schema specifications, and constraints for the Positronic Membrane system.
 
 ---
 
@@ -32,7 +32,7 @@ Swarm AI experimentation and local autonomous agent daemon orchestration (Projec
    ```bash
    pip install -r requirements.txt
    ```
-2. Set up your environment file `.env` using [Ollama Setup & Model Guide](file:///Users/jsmccauley/projects/positronic-membrane/docs/ollama_setup.md).
+2. Set up your environment file `.env` using [Ollama Setup & Model Guide](docs/ollama_setup.md).
 3. Initialize the database and run the alignment wizard:
    ```bash
    python -m src.main
@@ -46,7 +46,7 @@ Swarm AI experimentation and local autonomous agent daemon orchestration (Projec
 
 ## Console Escaped Commands
 
-When running Project Janus in CLI mode (`python -m src.main --cli`), the interactive Persona chat surface supports the following escaped/slash commands:
+When running Positronic Membrane in CLI mode (`python -m src.main --cli`), the interactive Persona chat surface supports the following escaped/slash commands:
 
 *   `/exit`: Gracefully shuts down the active conversation console and cancels the background daemon loops.
 *   `/amend <rule_key> | <rule_text>`: Proposes a new rule or amendment to be sealed in the read-only core constitution table (requires interactive `y/n` confirmation).
