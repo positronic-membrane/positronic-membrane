@@ -1,18 +1,23 @@
 import pytest
 from unittest.mock import patch, MagicMock
 import src.config
-from src.database import init_db, log_deliberation, log_episodic_memory
+from src.database import init_db, get_connection, log_deliberation, log_episodic_memory
+from src.skills import SafeSelfModel, DynamicSkillExecutor
+from src.memory_hydration import hydrate_context
 from src.persona import (
     detect_metacognitive_intent,
     generate_metacognitive_narrative,
     generate_persona_response,
-    detect_modification_intent
+    detect_modification_intent,
+    handle_self_command,
+    handle_pin_command,
+    handle_unpin_command
 )
 
 @pytest.fixture(autouse=True)
 def setup_test_db(tmp_path):
     """Isolate DB settings for testing."""
-    temp_db = tmp_path / "test_janus.db"
+    temp_db = tmp_path / "test_janus_persona.db"
     orig_db_path = src.config.DB_PATH
     src.config.DB_PATH = str(temp_db)
     init_db()
@@ -104,3 +109,153 @@ def test_detect_modification_intent():
     path, inst = detect_modification_intent("can you explain src/config.py?")
     assert path is None
     assert inst is None
+
+# --- Consolidating from test_phase3_self_model.py ---
+
+def test_safe_self_model_get_and_update():
+    sm = SafeSelfModel()
+    traits = sm.get_traits()
+    assert "curiosity" in traits
+    assert "verbosity" in traits
+    assert "cautiousness" in traits
+    
+    assert traits["curiosity"]["value"] == 0.5
+    assert traits["curiosity"]["confidence"] == 0.5
+    assert traits["curiosity"]["is_pinned"] == 0
+    
+    # Update unpinned trait
+    success = sm.update_trait("curiosity", 0.8, 0.9, "Exploration of new codebase modules")
+    assert success is True
+    
+    new_traits = sm.get_traits()
+    assert new_traits["curiosity"]["value"] == 0.8
+    assert new_traits["curiosity"]["confidence"] == 0.9
+    
+    # Verify history is logged
+    conn = get_connection()
+    try:
+        row = conn.execute("SELECT old_value, new_value, reason FROM self_model_history ORDER BY id DESC LIMIT 1;").fetchone()
+        assert row is not None
+        assert float(row[0]) == 0.5
+        assert float(row[1]) == 0.8
+        assert row[2] == "Exploration of new codebase modules"
+    finally:
+        conn.close()
+
+def test_pinning_and_immutability():
+    sm = SafeSelfModel()
+    
+    # Pin curiosity manually using command
+    res = handle_pin_command("/pin curiosity 0.3")
+    assert "pinned" in res.lower()
+    
+    traits = sm.get_traits()
+    assert traits["curiosity"]["value"] == 0.3
+    assert traits["curiosity"]["is_pinned"] == 1
+    assert traits["curiosity"]["confidence"] == 1.0
+    
+    # Attempting to update a pinned trait via SafeSelfModel should return False
+    success = sm.update_trait("curiosity", 0.9, 0.9, "Automated update test")
+    assert success is False
+    
+    traits_after = sm.get_traits()
+    assert traits_after["curiosity"]["value"] == 0.3
+    
+    # Unpin curiosity
+    res_unpin = handle_unpin_command("/unpin curiosity")
+    assert "unpinned" in res_unpin.lower()
+    
+    traits_unpinned = sm.get_traits()
+    assert traits_unpinned["curiosity"]["is_pinned"] == 0
+    
+    # Updating now works
+    success_after = sm.update_trait("curiosity", 0.9, 0.9, "Post-unpin update")
+    assert success_after is True
+    assert sm.get_traits()["curiosity"]["value"] == 0.9
+
+def test_self_command_rendering():
+    res = handle_self_command()
+    assert "🧠 Janus Self-Model & Personality Traits" in res
+    assert "Curiosity" in res
+    assert "Verbosity" in res
+    assert "Cautiousness" in res
+
+def test_prompt_modulation_via_traits():
+    # Test low verbosity prompt modulation
+    handle_pin_command("/pin verbosity 0.1")
+    handle_pin_command("/pin curiosity 0.2")
+    handle_pin_command("/pin cautiousness 0.8")
+    
+    with patch("src.persona.query_agent") as mock_query:
+        mock_query.return_value = "Response mock"
+        generate_persona_response("Hello")
+        
+        called_prompt = mock_query.call_args[0][1]
+        assert "Be extremely concise" in called_prompt
+        assert "Answer directly and stick only to the requested topic" in called_prompt
+        assert "Emphasize security, verification" in called_prompt
+
+    # Test high verbosity/curiosity/low cautiousness prompt modulation
+    handle_pin_command("/pin verbosity 0.9")
+    handle_pin_command("/pin curiosity 0.8")
+    handle_pin_command("/pin cautiousness 0.2")
+    
+    with patch("src.persona.query_agent") as mock_query:
+        mock_query.return_value = "Response mock"
+        generate_persona_response("Hello")
+        
+        called_prompt = mock_query.call_args[0][1]
+        assert "Be highly verbose" in called_prompt
+        assert "Actively demonstrate curiosity" in called_prompt
+        assert "Prioritize direct action, efficiency" in called_prompt
+
+def test_decay_self_model_skill():
+    sm = SafeSelfModel()
+    
+    # Seed trait values to non-baseline
+    sm.update_trait("verbosity", 0.8, 0.8, "Increased verbosity")
+    
+    # Verify starting state
+    traits_before = sm.get_traits()
+    assert traits_before["verbosity"]["value"] == 0.8
+    assert traits_before["verbosity"]["confidence"] == 0.8
+    
+    # Run the decay skill
+    party_id = "system"
+    res = DynamicSkillExecutor.execute("decay_self_model", {}, party_id=party_id)
+    assert res["success"] is True
+    assert "decayed" in res["result"].lower()
+    
+    traits_after = sm.get_traits()
+    assert traits_after["verbosity"]["value"] < 0.8
+    assert traits_after["verbosity"]["confidence"] == 0.795
+
+# --- Consolidating from test_v1_priority0.py ---
+
+def test_context_hydration_tagging():
+    # Insert mock self trait
+    conn = get_connection(read_only_constitution=False)
+    cursor = conn.cursor()
+    cursor.execute("INSERT OR REPLACE INTO self_model (trait_name, value, confidence, is_pinned) VALUES ('verbosity', 0.8, 0.9, 1);")
+    # Insert mock episodic memory
+    cursor.execute("INSERT INTO episodic_memory (speaker, message_content, context_type, party_id) VALUES ('user', 'Hello Janus', 'user_visible', 'user-123');")
+    conn.commit()
+    conn.close()
+    
+    # Hydrate context
+    hydrated = hydrate_context("user-123", limit_memories=5)
+    
+    # Check XML tags are present
+    assert "<self_traits>" in hydrated
+    assert "- verbosity: 0.8" in hydrated
+    assert "</self_traits>" in hydrated
+    
+    assert "<episodic_memory>" in hydrated
+    assert "user: Hello Janus" in hydrated
+    assert "</episodic_memory>" in hydrated
+    
+    assert "<semantic_knowledge>" in hydrated
+    
+    # Check Anchor directive
+    assert "Your objective reality is defined strictly by the data provided" in hydrated
+    assert "You are strictly forbidden from substituting pre-trained assumptions." in hydrated

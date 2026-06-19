@@ -364,3 +364,114 @@ def test_abort_sandbox_session(mock_clear, mock_cleanup, mock_get_session):
     
     mock_cleanup.assert_called_once_with("/path/to/sandbox", "janus/sandbox-feat")
     mock_clear.assert_called_once()
+
+
+# --- Consolidating from test_v1_priority1.py ---
+
+@patch("src.sandbox_session.get_active_sandbox")
+@patch("src.sandbox_session.run_sandbox_tests")
+@patch("src.sandbox_session.abort_sandbox_session")
+@patch("src.sandbox_session.cleanup_git_sandbox")
+@patch("src.sandbox_session.clear_sandbox_session")
+@patch("src.sandbox_session.shutil.copy2")
+def test_regression_watcher_flow(
+    mock_copy,
+    mock_clear,
+    mock_cleanup,
+    mock_abort,
+    mock_run_tests,
+    mock_get_active_sb
+):
+    import src.config as cfg
+    from src.database import get_connection
+    orig_root = cfg.ROOT_DIR
+    tmp_path = Path("/tmp/test_janus_v1_p1_watcher")
+    cfg.ROOT_DIR = tmp_path
+
+    # Active sandbox path contains a tests directory to trigger execution
+    sandbox_path = tmp_path / "sandbox"
+    (sandbox_path / "tests").mkdir(parents=True, exist_ok=True)
+
+    mock_get_active_sb.return_value = {
+        "active_sandbox_path": str(sandbox_path),
+        "active_sandbox_branch": "janus-test-branch",
+        "active_sandbox_status": "active"
+    }
+
+    db_conn = get_connection(read_only_constitution=False)
+    import sqlite3
+    db_conn.row_factory = sqlite3.Row
+
+    try:
+        # Case 1: Sandbox tests failed (Regression)
+        mock_run_tests.return_value = (False, "=== 1 failed in 0.5s ===")
+        with pytest.raises(RuntimeError) as exc:
+            ship_sandbox_session()
+        assert "Regression detected" in str(exc.value)
+        mock_abort.assert_called_once()
+        mock_abort.reset_mock()
+
+        # Verify regression logged in database
+        logs = db_conn.execute("SELECT message_content FROM episodic_memory WHERE speaker = 'system';").fetchall()
+        assert len(logs) == 1
+        assert "Regression Watcher aborted sandbox ship flow" in logs[0]["message_content"]
+
+        # Clear episodic memory to reset system logs
+        db_conn.execute("DELETE FROM episodic_memory;")
+        db_conn.commit()
+
+        # Case 2: Sandbox tests passed, inserts first baseline
+        mock_run_tests.return_value = (True, "=== 10 passed in 1.2s ===\nTOTAL          100     20    80%")
+        with patch("src.sandbox_session.get_sandbox_modified_files", return_value=["src/main.py"]):
+            main_py = sandbox_path / "src" / "main.py"
+            main_py.parent.mkdir(parents=True, exist_ok=True)
+            main_py.write_text("print('hello')")
+            copied = ship_sandbox_session()
+            assert copied == ["src/main.py"]
+            mock_clear.assert_called_once()
+            mock_clear.reset_mock()
+
+        # Verify baseline inserted
+        baselines = db_conn.execute("SELECT total_tests, passed_tests, failed_tests, coverage_percentage FROM test_run_baselines;").fetchall()
+        assert len(baselines) == 1
+        assert baselines[0]["total_tests"] == 10
+        assert baselines[0]["passed_tests"] == 10
+        assert baselines[0]["failed_tests"] == 0
+        assert baselines[0]["coverage_percentage"] == 80.0
+
+        # Case 3: Tests pass but coverage drops (Regression)
+        mock_get_active_sb.return_value = {
+            "active_sandbox_path": str(sandbox_path),
+            "active_sandbox_branch": "janus-test-branch",
+            "active_sandbox_status": "active"
+        }
+        mock_run_tests.return_value = (True, "=== 10 passed in 1.1s ===\nTOTAL          100     25    75%")
+        with pytest.raises(RuntimeError) as exc:
+            ship_sandbox_session()
+        assert "Regression detected: Coverage dropped from 80.0% to 75.0%." in str(exc.value)
+        mock_abort.assert_called_once()
+        mock_abort.reset_mock()
+
+        # Case 4: Tests pass, coverage is None (Graceful Degradation)
+        mock_get_active_sb.return_value = {
+            "active_sandbox_path": str(sandbox_path),
+            "active_sandbox_branch": "janus-test-branch",
+            "active_sandbox_status": "active"
+        }
+        mock_run_tests.return_value = (True, "=== 10 passed in 1.1s ===")
+        with patch("src.sandbox_session.get_sandbox_modified_files", return_value=["src/main.py"]):
+            main_py = sandbox_path / "src" / "main.py"
+            main_py.parent.mkdir(parents=True, exist_ok=True)
+            main_py.write_text("print('hello')")
+            copied = ship_sandbox_session()
+            assert copied == ["src/main.py"]
+
+        baselines = db_conn.execute("SELECT coverage_percentage FROM test_run_baselines ORDER BY id DESC LIMIT 1;").fetchone()
+        assert baselines["coverage_percentage"] is None
+
+    finally:
+        cfg.ROOT_DIR = orig_root
+        db_conn.close()
+        import shutil
+        shutil.rmtree(tmp_path, ignore_errors=True)
+

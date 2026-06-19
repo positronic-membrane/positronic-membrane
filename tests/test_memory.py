@@ -104,3 +104,68 @@ def test_memory_consolidation(mock_query_agent, mock_embeddings):
     assert detail_records["metadatas"][0]["consolidated"] == "true"
     assert detail_records["metadatas"][1]["consolidated"] == "true"
 
+
+# --- Consolidating from test_v1_priority1.py ---
+
+def test_episodic_memory_cleanup_ttl():
+    import datetime
+    from src.skills import DynamicSkillExecutor
+    from src.database import get_connection
+
+    # Clear episodic memory first
+    conn = get_connection(read_only_constitution=False)
+    import sqlite3
+    conn.row_factory = sqlite3.Row
+    conn.execute("DELETE FROM episodic_memory;")
+    conn.commit()
+
+    # Seed retention_days config
+    conn.execute(
+        "INSERT OR REPLACE INTO system_config (config_key, config_value, is_agent_modifiable) VALUES ('memory.retention_days', '30', 1);"
+    )
+    # Clear last run time to ensure it triggers
+    conn.execute(
+        "INSERT OR REPLACE INTO system_config (config_key, config_value, is_agent_modifiable) VALUES ('memory.last_cleanup_time', '', 1);"
+    )
+    conn.commit()
+
+    # Helper function to insert memory with specific timestamp
+    def insert_old_memory(speaker, content, days_ago):
+        target_time = datetime.datetime.now(datetime.UTC) - datetime.timedelta(days=days_ago)
+        ts_str = target_time.strftime("%Y-%m-%d %H:%M:%S")
+        conn.execute(
+            "INSERT INTO episodic_memory (speaker, message_content, context_type, timestamp) VALUES (?, ?, 'user_visible', ?);",
+            (speaker, content, ts_str)
+        )
+        conn.commit()
+
+    # 1. Insert recent memory (10 days old)
+    insert_old_memory("user", "Hello 10 days ago", 10)
+    # 2. Insert expired memory (40 days old)
+    insert_old_memory("user", "Hello 40 days ago", 40)
+
+    # Verify both exist
+    rows = conn.execute("SELECT message_content FROM episodic_memory;").fetchall()
+    assert len(rows) == 2
+
+    # Execute episodic memory cleanup skill
+    res = DynamicSkillExecutor.execute("cleanup_episodic_memory", {}, party_id="system")
+    assert res["success"] is True
+    assert "Episodic memory cleanup complete" in res["result"]
+
+    # Verify only recent memory remains
+    rows_after = conn.execute("SELECT message_content FROM episodic_memory;").fetchall()
+    assert len(rows_after) == 1
+    assert rows_after[0]["message_content"] == "Hello 10 days ago"
+
+    # Verify last_cleanup_time is now populated
+    last_cleanup = conn.execute("SELECT config_value FROM system_config WHERE config_key = 'memory.last_cleanup_time';").fetchone()
+    assert last_cleanup["config_value"] != ""
+
+    # Re-run immediately: it should skip cleanup
+    res_skipped = DynamicSkillExecutor.execute("cleanup_episodic_memory", {}, party_id="system")
+    assert res_skipped["success"] is True
+    assert "Episodic memory cleanup skipped" in res_skipped["result"]
+    conn.close()
+
+

@@ -1,0 +1,42 @@
+version: '3.8'
+
+services:
+  db:
+    image: pgvector/pgvector:16-pgvector
+    container_name: janus-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: janus_root
+      POSTGRES_PASSWORD: janus_password
+      POSTGRES_DB: janus
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U janus_root -d janus"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  janus:
+    build: .
+    container_name: janus-app
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      - DB_TYPE=postgres
+      - DATABASE_URL=postgresql://janus_root:janus_password@db:5432/janus
+      - LLM_BASE_URL=http://host.docker.internal:11434/v1
+      - LLM_API_KEY=ollama
+      - LLM_MODEL=qwen2.5-coder:7b
+      - REQUIRE_AUTH=true
+    depends_on:
+      db:
+        condition: service_healthy
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+volumes:
+  pgdata:

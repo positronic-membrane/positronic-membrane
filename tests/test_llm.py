@@ -1,7 +1,7 @@
 import pytest
 from unittest.mock import MagicMock, patch
 import src.config
-from src.database import init_db
+from src.database import init_db, get_connection
 from src.llm import get_agent_settings, resolve_agent_model, query_agent
 
 @pytest.fixture(autouse=True)
@@ -82,3 +82,60 @@ def test_resolve_agent_client_params(monkeypatch):
     base_url, api_key = resolve_agent_client_params("proposer", "google/gemini-2.5-flash")
     assert base_url == "https://custom-agent-endpoint.com/v1"
     assert api_key == "custom-agent-key"
+
+
+# --- Consolidating from test_v1_priority0.py ---
+
+@patch("openai.resources.chat.completions.Completions.create")
+def test_llm_cache_and_retry(mock_create):
+    # Setup mock completions response
+    mock_resp = MagicMock()
+    mock_resp.choices = [MagicMock(message=MagicMock(content="Hello cache content"))]
+    mock_resp.usage = MagicMock(prompt_tokens=10, completion_tokens=15)
+    mock_create.return_value = mock_resp
+    
+    # Verify first query (cache miss, runs LLM, caches response)
+    res = query_agent("proposer", "Hello caching validation")
+    assert res == "Hello cache content"
+    assert mock_create.call_count == 1
+    
+    # Verify second query (cache hit, returns response without calling API)
+    res_cached = query_agent("proposer", "Hello caching validation")
+    assert res_cached == "Hello cache content"
+    assert mock_create.call_count == 1
+
+@patch("openai.resources.chat.completions.Completions.create")
+def test_llm_cost_limiting(mock_create):
+    from src.llm import BillingViolationError
+    
+    mock_resp = MagicMock()
+    mock_resp.choices = [MagicMock(message=MagicMock(content="Success response"))]
+    mock_resp.usage = MagicMock(prompt_tokens=1000000, completion_tokens=1000000)
+    mock_create.return_value = mock_resp
+    
+    conn = get_connection(read_only_constitution=False)
+    conn.execute("INSERT OR REPLACE INTO system_config (config_key, config_value, is_agent_modifiable) VALUES ('daily_budget_usd', '0.01', 1);")
+    conn.commit()
+    conn.close()
+    
+    # First query works but consumes budget
+    query_agent("proposer", "Big prompt")
+    
+    # Second query throws BillingViolationError
+    with pytest.raises(BillingViolationError):
+        query_agent("proposer", "Another query")
+
+@patch("openai.resources.chat.completions.Completions.create")
+def test_llm_hyperparameters_calibration(mock_create):
+    mock_resp = MagicMock()
+    mock_resp.choices = [MagicMock(message=MagicMock(content="Critic response"))]
+    mock_resp.usage = MagicMock(prompt_tokens=10, completion_tokens=15)
+    mock_create.return_value = mock_resp
+    
+    # Verify temp override for Critic
+    query_agent("critic", "Auditing safety constraint")
+    
+    call_args = mock_create.call_args[1]
+    assert call_args["temperature"] == 0.0
+    assert call_args["top_p"] == 1.0
+

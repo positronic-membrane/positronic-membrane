@@ -4,13 +4,13 @@ import json
 from unittest.mock import patch, MagicMock
 import src.config
 from src.database import init_db, get_connection
-from src.skills import SafeAgentOrchestration, DynamicSkillExecutor
+from src.skills import SafeAgentOrchestration
 from src.security import encrypt_api_key, decrypt_api_key
 
 @pytest.fixture(autouse=True)
 def setup_test_db(tmp_path):
     """Isolate DB settings for testing."""
-    temp_db = tmp_path / "test_janus.db"
+    temp_db = tmp_path / "test_janus_orchestration.db"
     orig_db_path = src.config.DB_PATH
     src.config.DB_PATH = str(temp_db)
     init_db()
@@ -108,7 +108,6 @@ async def test_api_dispatch_task(mock_apply, mock_run_tests, mock_create_sandbox
     sandbox_dir = tmp_path / "sandbox"
     sandbox_dir.mkdir()
     
-    # Pre-create the src directory and main.py file inside the sandbox
     src_dir = sandbox_dir / "src"
     src_dir.mkdir()
     main_file = src_dir / "main.py"

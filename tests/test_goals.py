@@ -9,7 +9,7 @@ from src.persona import handle_goal_command
 @pytest.fixture(autouse=True)
 def setup_test_db(tmp_path):
     """Redirects config.DB_PATH to a temp file and seeds it."""
-    temp_db = tmp_path / "test_janus_phase4.db"
+    temp_db = tmp_path / "test_janus_goals.db"
     orig_db_path = src.config.DB_PATH
     src.config.DB_PATH = str(temp_db)
     
@@ -69,6 +69,60 @@ def test_safe_goals_crud():
     assert cp1["achieved"] is True
     assert cp1["achieved_at"] is not None
 
+def test_goals_management_crud():
+    sg = SafeGoals()
+    
+    # Test Create
+    res = sg.manage_goals("create", {"type": "short", "description": "Write Priority 0 tests"})
+    assert res["success"] is True
+    goal_id = res["goal_id"]
+    assert goal_id is not None
+    
+    # Check created goal status
+    goals = sg.get_goals(type="short")
+    assert len(goals) == 1
+    assert goals[0]["id"] == goal_id
+    assert goals[0]["status"] == "proposed"
+    
+    # Test Modify Status & Tier
+    res = sg.manage_goals("modify", {"goal_id": goal_id, "status": "in_progress", "type": "long"})
+    assert res["success"] is True
+    
+    goals = sg.get_goals(type="long")
+    assert len(goals) == 1
+    assert goals[0]["status"] == "in_progress"
+    
+    # Test Archive
+    res = sg.manage_goals("archive", {"goal_id": goal_id})
+    assert res["success"] is True
+    goals = sg.get_goals(status="archived")
+    assert len(goals) == 1
+    
+    # Test Delete (Soft Delete status update)
+    res = sg.manage_goals("delete", {"goal_id": goal_id})
+    assert res["success"] is True
+    goals = sg.get_goals(status="deleted")
+    assert len(goals) == 1
+
+def test_goals_checkpoints():
+    sg = SafeGoals()
+    goal_id = sg.create_goal("stretch", "Integrate Smart Governor")
+    
+    # Create checkpoint
+    res = sg.manage_goals("checkpoint_create", {"goal_id": goal_id, "description": "Write diff hashing helper"})
+    assert res["success"] is True
+    cp_id = res["checkpoint_id"]
+    
+    # Complete checkpoint
+    res = sg.manage_goals("checkpoint_complete", {"checkpoint_id": cp_id})
+    assert res["success"] is True
+    
+    # Verify completed status
+    goals = sg.get_goals(type="stretch")
+    assert len(goals) == 1
+    assert goals[0]["checkpoints"][0]["id"] == cp_id
+    assert goals[0]["checkpoints"][0]["achieved"] is True
+
 def test_goal_slash_commands():
     sg = SafeGoals()
     
@@ -110,6 +164,24 @@ def test_goal_slash_commands():
     goals_completed_cp = sg.get_goals()
     my_goal_done = next(g for g in goals_completed_cp if g["id"] == gid)
     assert my_goal_done["checkpoints"][0]["achieved"] is True
+
+def test_goals_cli_commands():
+    sg = SafeGoals()
+    
+    # Setup a goal
+    goal_id = sg.create_goal("short", "Build MVP")
+    
+    # Test Prioritize Command (/goal prioritize <id> <tier>)
+    resp = handle_goal_command(f"/goal prioritize {goal_id} long")
+    assert "[✔] Goal" in resp
+    assert "priority tier updated to 'long'" in resp
+    
+    goals = sg.get_goals(type="long")
+    assert len(goals) == 1
+    
+    # Check invalid priority
+    resp = handle_goal_command(f"/goal prioritize {goal_id} super-important")
+    assert "[Error]" in resp
 
 def test_evaluate_goals_skill():
     sg = SafeGoals()

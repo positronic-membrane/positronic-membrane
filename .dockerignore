@@ -1,0 +1,39 @@
+# Exclude Python virtual environment
+.venv/
+venv/
+ENV/
+
+# Exclude SQLite databases and journals
+*.db
+*.db-journal
+*.db-shm
+*.db-wal
+janus.db
+test_*.db
+
+# Exclude configuration and secrets
+.env
+.env.*
+!.env.example
+.keys/
+
+# Exclude cache and temporary files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ipynb_checkpoints/
+
+# Exclude Git files
+.git/
+.gitignore
+
+# Exclude local sandbox and backup directories
+.janus_sandboxes/
+.janus_snapshots/
+backups/
+data/chromadb/
+logs/
+*.log

@@ -18,11 +18,11 @@ Swarm AI experimentation and local autonomous agent daemon orchestration (Projec
 
 ## Documentation
 
-*   **[User Guide](file:///Users/jsmccauley/projects/positronic-membrane/docs/user_guide.md)**: Guide on how to run, configure, and align Janus instances.
-*   **[Deployment Guide](file:///Users/jsmccauley/projects/positronic-membrane/docs/deployment_guide.md)**: Cloud provisioning, Docker builds, and Postgres schema setups.
-*   **[Future Roadmap](file:///Users/jsmccauley/projects/positronic-membrane/docs/future_roadmap.md)**: Prerequisites and plans for GitHub integrations, parallel releases, and token cost caps.
-*   **[Ollama Setup & Model Guide](file:///Users/jsmccauley/projects/positronic-membrane/docs/ollama_setup.md)**: Steps to download, install, run, and integrate local LLMs.
-*   **[Gemini.md Specification](file:///Users/jsmccauley/projects/positronic-membrane/docs/gemini_md_specification.md)**: Core rules, schema specifications, and constraints for the Janus system.
+*   **[User Guide](docs/user_guide.md)**: Guide on how to run, configure, and align Janus instances.
+*   **[Deployment Guide](docs/deployment_guide.md)**: Cloud provisioning, Docker builds, and Postgres schema setups.
+*   **[Future Roadmap](docs/archive/future_roadmap.md)**: Prerequisites and plans for GitHub integrations, parallel releases, and token cost caps.
+*   **[Ollama Setup & Model Guide](docs/ollama_setup.md)**: Steps to download, install, run, and integrate local LLMs.
+*   **[Gemini.md Specification](docs/gemini_md_specification.md)**: Core rules, schema specifications, and constraints for the Janus system.
 
 ---
 
