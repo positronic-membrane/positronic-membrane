@@ -1,0 +1,327 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Positronic Membrane: Swarm Cognition Interface</title>
+    <!-- Google Fonts: Inter and Outfit -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&family=Outfit:wght@400;600;700;800&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <!-- Background glowing ambient spots for premium visual depth -->
+    <div class="ambient-glow glow-1"></div>
+    <div class="ambient-glow glow-2"></div>
+    
+    <!-- Login Container -->
+    <div class="login-container glass-panel" id="login-screen" style="display: none;">
+        <div class="login-header">
+            <span class="logo-icon">▲</span>
+            <h2>Access Membrane Swarm</h2>
+            <p class="subtitle">Secure Swarm Authentication</p>
+        </div>
+        <form id="login-form">
+            <div class="input-group">
+                <label for="login-username">Party ID or Username</label>
+                <input type="text" id="login-username" placeholder="Enter name or UUID..." required autocomplete="off">
+            </div>
+            <div class="input-group">
+                <label for="login-key">Enrollment Key / Passcode</label>
+                <input type="password" id="login-key" placeholder="Enter secret key..." required autocomplete="off">
+            </div>
+            <div id="login-error-msg" class="error-text" style="display: none;"></div>
+            <button type="submit" class="btn btn-primary login-btn">Authenticate</button>
+        </form>
+    </div>
+
+    <div class="app-container" id="app-wrapper" style="display: none;">
+        <!-- Main Header -->
+        <header class="app-header">
+            <div class="header-logo">
+                <span class="logo-icon">▲</span>
+                <div class="logo-text">
+                    <h1 id="app-title-h1">POSITRONIC MEMBRANE</h1>
+                    <p class="subtitle">Swarm Cognition Surface</p>
+                </div>
+            </div>
+            <div class="header-controls">
+                <div class="system-status">
+                    <span class="status-indicator online"></span>
+                    <span class="status-text">Daemon Heartbeat Active</span>
+                </div>
+                <button id="btn-logout" class="btn btn-logout-header" title="Log Out">Log Out</button>
+            </div>
+        </header>
+
+        <!-- Sidebar and Workspace Layout -->
+        <div class="dashboard-body">
+            <aside class="sidebar glass-panel">
+                <nav class="nav-menu">
+                    <button class="nav-btn active" data-tab="chat-tab" title="Chat & Deliberations">
+                        <span class="nav-icon">💬</span>
+                        <span class="nav-label">Chat Interface</span>
+                    </button>
+                    <button class="nav-btn" data-tab="sandbox-tab" title="Git Sandboxes">
+                        <span class="nav-icon">📦</span>
+                        <span class="nav-label">Git Sandbox</span>
+                    </button>
+                    <button class="nav-btn" data-tab="staging-tab" title="Staging Workspace">
+                        <span class="nav-icon">📝</span>
+                        <span class="nav-label">Staging Area</span>
+                    </button>
+                    <button class="nav-btn" data-tab="config-tab" title="Swarm Configuration">
+                        <span class="nav-icon">⚙️</span>
+                        <span class="nav-label">Configurations</span>
+                    </button>
+                </nav>
+            </aside>
+
+            <main class="workspace">
+                <!-- Tab 1: Chat Dashboard (Two-Pane Layout) -->
+                <section id="chat-tab" class="tab-content active dashboard-grid">
+                    <!-- Left Pane: Conversation Interface -->
+                    <section class="pane chat-pane glass-panel">
+                        <div class="pane-header">
+                            <h2>Persona Conversation</h2>
+                            <span class="pane-tag">Cohesive consciousness</span>
+                        </div>
+                        <div class="chat-messages-wrapper" id="chat-messages-container">
+                            <!-- Dynamic Messages go here -->
+                            <div class="message system-message">
+                                <p>Establishing connection to the Membrane unified persona...</p>
+                            </div>
+                        </div>
+                        <div class="chat-input-wrapper">
+                            <form id="chat-form" class="chat-form">
+                                <textarea id="chat-input" placeholder="Type a message or ask about recent actions..." autocomplete="off" required rows="1"></textarea>
+                                <button type="submit" id="chat-submit-btn" aria-label="Send message">
+                                    <span class="btn-arrow">➔</span>
+                                </button>
+                            </form>
+                        </div>
+                    </section>
+
+                    <!-- Right Pane: Metacognitive Audits and Deliberations -->
+                    <section class="pane deliberations-pane glass-panel">
+                        <div class="pane-header">
+                            <h2>Swarm Deliberations</h2>
+                            <span class="pane-tag" id="delib-refresh-tag">Live audits</span>
+                        </div>
+                        <div class="deliberations-timeline" id="deliberations-timeline-container">
+                            <!-- Dynamic background audits go here -->
+                            <div class="timeline-empty">
+                                <p>Waiting for background heartbeat deliberations...</p>
+                            </div>
+                        </div>
+                    </section>
+                </section>
+
+                <!-- Tab 2: Git Sandbox -->
+                <section id="sandbox-tab" class="tab-content glass-panel" style="display: none;">
+                    <div class="pane-header">
+                        <h2>Git Sandbox Workspace</h2>
+                        <span class="pane-tag">Isolated branch testing</span>
+                    </div>
+                    <div class="sandbox-dashboard">
+                        <div class="sandbox-controls card-panel">
+                            <div class="control-row" id="sandbox-inactive-controls">
+                                <input type="text" id="sandbox-name-input" placeholder="Enter session branch name..." autocomplete="off">
+                                <button class="btn btn-primary" id="btn-sandbox-start">Start Sandbox</button>
+                            </div>
+                            <div class="control-row" id="sandbox-active-controls" style="display: none;">
+                                <span class="status-badge" id="sandbox-status-badge">Active</span>
+                                <button class="btn btn-secondary" id="btn-sandbox-test">Run Pytests</button>
+                                <button class="btn btn-success" id="btn-sandbox-ship">Ship Changes</button>
+                                <button class="btn btn-danger" id="btn-sandbox-abort">Abort Sandbox</button>
+                            </div>
+                        </div>
+                        <div class="sandbox-details-grid" id="sandbox-details-area" style="display: none;">
+                            <div class="details-card">
+                                <h3>Session Details</h3>
+                                <p><strong>Path:</strong> <span id="sandbox-val-path">-</span></p>
+                                <p><strong>Branch:</strong> <span id="sandbox-val-branch">-</span></p>
+                                <p><strong>Modified Files:</strong></p>
+                                <ul id="sandbox-val-files"></ul>
+                            </div>
+                            <div class="details-card">
+                                <h3>Test Suite Run Logs</h3>
+                                <pre class="terminal-logs"><code id="sandbox-val-logs">Waiting for test execution...</code></pre>
+                            </div>
+                        </div>
+                        <div class="sandbox-diff-card" id="sandbox-diff-area" style="display: none;">
+                            <h3>Active Sandbox Diff</h3>
+                            <pre class="diff-container"><code id="sandbox-diff-code">No diff to display.</code></pre>
+                        </div>
+                        <div id="sandbox-empty-state" class="empty-state">
+                            <p>No active sandbox session. Start one using the input above or via chat slash command: <code>/sandbox start &lt;name&gt;</code></p>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- Tab 3: Staging Workspace -->
+                <section id="staging-tab" class="tab-content glass-panel" style="display: none;">
+                    <div class="pane-header">
+                        <h2>Staging Workspace</h2>
+                        <span class="pane-tag">Critic reviews & modifications</span>
+                    </div>
+                    <div class="staging-dashboard">
+                        <div class="staging-controls card-panel" id="staging-active-controls" style="display: none;">
+                            <span class="status-badge" id="staging-status-badge">Staged</span>
+                            <button class="btn btn-success" id="btn-stage-apply">Approve & Commit</button>
+                            <button class="btn btn-secondary" id="btn-stage-heal">Self-Heal Failures</button>
+                            <button class="btn btn-danger" id="btn-stage-cancel">Reject & Cancel</button>
+                        </div>
+                        <div class="staging-details-grid" id="staging-details-area" style="display: none;">
+                            <div class="details-card">
+                                <h3>Staged Modifications</h3>
+                                <p><strong>Staged Files:</strong> <span id="stage-val-files">-</span></p>
+                                <p><strong>Staged Path:</strong> <span id="stage-val-path">-</span></p>
+                                
+                                <div class="refinement-box">
+                                    <h3>Regenerate / Refine Staged File</h3>
+                                    <div class="refinement-fields">
+                                        <select id="stage-refine-file-select"></select>
+                                        <input type="text" id="stage-refine-instructions" placeholder="Enter refinement instructions...">
+                                        <button class="btn btn-primary" id="btn-stage-refine">Refine</button>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="details-card">
+                                <h3>Staged Test Logs</h3>
+                                <pre class="terminal-logs"><code id="stage-val-logs">No test logs available.</code></pre>
+                            </div>
+                        </div>
+                        <div class="staging-diff-card" id="staging-diff-area" style="display: none;">
+                            <h3>Staging Unified Diff</h3>
+                            <pre class="diff-container"><code id="staging-diff-code">No diff to display.</code></pre>
+                        </div>
+                        <div id="staging-empty-state" class="empty-state">
+                            <p>No active staging session. Stage changes using a chat slash command: <code>/stage</code> or <code>/modify &lt;file&gt; | &lt;instructions&gt;</code></p>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- Tab 4: Swarm Configuration -->
+                <section id="config-tab" class="tab-content glass-panel" style="display: none;">
+                    <div class="pane-header">
+                        <h2>Swarm Configuration</h2>
+                        <span class="pane-tag">Align core rules and models</span>
+                    </div>
+                    <div class="config-dashboard">
+                        <div class="config-card">
+                            <h3>Core Constitution Rules</h3>
+                            <p class="config-desc">These rules represent Positronic Membrane's immutable boundaries. Autonomous agents read and check every proposed action against these guidelines.</p>
+                            <table class="config-table" id="constitution-table">
+                                <thead>
+                                    <tr>
+                                        <th>Rule Key</th>
+                                        <th>Rule Text</th>
+                                        <th>Actions</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <!-- Dynamic rows -->
+                                </tbody>
+                            </table>
+                            <div class="config-form">
+                                <h4>Add or Update Rule</h4>
+                                <div class="config-fields">
+                                    <input type="text" id="constitution-key-input" placeholder="Rule Key (e.g. NO_NETWORK)...">
+                                    <input type="text" id="constitution-text-input" placeholder="Describe the boundary rule...">
+                                    <button class="btn btn-primary" id="btn-constitution-add">Amend Constitution</button>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="config-card">
+                            <h3>Agent Model Registry</h3>
+                            <p class="config-desc">Configure LLM model overrides for individual agent roles in the swarm.</p>
+                            <table class="config-table" id="registry-table">
+                                <thead>
+                                    <tr>
+                                        <th>Agent Role</th>
+                                        <th>Prompt Role</th>
+                                        <th>Target LLM Model</th>
+                                        <th>Actions</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <!-- Dynamic rows -->
+                                </tbody>
+                            </table>
+                        </div>
+                        <div class="config-card">
+                            <h3>Agent Rules & Guidelines</h3>
+                            <p class="config-desc">Manage modular guidelines and constraints for individual agents. Active rules are compiled and appended to the agent's system prompt at runtime.</p>
+                            <table class="config-table" id="rules-table">
+                                <thead>
+                                    <tr>
+                                        <th>Agent</th>
+                                        <th>Rule Key</th>
+                                        <th>Rule Text</th>
+                                        <th>Active</th>
+                                        <th>Actions</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <!-- Dynamic rows -->
+                                </tbody>
+                            </table>
+                            <div class="config-form">
+                                <h4>Add Agent Rule</h4>
+                                <div class="config-fields">
+                                    <select id="rule-agent-select">
+                                        <option value="persona">Persona</option>
+                                        <option value="proposer">Proposer</option>
+                                        <option value="critic">Critic</option>
+                                        <option value="explorer">Explorer</option>
+                                        <option value="archivist">Archivist</option>
+                                    </select>
+                                    <input type="text" id="rule-key-input" placeholder="Rule Key (e.g. check_docs)...">
+                                    <input type="text" id="rule-text-input" placeholder="Describe the agent rule/guideline...">
+                                    <button class="btn btn-primary" id="btn-rule-add">Add Rule</button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </section>
+            </main>
+        </div>
+    </div>
+
+    <!-- Metacognitive Debug Modal -->
+    <div class="modal-overlay" id="audit-modal">
+        <div class="modal-content glass-panel">
+            <header class="modal-header">
+                <h3>Swarm Debate Details</h3>
+                <button class="close-btn" id="close-modal-btn">&times;</button>
+            </header>
+            <div class="modal-body">
+                <div class="modal-meta-row">
+                    <span class="meta-label">Action:</span>
+                    <span class="meta-val" id="modal-action-name">Investigate Git Hook Performance</span>
+                </div>
+                <div class="modal-meta-row">
+                    <span class="meta-label">Critic Verdict:</span>
+                    <span class="meta-val badge" id="modal-critic-verdict">Approved</span>
+                </div>
+                <div class="modal-meta-row">
+                    <span class="meta-label">Utility Score:</span>
+                    <span class="meta-val" id="modal-utility-score">0.9</span>
+                </div>
+                <div class="modal-justification-box">
+                    <h4>Critic Justification</h4>
+                    <p id="modal-critic-justification">No objections.</p>
+                </div>
+                <div class="modal-raw-debate">
+                    <h4>Agent Debate Transcript</h4>
+                    <pre><code id="modal-raw-json">{}</code></pre>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>
