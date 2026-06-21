@@ -6,7 +6,7 @@ import pytest
 import src.config
 from src.database import init_db, log_episodic_memory
 from src.memory import compress_episodic_memory
-from src.sandbox_session import DockerSandboxExecutor
+from src.sandbox_session import DockerSandboxExecutor, LocalSandboxExecutor
 from src.self_modification import apply_staged_change
 
 
@@ -21,7 +21,7 @@ def setup_isolated_db(tmp_path):
     src.config.DB_PATH = orig_db_path
 
 def test_docker_sandbox_executor_network_none():
-    """Verify DockerSandboxExecutor passes the configured --network parameter."""
+    """Verify DockerSandboxExecutor passes the configured --network parameter and hardening flags."""
     executor = DockerSandboxExecutor()
 
     # Temporarily override DOCKER_NETWORK config value
@@ -35,12 +35,96 @@ def test_docker_sandbox_executor_network_none():
 
         executor.run_tests("/mock/sandbox/root", 30, {})
 
+        # Verify the daemon-reachability and image-existence preflight checks both ran
+        # before the final `docker run ...` invocation.
+        assert mock_run.call_count == 3
+
         # Verify subprocess.run command includes --network test_isolated_net
         called_args = mock_run.call_args[0][0]
         assert "--network" in called_args
         assert "test_isolated_net" in called_args
 
+        # Verify resource-limit and hardening flags are present
+        assert "--memory" in called_args
+        assert "--cpus" in called_args
+        assert "--pids-limit" in called_args
+        assert "--cap-drop=ALL" in called_args
+        assert "--security-opt=no-new-privileges" in called_args
+
     src.config.DOCKER_NETWORK = orig_net
+
+
+def test_local_sandbox_executor_blocked_by_default():
+    """Verify LocalSandboxExecutor refuses to run unless explicitly allowed."""
+    executor = LocalSandboxExecutor()
+
+    orig_allow_local = src.config.ALLOW_LOCAL_SANDBOX_EXEC
+    src.config.ALLOW_LOCAL_SANDBOX_EXEC = False
+
+    try:
+        with patch("subprocess.run") as mock_run:
+            passed, logs = executor.run_tests("/mock/sandbox/root", 30, {})
+
+            assert passed is False
+            assert "ALLOW_LOCAL_SANDBOX_EXEC" in logs
+            mock_run.assert_not_called()
+    finally:
+        src.config.ALLOW_LOCAL_SANDBOX_EXEC = orig_allow_local
+
+
+def test_local_sandbox_executor_allowed_when_flag_set():
+    """Verify LocalSandboxExecutor runs pytest when explicitly allowed via the override flag."""
+    executor = LocalSandboxExecutor()
+
+    orig_allow_local = src.config.ALLOW_LOCAL_SANDBOX_EXEC
+    src.config.ALLOW_LOCAL_SANDBOX_EXEC = True
+
+    try:
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout="passed", stderr="")
+
+            passed, logs = executor.run_tests("/mock/sandbox/root", 30, {})
+
+            assert passed is True
+            mock_run.assert_called_once()
+            called_args = mock_run.call_args[0][0]
+            assert "pytest" in called_args[0]
+    finally:
+        src.config.ALLOW_LOCAL_SANDBOX_EXEC = orig_allow_local
+
+
+def test_docker_sandbox_executor_daemon_unreachable():
+    """Verify DockerSandboxExecutor fails fast when the Docker daemon is unreachable."""
+    executor = DockerSandboxExecutor()
+
+    with patch("shutil.which", return_value="/usr/local/bin/docker"), \
+         patch("subprocess.run") as mock_run:
+
+        mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="Cannot connect to the Docker daemon")
+
+        passed, logs = executor.run_tests("/mock/sandbox/root", 30, {})
+
+        assert passed is False
+        assert "Docker daemon is not reachable" in logs
+        assert mock_run.call_count == 1
+
+
+def test_docker_sandbox_executor_image_missing():
+    """Verify DockerSandboxExecutor fails fast with an actionable error when the image is missing."""
+    executor = DockerSandboxExecutor()
+
+    with patch("shutil.which", return_value="/usr/local/bin/docker"), \
+         patch("subprocess.run") as mock_run:
+
+        info_ok = MagicMock(returncode=0, stdout="", stderr="")
+        inspect_fail = MagicMock(returncode=1, stdout="", stderr="No such image")
+        mock_run.side_effect = [info_ok, inspect_fail]
+
+        passed, logs = executor.run_tests("/mock/sandbox/root", 30, {})
+
+        assert passed is False
+        assert "docker build -t" in logs
+        assert mock_run.call_count == 2
 
 @patch("src.memory.query_agent")
 @patch("src.memory.add_memory")
