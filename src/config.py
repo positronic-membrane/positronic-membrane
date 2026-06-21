@@ -37,7 +37,8 @@ N_LOOP_LIMIT = int(os.getenv("N_LOOP_LIMIT", "20"))
 
 # Sandbox execution configs
 SANDBOX_TEST_TIMEOUT = int(os.getenv("SANDBOX_TEST_TIMEOUT", "60"))
-SANDBOX_PROVIDER = os.getenv("SANDBOX_PROVIDER", "local")  # "local", "docker", or "e2b"
+SANDBOX_PROVIDER = os.getenv("SANDBOX_PROVIDER", "docker")  # "local", "docker", or "e2b"
+ALLOW_LOCAL_SANDBOX_EXEC = os.getenv("ALLOW_LOCAL_SANDBOX_EXEC", "False").lower() in ("true", "1", "yes")
 E2B_API_KEY = os.getenv("E2B_API_KEY", "")
 SPAWN_PROVIDER = os.getenv("SPAWN_PROVIDER", "local")      # "local", "docker", or "ecs"
 
@@ -52,8 +53,12 @@ GITHUB_ENABLED = os.getenv("GITHUB_ENABLED", "False").lower() in ("true", "1", "
 GITHUB_ACCESS_TOKEN = os.getenv("GITHUB_ACCESS_TOKEN", "")
 GITHUB_REPO = os.getenv("GITHUB_REPO", "")  # e.g., "owner/repo"
 
-# Docker Sandbox Networking
+# Docker Sandbox Networking & Hardening
 DOCKER_NETWORK = os.getenv("DOCKER_NETWORK", "none")  # Default network isolation: none
+JANUS_DOCKER_IMAGE = os.getenv("JANUS_DOCKER_IMAGE", "janus:latest")
+DOCKER_MEMORY_LIMIT = os.getenv("DOCKER_MEMORY_LIMIT", "512m")
+DOCKER_CPU_LIMIT = os.getenv("DOCKER_CPU_LIMIT", "1.0")
+DOCKER_PIDS_LIMIT = os.getenv("DOCKER_PIDS_LIMIT", "256")
 
 # OpenRouter Configuration
 OPENROUTER_BASE_URL = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
