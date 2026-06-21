@@ -22,6 +22,14 @@ class SandboxExecutor(ABC):
 
 class LocalSandboxExecutor(SandboxExecutor):
     def run_tests(self, sandbox_root: str, test_timeout: int, env: dict) -> tuple:
+        if not getattr(src.config, "ALLOW_LOCAL_SANDBOX_EXEC", False):
+            return False, (
+                "Error: LocalSandboxExecutor is disabled by default for security "
+                "(unsandboxed host subprocess execution). Set SANDBOX_PROVIDER=docker "
+                "(recommended, default) or explicitly set ALLOW_LOCAL_SANDBOX_EXEC=True "
+                "and SANDBOX_PROVIDER=local to override."
+            )
+
         # Resolve absolute path to pytest
         pytest_path = str(src.config.ROOT_DIR / ".venv" / "bin" / "pytest")
         if not os.path.exists(pytest_path):
@@ -49,17 +57,42 @@ class LocalSandboxExecutor(SandboxExecutor):
 class DockerSandboxExecutor(SandboxExecutor):
     def run_tests(self, sandbox_root: str, test_timeout: int, env: dict) -> tuple:
         logger.info(f"DockerSandboxExecutor running tests for {sandbox_root}...")
-        import shutil
         docker_bin = shutil.which("docker")
         if not docker_bin:
             return False, "Error: docker binary not found in PATH."
-            
+
+        image_name = getattr(src.config, "JANUS_DOCKER_IMAGE", "janus:latest")
+
+        info_res = subprocess.run([docker_bin, "info"], capture_output=True, text=True, timeout=10)
+        if info_res.returncode != 0:
+            return False, (
+                f"Error: Docker daemon is not reachable. Is Docker running? "
+                f"(docker info failed: {info_res.stderr})"
+            )
+
+        inspect_res = subprocess.run(
+            [docker_bin, "image", "inspect", image_name], capture_output=True, text=True, timeout=10
+        )
+        if inspect_res.returncode != 0:
+            return False, (
+                f"Error: Docker image '{image_name}' not found locally. "
+                f"Build it first with: docker build -t {image_name} ."
+            )
+
         cmd = [
             docker_bin, "run", "--rm",
         ]
         if getattr(src.config, "DOCKER_NETWORK", None):
             cmd.extend(["--network", src.config.DOCKER_NETWORK])
-            
+
+        cmd.extend([
+            "--memory", getattr(src.config, "DOCKER_MEMORY_LIMIT", "512m"),
+            "--cpus", getattr(src.config, "DOCKER_CPU_LIMIT", "1.0"),
+            "--pids-limit", getattr(src.config, "DOCKER_PIDS_LIMIT", "256"),
+            "--cap-drop=ALL",
+            "--security-opt=no-new-privileges",
+        ])
+
         cmd.extend([
             "-v", f"{sandbox_root}:/workspace",
             "-w", "/workspace",
@@ -67,10 +100,9 @@ class DockerSandboxExecutor(SandboxExecutor):
         ])
         for k, v in env.items():
             cmd.extend(["-e", f"{k}={v}"])
-            
-        image_name = os.getenv("JANUS_DOCKER_IMAGE", "janus:latest")
+
         cmd.extend([image_name, "pytest", "-v"])
-        
+
         try:
             res = subprocess.run(
                 cmd,

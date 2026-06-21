@@ -107,7 +107,15 @@ def test_run_sandbox_tests(mock_save, mock_run, mock_get_session, tmp_path):
     mock_res.stderr = ""
     mock_run.return_value = mock_res
 
-    passed, logs = run_sandbox_tests()
+    orig_provider = src.config.SANDBOX_PROVIDER
+    orig_allow_local = src.config.ALLOW_LOCAL_SANDBOX_EXEC
+    src.config.SANDBOX_PROVIDER = "local"
+    src.config.ALLOW_LOCAL_SANDBOX_EXEC = True
+    try:
+        passed, logs = run_sandbox_tests()
+    finally:
+        src.config.SANDBOX_PROVIDER = orig_provider
+        src.config.ALLOW_LOCAL_SANDBOX_EXEC = orig_allow_local
 
     assert passed is True
     assert "All tests passed" in logs
@@ -132,7 +140,15 @@ def test_run_sandbox_tests_timeout(mock_save, mock_run, mock_get_session, tmp_pa
     import subprocess
     mock_run.side_effect = subprocess.TimeoutExpired(cmd=["pytest"], timeout=src.config.SANDBOX_TEST_TIMEOUT)
 
-    passed, logs = run_sandbox_tests()
+    orig_provider = src.config.SANDBOX_PROVIDER
+    orig_allow_local = src.config.ALLOW_LOCAL_SANDBOX_EXEC
+    src.config.SANDBOX_PROVIDER = "local"
+    src.config.ALLOW_LOCAL_SANDBOX_EXEC = True
+    try:
+        passed, logs = run_sandbox_tests()
+    finally:
+        src.config.SANDBOX_PROVIDER = orig_provider
+        src.config.ALLOW_LOCAL_SANDBOX_EXEC = orig_allow_local
 
     assert passed is False
     assert f"timed out after {src.config.SANDBOX_TEST_TIMEOUT} seconds" in logs
@@ -475,4 +491,3 @@ def test_regression_watcher_flow(
         db_conn.close()
         import shutil
         shutil.rmtree(tmp_path, ignore_errors=True)
-

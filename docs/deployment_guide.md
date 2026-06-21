@@ -124,10 +124,21 @@ When a parent agent spawns a child (e.g. using `spawn_child`), the system replic
 
 To run agent code validations safely without RCE risks on your host system:
 
-### Docker Mode
-Set `SANDBOX_PROVIDER=docker` in your container environment.
+### Docker Mode (Default)
+`SANDBOX_PROVIDER=docker` is the default — no configuration is required to enable it.
 *   Ensure the host container has access to the Docker daemon socket (mount `/var/run/docker.sock`).
-*   Janus will run validation tests inside ephemeral containers using the `janus:latest` image.
+*   Build the sandbox image ahead of time: `docker build -t janus:latest .` — `DockerSandboxExecutor`
+    preflight-checks that the daemon is reachable and the image exists before running tests, and
+    fails fast with an actionable error if either check fails (it does not auto-build).
+*   Janus runs validation tests inside ephemeral, `--network none`-isolated containers (configurable
+    via `DOCKER_NETWORK`) with resource limits (`DOCKER_MEMORY_LIMIT`, `DOCKER_CPU_LIMIT`,
+    `DOCKER_PIDS_LIMIT`) and fixed hardening (`--cap-drop=ALL`, `--security-opt=no-new-privileges`)
+    applied, using the `janus:latest` image (override via `JANUS_DOCKER_IMAGE`).
+
+### Local Mode (Disabled by Default)
+`SANDBOX_PROVIDER=local` runs pytest directly on the host with no isolation, and is hard-blocked
+unless you also set `ALLOW_LOCAL_SANDBOX_EXEC=True`. Only use this for trusted local development —
+never in a production/droplet deployment.
 
 ### E2B Sandboxes (Micro-VMs)
 Set `SANDBOX_PROVIDER=e2b` and define your api key:
