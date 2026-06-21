@@ -1,4 +1,5 @@
 import sqlite3
+import threading
 
 import pytest
 
@@ -131,4 +132,54 @@ def test_logging():
     cursor.execute("SELECT speaker, message_content FROM episodic_memory;")
     row = cursor.fetchone()
     assert row == ("user", "Hello Janus")
+    conn.close()
+
+def test_concurrent_writes_do_not_lock_database():
+    """
+    Simulates the background daemon's heartbeat logging (src/daemon.py, speaker
+    'system' / context_type 'background_thought') racing against the web server's
+    chat handler (src/routers/chat.py, speaker 'user'/'persona' / context_type
+    'user_visible') writing to the same episodic_memory table concurrently.
+    Verifies WAL mode + busy_timeout prevent 'database is locked' errors.
+    """
+    iterations = 50
+    errors = []
+
+    def daemon_writer():
+        for i in range(iterations):
+            try:
+                log_episodic_memory("system", f"heartbeat {i}", "background_thought")
+            except Exception as e:
+                errors.append(e)
+
+    def web_server_writer():
+        for i in range(iterations):
+            try:
+                speaker = "user" if i % 2 == 0 else "persona"
+                log_episodic_memory(speaker, f"chat turn {i}", "user_visible", party_id="local_user")
+            except Exception as e:
+                errors.append(e)
+
+    threads = [
+        threading.Thread(target=daemon_writer),
+        threading.Thread(target=daemon_writer),
+        threading.Thread(target=web_server_writer),
+        threading.Thread(target=web_server_writer),
+    ]
+
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert errors == [], f"Concurrent writes raised errors: {errors}"
+
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT COUNT(*) FROM episodic_memory;")
+    assert cursor.fetchone()[0] == iterations * 4
+    cursor.execute("SELECT COUNT(*) FROM episodic_memory WHERE context_type = 'background_thought';")
+    assert cursor.fetchone()[0] == iterations * 2
+    cursor.execute("SELECT COUNT(*) FROM episodic_memory WHERE context_type = 'user_visible';")
+    assert cursor.fetchone()[0] == iterations * 2
     conn.close()

@@ -331,6 +331,8 @@ def get_connection(read_only_constitution=True):
             os.makedirs(db_dir, exist_ok=True)
         conn = sqlite3.connect(src.config.DB_PATH)
         conn.execute("PRAGMA journal_mode=WAL;")
+        conn.execute("PRAGMA busy_timeout = 10000;")
+        conn.execute("PRAGMA synchronous = NORMAL;")
         if read_only_constitution:
             conn.set_authorizer(constitution_authorizer)
         return JanusConnectionWrapper(conn, db_type="sqlite", read_only_constitution=read_only_constitution)
