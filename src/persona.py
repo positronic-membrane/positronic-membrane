@@ -1469,14 +1469,14 @@ async def run_persona_chat():
             if user_msg.lower().startswith("/sandbox"):
                 parts = user_msg.split()
                 if len(parts) < 2:
-                    print("\n[Error] Missing sandbox command. Usage: /sandbox [start | status | diff | ship | abort]\n")
+                    print("\n[Error] Missing sandbox command. Usage: /sandbox [start | status | diff | ship | promote | abort]\n")
                     continue
-                
+
                 cmd_type = parts[1].lower()
                 from src.sandbox_session import (
                     get_active_sandbox, create_sandbox_session, run_sandbox_tests,
                     get_sandbox_diff, get_sandbox_modified_files, ship_sandbox_session,
-                    abort_sandbox_session
+                    abort_sandbox_session, promote_evolution_sandbox, delete_project_sandbox
                 )
                 
                 if cmd_type == "start":
@@ -1590,6 +1590,38 @@ async def run_persona_chat():
                     else:
                         print("\nShipping canceled. Sandbox session remains active.\n")
                         
+                elif cmd_type == "promote":
+                    active = get_active_sandbox()
+                    if not active:
+                        print("\nJanus >> No active sandbox session.\n")
+                        continue
+                    if active.get("active_sandbox_purpose") != "evolution":
+                        print("\n[Error] /sandbox promote only applies to evolution-purpose sessions.\n")
+                        continue
+                    confirm = await loop.run_in_executor(
+                        None, get_input,
+                        "Promote this evolution sandbox? This ships code to main and queues any "
+                        "schema/memory deltas for review. (y/n): "
+                    )
+                    if confirm.strip().lower() in ("y", "yes"):
+                        try:
+                            result = promote_evolution_sandbox()
+                            print(f"\n[✔] Sandbox promoted!")
+                            print(f"  * Files merged: {len(result['copied_files'])}")
+                            print(f"  * Schema migrations queued for review: {result['queued_migrations']}")
+                            print(f"  * Memories ported: {result['ported_memories']}\n")
+                            log_episodic_memory(
+                                "sandbox_automation",
+                                f"Sandbox session branch '{active['active_sandbox_branch']}' promoted. "
+                                f"Files: {len(result['copied_files'])}, migrations queued: "
+                                f"{result['queued_migrations']}, memories ported: {result['ported_memories']}.",
+                                "user_visible"
+                            )
+                        except Exception as err:
+                            print(f"\n[Error] Failed to promote sandbox: {err}\n")
+                    else:
+                        print("\nPromotion canceled. Sandbox session remains active.\n")
+
                 elif cmd_type == "abort":
                     active = get_active_sandbox()
                     if not active:
@@ -1606,9 +1638,88 @@ async def run_persona_chat():
                         )
                     else:
                         print("\nAbort canceled.\n")
-                        
+
                 else:
-                    print(f"\n[Error] Unknown sandbox command '{cmd_type}'. Options are: start, status, diff, ship, abort\n")
+                    print(f"\n[Error] Unknown sandbox command '{cmd_type}'. Options are: start, status, diff, ship, promote, abort\n")
+                continue
+
+            if user_msg.lower().startswith("/project"):
+                parts = user_msg.split()
+                if len(parts) < 2:
+                    print("\n[Error] Missing project command. Usage: /project [start | status | delete] <name>\n")
+                    continue
+
+                cmd_type = parts[1].lower()
+                from src.sandbox_session import (
+                    get_active_sandbox, create_sandbox_session,
+                    abort_sandbox_session, delete_project_sandbox
+                )
+
+                if cmd_type == "start":
+                    if len(parts) < 3:
+                        print("\n[Error] Please specify an app name: /project start <name>\n")
+                        continue
+                    app_name = parts[2]
+                    active = get_active_sandbox()
+                    if active:
+                        print(f"\n[Warning] An active sandbox session already exists at '{active['active_sandbox_path']}'.")
+                        confirm_abort = await loop.run_in_executor(None, get_input, "Abort the existing session first? (y/n): ")
+                        if confirm_abort.strip().lower() in ("y", "yes"):
+                            abort_sandbox_session()
+                            print("[Janus] Existing sandbox session aborted.")
+                        else:
+                            print("[Janus] Action canceled. Existing sandbox remains active.")
+                            continue
+                    try:
+                        path, _ = create_sandbox_session(app_name, purpose="project", app_name=app_name)
+                        print(f"\n[✔] Project sandbox '{app_name}' created!")
+                        print(f"  * Workspace Path: {path}\n")
+                        log_episodic_memory(
+                            "sandbox_automation",
+                            f"Project sandbox '{app_name}' initialized at '{path}'.",
+                            "user_visible"
+                        )
+                    except Exception as err:
+                        print(f"\n[Error] Failed to create project sandbox: {err}\n")
+
+                elif cmd_type == "status":
+                    active = get_active_sandbox()
+                    if not active or active.get("active_sandbox_purpose") != "project":
+                        print("\nJanus >> No active project sandbox session. Start one with: /project start <name>\n")
+                    else:
+                        print("\n" + "="*60)
+                        print("[Janus] Active Project Sandbox Status")
+                        print("="*60)
+                        print(f"  * App Name: {active.get('active_sandbox_app_name', '')}")
+                        print(f"  * Path:     {active['active_sandbox_path']}")
+                        print(f"  * Status:   {active['active_sandbox_status'].upper()}")
+                        print("="*60 + "\n")
+
+                elif cmd_type == "delete":
+                    if len(parts) < 3:
+                        print("\n[Error] Please specify an app name: /project delete <name>\n")
+                        continue
+                    app_name = parts[2]
+                    confirm = await loop.run_in_executor(
+                        None, get_input,
+                        f"Permanently delete project sandbox '{app_name}'? This cannot be undone. (y/n): "
+                    )
+                    if confirm.strip().lower() in ("y", "yes"):
+                        deleted = delete_project_sandbox(app_name)
+                        if deleted:
+                            print(f"\n[✔] Project sandbox '{app_name}' deleted.\n")
+                            log_episodic_memory(
+                                "sandbox_automation",
+                                f"Project sandbox '{app_name}' permanently deleted.",
+                                "user_visible"
+                            )
+                        else:
+                            print(f"\n[Error] No project sandbox named '{app_name}' was found.\n")
+                    else:
+                        print("\nDelete canceled.\n")
+
+                else:
+                    print(f"\n[Error] Unknown project command '{cmd_type}'. Options are: start, status, delete\n")
                 continue
 
             if user_msg.lower().startswith("/stage"):
@@ -2338,13 +2449,13 @@ async def handle_web_slash_command(user_msg: str) -> str:
     if user_msg.lower().startswith("/sandbox"):
         parts = user_msg.split()
         if len(parts) < 2:
-            return "[Error] Missing sandbox command. Usage: /sandbox [start | status | diff | ship | abort]"
-        
+            return "[Error] Missing sandbox command. Usage: /sandbox [start | status | diff | ship | promote | abort]"
+
         cmd_type = parts[1].lower()
         from src.sandbox_session import (
             get_active_sandbox, create_sandbox_session, run_sandbox_tests,
             get_sandbox_diff, get_sandbox_modified_files, ship_sandbox_session,
-            abort_sandbox_session
+            abort_sandbox_session, promote_evolution_sandbox, delete_project_sandbox
         )
         
         if cmd_type == "start":
@@ -2414,6 +2525,29 @@ async def handle_web_slash_command(user_msg: str) -> str:
             except Exception as err:
                 return f"[Error] Failed to ship sandbox changes: {err}"
                 
+        elif cmd_type == "promote":
+            active = get_active_sandbox()
+            if not active:
+                return "Janus >> No active sandbox session."
+            if active.get("active_sandbox_purpose") != "evolution":
+                return "[Error] /sandbox promote only applies to evolution-purpose sessions."
+            try:
+                result = await asyncio.to_thread(promote_evolution_sandbox)
+                msg = (
+                    f"Sandbox session branch '{active['active_sandbox_branch']}' promoted. "
+                    f"Files: {len(result['copied_files'])}, migrations queued: {result['queued_migrations']}, "
+                    f"memories ported: {result['ported_memories']}."
+                )
+                log_episodic_memory("sandbox_automation", msg, "user_visible")
+                return (
+                    f"[✔] Sandbox promoted!\n"
+                    f"* Files merged: {len(result['copied_files'])}\n"
+                    f"* Schema migrations queued for review: {result['queued_migrations']}\n"
+                    f"* Memories ported: {result['ported_memories']}"
+                )
+            except Exception as err:
+                return f"[Error] Failed to promote sandbox: {err}"
+
         elif cmd_type == "abort":
             active = get_active_sandbox()
             if not active:
@@ -2429,8 +2563,65 @@ async def handle_web_slash_command(user_msg: str) -> str:
             except Exception as err:
                 return f"[Error] Failed to abort sandbox: {err}"
         else:
-            return f"[Error] Unknown sandbox command '{cmd_type}'. Options are: start, status, diff, ship, abort"
-            
+            return f"[Error] Unknown sandbox command '{cmd_type}'. Options are: start, status, diff, ship, promote, abort"
+
+    # 1b. /project commands
+    elif user_msg.lower().startswith("/project"):
+        parts = user_msg.split()
+        if len(parts) < 2:
+            return "[Error] Missing project command. Usage: /project [start | status | delete] <name>"
+
+        cmd_type = parts[1].lower()
+        from src.sandbox_session import (
+            get_active_sandbox, create_sandbox_session, delete_project_sandbox
+        )
+
+        if cmd_type == "start":
+            if len(parts) < 3:
+                return "[Error] Please specify an app name: /project start <name>"
+            app_name = parts[2]
+            active = get_active_sandbox()
+            if active:
+                return f"[Error] An active sandbox session already exists at '{active['active_sandbox_path']}'. Abort/ship it first."
+            try:
+                path, _ = create_sandbox_session(app_name, purpose="project", app_name=app_name)
+                log_episodic_memory(
+                    "sandbox_automation",
+                    f"Project sandbox '{app_name}' initialized at '{path}'.",
+                    "user_visible"
+                )
+                return f"[✔] Project sandbox '{app_name}' created!\n* Workspace Path: {path}"
+            except Exception as err:
+                return f"[Error] Failed to create project sandbox: {err}"
+
+        elif cmd_type == "status":
+            active = get_active_sandbox()
+            if not active or active.get("active_sandbox_purpose") != "project":
+                return "Janus >> No active project sandbox session. Start one with: /project start <name>"
+            return (
+                f"Janus >> Active Project Sandbox Status\n"
+                f"* App Name: {active.get('active_sandbox_app_name', '')}\n"
+                f"* Path: {active['active_sandbox_path']}\n"
+                f"* Status: {active['active_sandbox_status'].upper()}\n"
+            )
+
+        elif cmd_type == "delete":
+            if len(parts) < 3:
+                return "[Error] Please specify an app name: /project delete <name>"
+            app_name = parts[2]
+            deleted = delete_project_sandbox(app_name)
+            if deleted:
+                log_episodic_memory(
+                    "sandbox_automation",
+                    f"Project sandbox '{app_name}' permanently deleted.",
+                    "user_visible"
+                )
+                return f"[✔] Project sandbox '{app_name}' deleted."
+            return f"[Error] No project sandbox named '{app_name}' was found."
+
+        else:
+            return f"[Error] Unknown project command '{cmd_type}'. Options are: start, status, delete"
+
     # 2. /stage commands
     elif user_msg.lower().startswith("/stage"):
         parts = user_msg.split()

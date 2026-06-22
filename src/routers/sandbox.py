@@ -31,6 +31,8 @@ def get_sandbox_status(current_party = Depends(require_role('user'))):
                 "path": active["active_sandbox_path"],
                 "branch": active["active_sandbox_branch"],
                 "status": active["active_sandbox_status"],
+                "purpose": active.get("active_sandbox_purpose", "evolution"),
+                "app_name": active.get("active_sandbox_app_name", ""),
                 "modified": modified,
                 "test_logs": active.get("active_sandbox_test_logs", "")
             }
@@ -80,21 +82,25 @@ def get_stage_status(current_party = Depends(require_role('user'))):
 
 @router.post("/api/sandbox/action")
 def post_sandbox_action(data: SandboxActionRequest, current_party = Depends(require_role('contributor'))):
-    """Handles Git Sandbox initialization, test running, aborting, and shipping."""
+    """Handles Git Sandbox initialization, test running, aborting, shipping, and promotion."""
     try:
         from src.sandbox_session import (
-            create_sandbox_session, run_sandbox_tests, ship_sandbox_session, abort_sandbox_session
+            create_sandbox_session, run_sandbox_tests, ship_sandbox_session, abort_sandbox_session,
+            promote_evolution_sandbox, delete_project_sandbox
         )
 
         if data.action == "start":
-            name = data.name or "web_sandbox"
-            path, branch = create_sandbox_session(name)
+            purpose = data.purpose or "evolution"
+            name = data.name or ("web_project" if purpose == "project" else "web_sandbox")
+            path, branch = create_sandbox_session(name, purpose=purpose, app_name=data.app_name)
             log_episodic_memory(
                 "sandbox_automation",
-                f"Sandbox session '{name}' initialized on branch '{branch}'. Sandbox path: '{path}'.",
+                f"Sandbox session '{name}' (purpose={purpose}) initialized"
+                + (f" on branch '{branch}'" if branch else "")
+                + f". Sandbox path: '{path}'.",
                 "user_visible"
             )
-            return {"success": True, "branch": branch, "path": path}
+            return {"success": True, "branch": branch, "path": path, "purpose": purpose}
         elif data.action == "test":
             passed, logs = run_sandbox_tests()
             return {"success": True, "passed": passed, "logs": logs}
@@ -106,6 +112,19 @@ def post_sandbox_action(data: SandboxActionRequest, current_party = Depends(requ
                 msg = f"Sandbox session branch '{active['active_sandbox_branch']}' successfully shipped and applied to active workspace. Files modified: {', '.join(copied)}."
                 log_episodic_memory("sandbox_automation", msg, "user_visible")
             return {"success": True, "copied": copied}
+        elif data.action == "promote":
+            from src.sandbox_session import get_active_sandbox
+            active = get_active_sandbox()
+            if not active or active.get("active_sandbox_purpose") != "evolution":
+                raise HTTPException(status_code=400, detail="No active evolution-purpose sandbox session to promote.")
+            result = promote_evolution_sandbox()
+            msg = (
+                f"Sandbox session branch '{active['active_sandbox_branch']}' promoted. "
+                f"Files: {len(result['copied_files'])}, migrations queued: {result['queued_migrations']}, "
+                f"memories ported: {result['ported_memories']}."
+            )
+            log_episodic_memory("sandbox_automation", msg, "user_visible")
+            return {"success": True, **result}
         elif data.action == "abort":
             from src.sandbox_session import get_active_sandbox
             active = get_active_sandbox()
@@ -114,8 +133,21 @@ def post_sandbox_action(data: SandboxActionRequest, current_party = Depends(requ
                 msg = f"Sandbox session branch '{active['active_sandbox_branch']}' aborted and cleaned up."
                 log_episodic_memory("sandbox_automation", msg, "user_visible")
             return {"success": True}
+        elif data.action == "delete_project":
+            if not data.app_name:
+                raise HTTPException(status_code=400, detail="app_name is required for delete_project.")
+            deleted = delete_project_sandbox(data.app_name)
+            if deleted:
+                log_episodic_memory(
+                    "sandbox_automation",
+                    f"Project sandbox '{data.app_name}' permanently deleted.",
+                    "user_visible"
+                )
+            return {"success": deleted}
         else:
             raise HTTPException(status_code=400, detail=f"Invalid sandbox action: {data.action}")
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

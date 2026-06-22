@@ -50,6 +50,8 @@ class ChatRequest(BaseModel):
 class SandboxActionRequest(BaseModel):
     action: str
     name: Optional[str] = None
+    purpose: Optional[str] = "evolution"
+    app_name: Optional[str] = None
 
 class StageActionRequest(BaseModel):
     action: str

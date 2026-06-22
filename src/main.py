@@ -1,4 +1,5 @@
 import sys
+import os
 import asyncio
 import logging
 import threading
@@ -68,13 +69,18 @@ def main():
             sys.exit(1)
     else:
         logger.info("Starting Project Janus Swarm in WEB mode...")
+        # Evolution child daemons run on an offset port (see spawn_evolution_daemon
+        # in src/sandbox_session.py) so they don't collide with the primary instance.
+        port = int(os.getenv("JANUS_EVOLUTION_PORT", "5005"))
+
         # 1. Start web server in background thread
-        web_thread = threading.Thread(target=run_server, kwargs={"port": 5005}, daemon=True)
+        web_thread = threading.Thread(target=run_server, kwargs={"port": port}, daemon=True)
         web_thread.start()
 
-        # 2. Open default browser
-        logger.info("Opening chat interface at http://localhost:5005 ...")
-        webbrowser.open("http://localhost:5005")
+        # 2. Open default browser (only for the primary instance, not spawned children)
+        logger.info(f"Opening chat interface at http://localhost:{port} ...")
+        if port == 5005:
+            webbrowser.open(f"http://localhost:{port}")
 
         # 3. Run background heartbeat loop on main thread
         try:

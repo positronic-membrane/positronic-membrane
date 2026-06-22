@@ -663,7 +663,27 @@ async def run_mid_layer_loop():
                     logger.info(f"Reflection cycle result: {res}")
                 except Exception as e:
                     logger.error(f"Reflection cycle failed: {e}")
-                    
+
+            # 6b. Drain pending swarm messages addressed to this process (parent or
+            # evolution child — JANUS_SELF_PARTY_ID defaults to "parent" for the
+            # ordinary, non-spawned daemon, so it also receives messages any
+            # evolution child sends it via send_swarm_message).
+            try:
+                from src.database import get_pending_swarm_messages, mark_swarm_message_processed
+                self_party_id = os.getenv("JANUS_SELF_PARTY_ID", "parent")
+                # get_pending_swarm_messages selects (id, sender_id, message_type, content, timestamp)
+                pending_messages = get_pending_swarm_messages(self_party_id)
+                for msg_id, sender, _message_type, content, _timestamp in pending_messages:
+                    logger.info(f"Swarm message received from '{sender}' for '{self_party_id}'.")
+                    log_episodic_memory(
+                        speaker=sender,
+                        message_content=content,
+                        context_type="background_thought"
+                    )
+                    mark_swarm_message_processed(msg_id)
+            except Exception as e:
+                logger.error(f"Failed to drain swarm messages: {e}")
+
             # 7. Update last run timestamp in database
             conn = get_connection(read_only_constitution=True)
             try:

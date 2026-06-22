@@ -44,16 +44,16 @@ def test_create_sandbox_session(mock_save, mock_run, tmp_path):
         worktree_add_args = mock_run.call_args_list[-1][0][0]
         assert "worktree" in worktree_add_args
         assert "add" in worktree_add_args
-        assert "janus/sandbox-my-feature" in worktree_add_args
+        assert "evolution/sandbox-my-feature" in worktree_add_args
 
         # Verify database save was triggered
         mock_save.assert_called_once()
         args = mock_save.call_args[0]
-        assert args[1] == "janus/sandbox-my-feature"
+        assert args[1] == "evolution/sandbox-my-feature"
         assert args[2] == "active"
 
         assert "session_my-feature" in path
-        assert branch == "janus/sandbox-my-feature"
+        assert branch == "evolution/sandbox-my-feature"
     finally:
         src.config.ROOT_DIR = orig_root
 

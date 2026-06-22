@@ -420,6 +420,16 @@ def init_db():
     """)
 
     cursor.execute("""
+    CREATE TABLE IF NOT EXISTS pending_schema_migrations (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        source_sandbox TEXT NOT NULL,
+        ddl_statement TEXT NOT NULL,
+        detected_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        status TEXT NOT NULL DEFAULT 'pending_review'
+    );
+    """)
+
+    cursor.execute("""
     CREATE TABLE IF NOT EXISTS agent_rules (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         agent_id TEXT NOT NULL,
@@ -2128,9 +2138,26 @@ def get_recent_episodic_memories(limit: int = 10, context_type: str = None, part
     return rows
 
 # Swarm Message Bus Helpers
+def get_swarm_bus_connection():
+    """
+    Connects to the swarm message bus DB. When running as a spawned evolution
+    child (JANUS_PARENT_DB_PATH set), connects to the PARENT's live DB instead
+    of the local DB_PATH, so swarm_messages rows are visible to both processes.
+    Otherwise (the normal/parent process), behaves like get_connection() pointed
+    at the local DB_PATH. Used only by the three swarm bus functions below —
+    never expose this through SafeSwarm or any dynamic-skill-callable surface,
+    since it bypasses constitution_authorizer.
+    """
+    import os
+    bus_path = os.getenv("JANUS_PARENT_DB_PATH") or src.config.DB_PATH
+    conn = sqlite3.connect(bus_path, timeout=10)
+    conn.execute("PRAGMA journal_mode=WAL;")
+    conn.execute("PRAGMA busy_timeout = 10000;")
+    return JanusConnectionWrapper(conn, db_type="sqlite", read_only_constitution=False)
+
 def send_swarm_message(sender_id: str, recipient_id: str, message_type: str, content: str):
     """Inserts a message into the swarm message bus."""
-    conn = get_connection(read_only_constitution=True)
+    conn = get_swarm_bus_connection()
     cursor = conn.cursor()
     cursor.execute("""
     INSERT INTO swarm_messages (sender_id, recipient_id, message_type, content)
@@ -2141,11 +2168,11 @@ def send_swarm_message(sender_id: str, recipient_id: str, message_type: str, con
 
 def get_pending_swarm_messages(recipient_id: str) -> list:
     """Retrieves all pending messages for a given recipient."""
-    conn = get_connection(read_only_constitution=True)
+    conn = get_swarm_bus_connection()
     cursor = conn.cursor()
     cursor.execute("""
-    SELECT id, sender_id, message_type, content, timestamp 
-    FROM swarm_messages 
+    SELECT id, sender_id, message_type, content, timestamp
+    FROM swarm_messages
     WHERE recipient_id = ? AND status = 'pending'
     ORDER BY id ASC;
     """, (recipient_id,))
@@ -2155,11 +2182,11 @@ def get_pending_swarm_messages(recipient_id: str) -> list:
 
 def mark_swarm_message_processed(message_id: int):
     """Marks a message in the swarm message bus as processed."""
-    conn = get_connection(read_only_constitution=True)
+    conn = get_swarm_bus_connection()
     cursor = conn.cursor()
     cursor.execute("""
-    UPDATE swarm_messages 
-    SET status = 'processed' 
+    UPDATE swarm_messages
+    SET status = 'processed'
     WHERE id = ?;
     """, (message_id,))
     conn.commit()
@@ -2239,7 +2266,8 @@ def get_pending_modification() -> dict:
     return {}
 
 # Staged Sandbox Session Helpers
-def save_sandbox_session(path: str, branch: str, status: str, test_logs: str = "", fork_sha: str = ""):
+def save_sandbox_session(path: str, branch: str, status: str, test_logs: str = "", fork_sha: str = "",
+                          purpose: str = "evolution", app_name: str = ""):
     """Saves active sandbox session metadata in system_config."""
     conn = get_connection(read_only_constitution=True)
     cursor = conn.cursor()
@@ -2248,11 +2276,14 @@ def save_sandbox_session(path: str, branch: str, status: str, test_logs: str = "
         ("active_sandbox_branch", branch),
         ("active_sandbox_status", status),
         ("active_sandbox_test_logs", test_logs),
+        ("active_sandbox_purpose", purpose),
     ]
     # Only persist fork_sha when it is supplied (first call from create_sandbox_session);
     # subsequent status-update calls pass an empty string, so we leave the stored value alone.
     if fork_sha:
         configs.append(("active_sandbox_fork_sha", fork_sha))
+    if app_name:
+        configs.append(("active_sandbox_app_name", app_name))
     for key, val in configs:
         cursor.execute("""
         INSERT OR REPLACE INTO system_config (config_key, config_value, is_agent_modifiable)
@@ -2271,6 +2302,8 @@ def clear_sandbox_session():
         "active_sandbox_status",
         "active_sandbox_test_logs",
         "active_sandbox_fork_sha",
+        "active_sandbox_purpose",
+        "active_sandbox_app_name",
     ]
     for key in keys:
         cursor.execute("DELETE FROM system_config WHERE config_key = ?;", (key,))
@@ -2282,24 +2315,28 @@ def get_sandbox_session() -> dict:
     conn = get_connection(read_only_constitution=True)
     cursor = conn.cursor()
     cursor.execute("""
-    SELECT config_key, config_value 
-    FROM system_config 
+    SELECT config_key, config_value
+    FROM system_config
     WHERE config_key IN (
         'active_sandbox_path',
         'active_sandbox_branch',
         'active_sandbox_status',
         'active_sandbox_test_logs',
-        'active_sandbox_fork_sha'
+        'active_sandbox_fork_sha',
+        'active_sandbox_purpose',
+        'active_sandbox_app_name'
     );
     """)
     rows = cursor.fetchall()
     conn.close()
-    
+
     if not rows:
         return {}
-        
+
     data = {k: v for k, v in rows}
     if "active_sandbox_path" in data and data["active_sandbox_path"]:
+        # Back-compat: sessions saved before the purpose field existed default to "evolution".
+        data.setdefault("active_sandbox_purpose", "evolution")
         return data
     return {}
 
