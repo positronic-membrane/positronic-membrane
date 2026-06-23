@@ -945,8 +945,14 @@ def handle_goal_command(command_str: str) -> str:
         except Exception as e:
             return f"[Error] Failed to reject proposal: {e}"
 
+    elif subcommand == "resolve":
+        return "[Error] Usage: /goals resolve [<dispute_id>] (dispute_id, if given, must be an integer)"
+
     else:
-        return f"[Error] Unknown goal subcommand '{subcommand}'. Available commands: create, status, checkpoint, complete, prioritize, proposals, approve, reject."
+        return (
+            f"[Error] Unknown goal subcommand '{subcommand}'. Available commands: "
+            "create, status, checkpoint, complete, prioritize, proposals, approve, reject, resolve."
+        )
 
 def handle_docs_command(command_str: str) -> str:
     """
@@ -2401,6 +2407,109 @@ async def run_persona_chat():
                         print("\nRepeal proposal aborted.\n")
                 else:
                     print("\nJanus >> Invalid format. Please use: /repeal <rule_key>\n")
+                continue
+
+            # Handle dispute resolution interceptor (V2-T10)
+            resolve_match = re.match(r"^/goals?\s+resolve\s*(\d+)?\s*$", user_msg.strip(), re.IGNORECASE)
+            if resolve_match:
+                from src.database import add_constitution_rule, get_dispute, get_open_disputes, resolve_dispute
+
+                dispute_arg = resolve_match.group(1)
+
+                if not dispute_arg:
+                    disputes = get_open_disputes()
+                    if not disputes:
+                        print(
+                            "\nNo open disputes. The autonomous loop is not currently "
+                            "paused for dispute resolution.\n"
+                        )
+                    else:
+                        output = ["\n### ⚖️ Open Swarm Disputes\n"]
+                        for d in disputes:
+                            output.append(
+                                f"- **[{d['id']}]** *{d['proposed_action']}* — vetoed {d['veto_count']}x "
+                                f"consecutively (opened {d['created_at']})"
+                            )
+                        output.append(
+                            "\nUse `/goals resolve <id>` to review the debate transcript and choose a resolution.\n"
+                        )
+                        print("\n".join(output))
+                    continue
+
+                dispute_id = int(dispute_arg)
+                dispute = get_dispute(dispute_id)
+                if not dispute:
+                    print(f"\n[Error] Dispute ID {dispute_id} not found.\n")
+                    continue
+                if dispute["status"] == "resolved":
+                    print(
+                        f"\n[Info] Dispute [{dispute_id}] was already resolved "
+                        f"({dispute['resolution']}) at {dispute['resolved_at']}.\n"
+                    )
+                    continue
+
+                print(
+                    f"\nJanus >> Dispute [{dispute_id}]: '{dispute['proposed_action']}' — "
+                    f"vetoed {dispute['veto_count']}x consecutively.\n"
+                )
+                print("Debate transcript:")
+                for entry in dispute["debate_transcript"]:
+                    print(f"  [{entry['timestamp']}] Action Proposed: '{entry['proposed_action']}' | Status: Vetoed")
+                    print(f"  Critic Justification: {entry['justification']}\n")
+
+                resolution_input = await loop.run_in_executor(
+                    None, get_input, "Choose a resolution: override / abort / rewrite (or cancel): "
+                )
+                resolution_input = resolution_input.strip().lower()
+
+                if resolution_input == "override":
+                    resolve_dispute(dispute_id, "override")
+                    print(
+                        f"\n[✔] Dispute [{dispute_id}] resolved: override. The Critic's veto stands "
+                        "for that action; the autonomous loop will resume.\n"
+                    )
+                    log_episodic_memory(
+                        "system",
+                        f"User overrode dispute [{dispute_id}] on action '{dispute['proposed_action']}'. "
+                        "Autonomous loop resumed.",
+                        "user_visible"
+                    )
+                elif resolution_input == "abort":
+                    resolve_dispute(dispute_id, "abort")
+                    print(
+                        f"\n[✔] Dispute [{dispute_id}] resolved: abort. The disputed action will not "
+                        "be pursued; the autonomous loop will resume.\n"
+                    )
+                    log_episodic_memory(
+                        "system",
+                        f"User aborted dispute [{dispute_id}] on action '{dispute['proposed_action']}'. "
+                        "Autonomous loop resumed.",
+                        "user_visible"
+                    )
+                elif resolution_input == "rewrite":
+                    rewrite_input = await loop.run_in_executor(
+                        None, get_input, "Enter rule to amend, format <rule_key> | <new_rule_text>: "
+                    )
+                    rewrite_match = re.match(r"^([a-z0-9_-]+)\s*\|\s*(.*)", rewrite_input.strip(), re.IGNORECASE)
+                    if rewrite_match:
+                        rule_key = rewrite_match.group(1).strip()
+                        rule_text = rewrite_match.group(2).strip()
+                        add_constitution_rule(rule_key, rule_text)
+                        resolve_dispute(dispute_id, "rewrite_rules", notes=f"{rule_key} | {rule_text}")
+                        print(
+                            f"\n[✔] Dispute [{dispute_id}] resolved: rewrite_rules. Rule '{rule_key}' "
+                            "sealed in core_constitution. The autonomous loop will resume.\n"
+                        )
+                        log_episodic_memory(
+                            "system",
+                            f"User resolved dispute [{dispute_id}] by rewriting constitutional rule "
+                            f"'{rule_key}'. Autonomous loop resumed.",
+                            "user_visible"
+                        )
+                    else:
+                        print("\n[Error] Invalid format. Resolution cancelled; dispute remains open.\n")
+                else:
+                    print("\nResolution cancelled; dispute remains open and the autonomous loop stays paused.\n")
                 continue
 
             if user_msg.lower().startswith("/skills"):

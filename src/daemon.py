@@ -655,9 +655,29 @@ async def run_mid_layer_loop():
             except Exception as e:
                 logger.error(f"Failed to run interval skills: {e}")
                 
-            # 6. Process reflection triggers if any
+            # 6. Process reflection triggers if any (skipped while a swarm dispute is
+            # pending resolution via /goals resolve, so we don't immediately re-trigger
+            # the same Proposer/Critic debate that caused the dispute)
             global _pending_swarm_triggers
-            if _pending_swarm_triggers:
+            dispute_paused = False
+            conn = get_connection(read_only_constitution=True)
+            try:
+                row = conn.execute(
+                    "SELECT config_value FROM system_config WHERE config_key = 'dispute_paused';"
+                ).fetchone()
+                dispute_paused = bool(row and row[0] == 'true')
+            except Exception as e:
+                logger.error(f"Failed to query dispute_paused: {e}")
+            finally:
+                conn.close()
+
+            if dispute_paused:
+                if _pending_swarm_triggers:
+                    logger.warning(
+                        "Dispute Resolution Protocol: execution loop paused pending user "
+                        "resolution via /goals resolve. Skipping pending reflection trigger."
+                    )
+            elif _pending_swarm_triggers:
                 logger.info("Processing pending swarm reflection trigger in mid-level loop...")
                 while _pending_swarm_triggers:
                     _pending_swarm_triggers.pop(0)

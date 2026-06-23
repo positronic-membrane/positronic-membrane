@@ -13,6 +13,7 @@ from src.persona import (
     handle_pin_command,
     handle_self_command,
     handle_unpin_command,
+    run_persona_chat,
 )
 from src.skills import DynamicSkillExecutor, SafeSelfModel
 
@@ -262,3 +263,145 @@ def test_context_hydration_tagging():
     # Check Anchor directive
     assert "Your objective reality is defined strictly by the data provided" in hydrated
     assert "You are strictly forbidden from substituting pre-trained assumptions." in hydrated
+
+# --- V2-T10: Dispute Resolution Protocol ---
+
+def _open_a_dispute() -> int:
+    """Logs 3 consecutive Critic vetoes to create an open swarm dispute, returns its id."""
+    from src.database import get_open_disputes
+
+    for _ in range(3):
+        log_deliberation(
+            proposed_action="modify_code: src/risky.py",
+            debate_json={"proposer_output": "x", "critic_output": "y"},
+            critic_decision=0,
+            utility_score=0.0,
+            justification="Violates constitution rule X",
+        )
+    return get_open_disputes()[0]["id"]
+
+
+def _make_input_mock(inputs):
+    remaining = list(inputs)
+
+    def side_effect(prompt):
+        if remaining:
+            return remaining.pop(0)
+        return "/exit"
+    return side_effect
+
+
+@pytest.mark.asyncio
+@patch("src.persona.get_input")
+async def test_goals_resolve_no_open_disputes(mock_get_input, capsys):
+    mock_get_input.side_effect = _make_input_mock(["/goals resolve", "/exit"])
+
+    await run_persona_chat()
+
+    captured = capsys.readouterr()
+    assert "No open disputes" in captured.out
+
+
+@pytest.mark.asyncio
+@patch("src.persona.get_input")
+async def test_goals_resolve_lists_open_disputes(mock_get_input, capsys):
+    dispute_id = _open_a_dispute()
+    mock_get_input.side_effect = _make_input_mock(["/goal resolve", "/exit"])
+
+    await run_persona_chat()
+
+    captured = capsys.readouterr()
+    assert f"[{dispute_id}]" in captured.out
+    assert "modify_code: src/risky.py" in captured.out
+    assert "vetoed 3x" in captured.out
+
+
+@pytest.mark.asyncio
+@patch("src.persona.get_input")
+async def test_goals_resolve_unknown_id(mock_get_input, capsys):
+    mock_get_input.side_effect = _make_input_mock(["/goals resolve 999", "/exit"])
+
+    await run_persona_chat()
+
+    captured = capsys.readouterr()
+    assert "Dispute ID 999 not found" in captured.out
+
+
+@pytest.mark.asyncio
+@patch("src.persona.get_input")
+async def test_goals_resolve_shows_transcript_and_overrides(mock_get_input, capsys):
+    from src.database import get_dispute
+
+    dispute_id = _open_a_dispute()
+    mock_get_input.side_effect = _make_input_mock([f"/goals resolve {dispute_id}", "override", "/exit"])
+
+    await run_persona_chat()
+
+    captured = capsys.readouterr()
+    assert "Debate transcript" in captured.out
+    assert "Violates constitution rule X" in captured.out
+    assert f"Dispute [{dispute_id}] resolved: override" in captured.out
+
+    dispute = get_dispute(dispute_id)
+    assert dispute["status"] == "resolved"
+    assert dispute["resolution"] == "override"
+
+    conn = get_connection(read_only_constitution=True)
+    row = conn.execute("SELECT config_value FROM system_config WHERE config_key = 'dispute_paused';").fetchone()
+    conn.close()
+    assert row[0] == "false"
+
+
+@pytest.mark.asyncio
+@patch("src.persona.get_input")
+async def test_goals_resolve_abort(mock_get_input):
+    from src.database import get_dispute
+
+    dispute_id = _open_a_dispute()
+    mock_get_input.side_effect = _make_input_mock([f"/goals resolve {dispute_id}", "abort", "/exit"])
+
+    await run_persona_chat()
+
+    assert get_dispute(dispute_id)["resolution"] == "abort"
+
+
+@pytest.mark.asyncio
+@patch("src.persona.get_input")
+async def test_goals_resolve_rewrite_rules_seals_constitution_rule(mock_get_input):
+    from src.database import get_constitution, get_dispute
+
+    dispute_id = _open_a_dispute()
+    mock_get_input.side_effect = _make_input_mock([
+        f"/goals resolve {dispute_id}",
+        "rewrite",
+        "no_risky_modify | Risky modifications to src/risky.py are now permitted.",
+        "/exit",
+    ])
+
+    await run_persona_chat()
+
+    dispute = get_dispute(dispute_id)
+    assert dispute["resolution"] == "rewrite_rules"
+    assert dispute["resolution_notes"] == "no_risky_modify | Risky modifications to src/risky.py are now permitted."
+
+    rules = dict(get_constitution())
+    assert rules["NO_RISKY_MODIFY"] == "Risky modifications to src/risky.py are now permitted."
+
+
+@pytest.mark.asyncio
+@patch("src.persona.get_input")
+async def test_goals_resolve_cancel_keeps_dispute_open(mock_get_input):
+    from src.database import get_dispute
+
+    dispute_id = _open_a_dispute()
+    mock_get_input.side_effect = _make_input_mock([f"/goals resolve {dispute_id}", "cancel", "/exit"])
+
+    await run_persona_chat()
+
+    dispute = get_dispute(dispute_id)
+    assert dispute["status"] == "open"
+
+    conn = get_connection(read_only_constitution=True)
+    row = conn.execute("SELECT config_value FROM system_config WHERE config_key = 'dispute_paused';").fetchone()
+    conn.close()
+    assert row[0] == "true"
