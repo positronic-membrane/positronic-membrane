@@ -448,6 +448,114 @@ class SafeGoals:
         finally:
             conn.close()
 
+    def get_proposals(self, status: Optional[str] = None) -> list:
+        conn = get_connection(read_only_constitution=True)
+        try:
+            cursor = conn.cursor()
+            query = "SELECT id, type, description, confidence_score, source_reason, status, created_at, updated_at FROM goal_proposals"
+            params = []
+            if status:
+                query += " WHERE status = ?"
+                params.append(status)
+            query += " ORDER BY id DESC;"
+            cursor.execute(query, tuple(params))
+            rows = cursor.fetchall()
+
+            proposals = []
+            for row in rows:
+                try:
+                    proposals.append({
+                        "id": row['id'],
+                        "type": row['type'],
+                        "description": row['description'],
+                        "confidence_score": row['confidence_score'],
+                        "source_reason": row['source_reason'],
+                        "status": row['status'],
+                        "created_at": row['created_at'],
+                        "updated_at": row['updated_at']
+                    })
+                except (TypeError, IndexError, KeyError):
+                    pid, ptype, pdesc, pconf, preason, pstatus, pcreated, pupdated = row
+                    proposals.append({
+                        "id": pid,
+                        "type": ptype,
+                        "description": pdesc,
+                        "confidence_score": pconf,
+                        "source_reason": preason,
+                        "status": pstatus,
+                        "created_at": pcreated,
+                        "updated_at": pupdated
+                    })
+            return proposals
+        finally:
+            conn.close()
+
+    def propose_goal(self, type: str, description: str, confidence_score: float, source_reason: str) -> int:
+        if type not in ('short', 'long', 'stretch', 'aspirational'):
+            raise ValueError("Type must be one of: 'short', 'long', 'stretch', 'aspirational'")
+
+        conn = get_connection(read_only_constitution=True)
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                "INSERT INTO goal_proposals (type, description, confidence_score, source_reason) VALUES (?, ?, ?, ?);",
+                (type, description, confidence_score, source_reason)
+            )
+            conn.commit()
+            return cursor.lastrowid
+        finally:
+            conn.close()
+
+    def approve_proposal(self, proposal_id: int) -> dict:
+        conn = get_connection(read_only_constitution=True)
+        try:
+            cursor = conn.cursor()
+            cursor.execute("SELECT type, description, status FROM goal_proposals WHERE id = ?;", (proposal_id,))
+            row = cursor.fetchone()
+            if not row:
+                raise ValueError(f"Proposal ID {proposal_id} does not exist.")
+            try:
+                ptype, pdesc, pstatus = row['type'], row['description'], row['status']
+            except (TypeError, IndexError, KeyError):
+                ptype, pdesc, pstatus = row
+            if pstatus != 'proposed':
+                raise ValueError(f"Proposal ID {proposal_id} has already been resolved (status: '{pstatus}').")
+
+            goal_id = self.create_goal(ptype, pdesc)
+
+            cursor.execute(
+                "UPDATE goal_proposals SET status = 'approved', updated_at = CURRENT_TIMESTAMP WHERE id = ?;",
+                (proposal_id,)
+            )
+            conn.commit()
+            return {"success": True, "proposal_id": proposal_id, "goal_id": goal_id}
+        finally:
+            conn.close()
+
+    def reject_proposal(self, proposal_id: int) -> dict:
+        conn = get_connection(read_only_constitution=True)
+        try:
+            cursor = conn.cursor()
+            cursor.execute("SELECT status FROM goal_proposals WHERE id = ?;", (proposal_id,))
+            row = cursor.fetchone()
+            if not row:
+                raise ValueError(f"Proposal ID {proposal_id} does not exist.")
+            try:
+                pstatus = row['status']
+            except (TypeError, IndexError, KeyError):
+                pstatus = row[0]
+            if pstatus != 'proposed':
+                raise ValueError(f"Proposal ID {proposal_id} has already been resolved (status: '{pstatus}').")
+
+            cursor.execute(
+                "UPDATE goal_proposals SET status = 'rejected', updated_at = CURRENT_TIMESTAMP WHERE id = ?;",
+                (proposal_id,)
+            )
+            conn.commit()
+            return {"success": True, "proposal_id": proposal_id}
+        finally:
+            conn.close()
+
     def manage_goals(self, action: str, params: dict) -> dict:
         if action == "create":
             g_type = params.get("type")

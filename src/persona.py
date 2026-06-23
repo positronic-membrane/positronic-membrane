@@ -906,8 +906,47 @@ def handle_goal_command(command_str: str) -> str:
         except Exception as e:
             return f"[Error] Failed to prioritize goal: {e}"
 
+    elif subcommand == "proposals":
+        proposals = sg.get_proposals()
+        if not proposals:
+            return "No goal proposals pending. The subconscious reflection loop will queue new proposals here as curiosity vectors evolve."
+
+        output = ["### 💭 Subconscious Goal Proposals\n"]
+        status_emoji = {'proposed': '💡', 'approved': '✅', 'rejected': '❌'}
+        for p in proposals:
+            emoji = status_emoji.get(p['status'], '❓')
+            output.append(f"- **[{p['id']}]** {emoji} *{p['description']}* (Type: `{p['type']}`, Confidence: {p['confidence_score']:.2f}, Status: `{p['status']}`)")
+            output.append(f"  - Reason: {p['source_reason']}")
+        return "\n".join(output)
+
+    elif subcommand == "approve":
+        if not args_str:
+            return "[Error] Usage: /goal approve <proposal_id>"
+        try:
+            pid = int(args_str)
+        except ValueError:
+            return "[Error] Proposal ID must be an integer."
+        try:
+            res = sg.approve_proposal(pid)
+            return f"[✔] Proposal [{pid}] approved and promoted to Goal [{res['goal_id']}]."
+        except Exception as e:
+            return f"[Error] Failed to approve proposal: {e}"
+
+    elif subcommand == "reject":
+        if not args_str:
+            return "[Error] Usage: /goal reject <proposal_id>"
+        try:
+            pid = int(args_str)
+        except ValueError:
+            return "[Error] Proposal ID must be an integer."
+        try:
+            sg.reject_proposal(pid)
+            return f"[✔] Proposal [{pid}] rejected."
+        except Exception as e:
+            return f"[Error] Failed to reject proposal: {e}"
+
     else:
-        return f"[Error] Unknown goal subcommand '{subcommand}'. Available commands: create, status, checkpoint, complete, prioritize."
+        return f"[Error] Unknown goal subcommand '{subcommand}'. Available commands: create, status, checkpoint, complete, prioritize, proposals, approve, reject."
 
 def handle_docs_command(command_str: str) -> str:
     """
