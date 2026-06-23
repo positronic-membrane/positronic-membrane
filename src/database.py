@@ -623,10 +623,20 @@ def init_db():
         title      TEXT NOT NULL UNIQUE,
         content    TEXT NOT NULL DEFAULT '',
         tags       TEXT NOT NULL DEFAULT '[]',
+        purpose    TEXT NOT NULL DEFAULT 'memory' CHECK(purpose IN ('memory', 'knowledge')),
+        metadata   TEXT NOT NULL DEFAULT '{}',
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );
     """)
+
+    # Existing installs predate the purpose/metadata columns above; backfill them.
+    cursor.execute("PRAGMA table_info(janus_documents);")
+    janus_documents_columns = [row[1] for row in cursor.fetchall()]
+    if "purpose" not in janus_documents_columns:
+        cursor.execute("ALTER TABLE janus_documents ADD COLUMN purpose TEXT NOT NULL DEFAULT 'memory';")
+    if "metadata" not in janus_documents_columns:
+        cursor.execute("ALTER TABLE janus_documents ADD COLUMN metadata TEXT NOT NULL DEFAULT '{}';")
 
     # Populate cognitive_layers with defaults if empty
     cursor.execute("SELECT COUNT(*) FROM cognitive_layers;")
@@ -1636,7 +1646,9 @@ def init_db():
         "required": ["filename"]
     })
 
-    _commit_draft_code = '''def commit_draft_to_db(filename: str, doc_title: str, tags: list = None) -> str:
+    _commit_draft_code = '''def commit_draft_to_db(
+    filename: str, doc_title: str, tags: list = None, purpose: str = "memory", metadata: dict = None
+) -> str:
     import os
     import src.config
     basename = os.path.basename(filename)
@@ -1645,16 +1657,22 @@ def init_db():
         return f"[Error] Local draft file '{safe_path}' not found."
     with open(safe_path, "r", encoding="utf-8", errors="ignore") as f:
         content = f.read()
-    
-    sdk['documents'].upsert(doc_title, content, tags)
-    return f"Successfully committed draft '{basename}' to DB document '{doc_title}' ({len(content)} characters)."
+
+    sdk['documents'].upsert(doc_title, content, tags, purpose=purpose, metadata=metadata)
+    chars = len(content)
+    return f"Successfully committed draft '{basename}' to DB document '{doc_title}' as '{purpose}' ({chars} chars)."
 '''
     _commit_draft_schema = json.dumps({
         "type": "object",
         "properties": {
             "filename": {"type": "string", "description": "The draft filename in docs/drafts/."},
             "doc_title": {"type": "string", "description": "The title of the document in the database."},
-            "tags": {"type": "array", "items": {"type": "string"}, "description": "Optional tags for the document."}
+            "tags": {"type": "array", "items": {"type": "string"}, "description": "Optional tags for the document."},
+            "purpose": {
+                "type": "string", "enum": ["memory", "knowledge"],
+                "description": "'memory' (default) for ephemeral notes, 'knowledge' for curated docs never pruned"
+            },
+            "metadata": {"type": "object", "description": "Optional metadata (e.g. source URLs, confidence, versions)."}
         },
         "required": ["filename", "doc_title"]
     })
@@ -1697,7 +1715,9 @@ def init_db():
         "required": ["doc_title"]
     })
 
-    _doc_mem_code = """def document_memory(action: str, title: str = None, tag_filter: str = None) -> str:
+    _doc_mem_code = """def document_memory(
+    action: str, title: str = None, tag_filter: str = None, purpose: str = None
+) -> str:
     NL = chr(10)
     if action == "get":
         if not title:
@@ -1707,16 +1727,19 @@ def init_db():
             return f"[Error] No document found with title '{title}'."
         tags_str = ", ".join(doc["tags"]) if doc["tags"] else "none"
         header = f"### {doc['title']}{NL}"
-        meta = f"**Tags:** {tags_str} | **Created:** {doc['created_at']} | **Updated:** {doc['updated_at']}{NL}{NL}"
+        meta = (
+            f"**Purpose:** {doc['purpose']} | **Tags:** {tags_str} | "
+            f"**Created:** {doc['created_at']} | **Updated:** {doc['updated_at']}{NL}{NL}"
+        )
         return header + meta + doc["content"]
     elif action == "list":
-        docs = sdk['documents'].list(tag_filter=tag_filter)
+        docs = sdk['documents'].list(tag_filter=tag_filter, purpose=purpose)
         if not docs:
             return "No documents stored yet."
-        output = ["### Janus Documents", "| Title | Tags | Updated |", "| --- | --- | --- |"]
+        output = ["### Janus Documents", "| Title | Purpose | Tags | Updated |", "| --- | --- | --- | --- |"]
         for doc in docs:
             tags_str = ", ".join(doc["tags"]) if doc["tags"] else "-"
-            output.append(f"| {doc['title']} | {tags_str} | {doc['updated_at']} |")
+            output.append(f"| {doc['title']} | {doc['purpose']} | {tags_str} | {doc['updated_at']} |")
         return NL.join(output)
     else:
         raise ValueError(f"Unknown document action: '{action}'. Supported: get, list.")
@@ -1726,7 +1749,11 @@ def init_db():
         "properties": {
             "action": {"type": "string", "enum": ["get", "list"]},
             "title": {"type": "string"},
-            "tag_filter": {"type": "string"}
+            "tag_filter": {"type": "string"},
+            "purpose": {
+                "type": "string", "enum": ["memory", "knowledge"],
+                "description": "Optional filter for action=list, restricting results to this purpose."
+            }
         },
         "required": ["action"]
     })
@@ -2515,13 +2542,13 @@ def set_system_config_value(key: str, value: str, is_agent: bool = True):
 
 # Document Memory Helper Functions (Delegated to SafeDocuments SDK wrapper)
 
-def create_document(title: str, content: str, tags: list = None) -> int:
+def create_document(title: str, content: str, tags: list = None, purpose: str = "memory", metadata: dict = None) -> int:
     """Creates a new document record. Raises if the title already exists."""
     from src.skills import SafeDocuments
     sd = SafeDocuments()
     if sd.get(title):
         raise ValueError(f"Document with title '{title}' already exists.")
-    sd.upsert(title, content, tags)
+    sd.upsert(title, content, tags, purpose=purpose, metadata=metadata)
     doc = sd.get(title)
     return doc["id"] if doc else 0
 
@@ -2532,8 +2559,11 @@ def get_document(title: str) -> dict:
     return SafeDocuments().get(title)
 
 
-def update_document(title: str, content: str = None, tags: list = None) -> bool:
-    """Updates content and/or tags for an existing document. Returns False if not found."""
+def update_document(
+    title: str, content: str = None, tags: list = None, purpose: str = None, metadata: dict = None
+) -> bool:
+    """Updates content/tags/purpose/metadata for an existing document. Returns False if not found.
+    Any field left as None keeps its current value rather than being reset to a default."""
     from src.skills import SafeDocuments
     sd = SafeDocuments()
     doc = sd.get(title)
@@ -2541,7 +2571,9 @@ def update_document(title: str, content: str = None, tags: list = None) -> bool:
         return False
     new_content = content if content is not None else doc["content"]
     new_tags = tags if tags is not None else doc["tags"]
-    return sd.upsert(title, new_content, new_tags)
+    new_purpose = purpose if purpose is not None else doc["purpose"]
+    new_metadata = metadata if metadata is not None else doc["metadata"]
+    return sd.upsert(title, new_content, new_tags, purpose=new_purpose, metadata=new_metadata)
 
 
 def delete_document(title: str) -> bool:
@@ -2550,7 +2582,7 @@ def delete_document(title: str) -> bool:
     return SafeDocuments().delete(title)
 
 
-def list_documents(tag_filter: str = None) -> list:
-    """Returns a list of document dicts. Optionally filters by a tag string."""
+def list_documents(tag_filter: str = None, purpose: str = None) -> list:
+    """Returns a list of document dicts. Optionally filters by tag and/or purpose."""
     from src.skills import SafeDocuments
-    return SafeDocuments().list(tag_filter=tag_filter)
+    return SafeDocuments().list(tag_filter=tag_filter, purpose=purpose)
