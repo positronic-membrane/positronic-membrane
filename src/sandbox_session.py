@@ -2,6 +2,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import logging
 from pathlib import Path
 import src.config
@@ -158,19 +159,38 @@ def get_active_sandbox() -> dict:
     """Returns details of the active sandbox session or empty dict."""
     return get_sandbox_session()
 
-def create_sandbox_session(session_name: str) -> tuple:
+def create_sandbox_session(session_name: str, purpose: str = "evolution", app_name: str = None) -> tuple:
+    """
+    Creates a new sandbox session of the given purpose.
+
+    purpose="evolution" (default): today's existing behavior, unchanged for every
+    caller that doesn't pass `purpose` explicitly — a git worktree on an
+    `evolution/*` branch with a duplicated SQLite DB, for agent self-modification.
+
+    purpose="project": a plain, independently `git init`'d folder under
+    `.janus_sandboxes/projects/<app_name>` for building an independent user app.
+    No worktree, no branch, no DB duplication — SafeFS confines reads/writes to
+    this folder via the same active-sandbox mechanism evolution sessions use.
+
+    Returns: (sandbox_path_str, branch_name) — branch_name is "" for project sandboxes.
+    """
+    if purpose == "project":
+        return _create_project_sandbox(session_name, app_name or session_name)
+    return _create_evolution_sandbox(session_name)
+
+def _create_evolution_sandbox(session_name: str) -> tuple:
     """
     Creates a new Git branch and checks it out to a separate worktree folder.
     Saves the session state in the SQLite config.
     Returns: (sandbox_path_str, branch_name)
     """
     sanitized = sanitize_session_name(session_name)
-    branch_name = f"janus/sandbox-{sanitized}"
+    branch_name = f"evolution/sandbox-{sanitized}"
     sandbox_dir = src.config.ROOT_DIR / ".janus_sandboxes" / f"session_{sanitized}"
     sandbox_path_str = str(sandbox_dir)
-    
+
     logger.info(f"Initializing Git Worktree Sandbox at '{sandbox_path_str}' on branch '{branch_name}'...")
-    
+
     # 1. Self-healing cleanup of existing worktree/branch if duplicate name is used
     try:
         subprocess.run(
@@ -189,10 +209,10 @@ def create_sandbox_session(session_name: str) -> tuple:
             shutil.rmtree(sandbox_dir, ignore_errors=True)
     except Exception as e:
         logger.warning(f"Error running pre-cleanup: {e}")
-        
+
     # Ensure parent directory exists
     os.makedirs(sandbox_dir.parent, exist_ok=True)
-    
+
     # Capture the current HEAD SHA before branching so we can later diff against it
     fork_sha = ""
     try:
@@ -207,7 +227,7 @@ def create_sandbox_session(session_name: str) -> tuple:
             logger.info(f"Captured fork-point SHA: {fork_sha}")
     except Exception as e:
         logger.warning(f"Could not capture fork-point SHA: {e}")
-    
+
     # 2. Run git worktree add
     cmd = ["git", "worktree", "add", "-b", branch_name, sandbox_path_str]
     res = subprocess.run(
@@ -216,10 +236,10 @@ def create_sandbox_session(session_name: str) -> tuple:
         capture_output=True,
         text=True
     )
-    
+
     if res.returncode != 0:
         raise RuntimeError(f"Failed to create git worktree sandbox: {res.stderr or res.stdout}")
-        
+
     # Copy active DB to sandbox directory for database isolation
     db_src = Path(src.config.DB_PATH)
     if db_src.exists() and db_src.is_file():
@@ -230,10 +250,159 @@ def create_sandbox_session(session_name: str) -> tuple:
             logger.warning(f"Could not isolate database for sandbox session: {e}")
 
     # 3. Save to database (persist fork SHA so ship can diff against it later)
-    save_sandbox_session(sandbox_path_str, branch_name, "active", fork_sha=fork_sha)
-    
+    save_sandbox_session(sandbox_path_str, branch_name, "active", fork_sha=fork_sha, purpose="evolution")
+
     logger.info(f"Sandbox created successfully.")
     return sandbox_path_str, branch_name
+
+def _create_project_sandbox(session_name: str, app_name: str, overwrite: bool = False) -> tuple:
+    """
+    Provisions an isolated, independently git-init'd folder for building a user
+    app, unrelated to Janus's own codebase or database. Unlike evolution
+    sandboxes (throwaway-per-attempt worktrees), project directories are meant to
+    persist across sessions, so an existing app_name raises unless overwrite=True.
+    Returns: (sandbox_path_str, "") — there is no branch concept for project sandboxes.
+    """
+    sanitized = sanitize_session_name(app_name)
+    project_dir = src.config.ROOT_DIR / ".janus_sandboxes" / "projects" / sanitized
+    project_path_str = str(project_dir)
+
+    if project_dir.exists():
+        if not overwrite:
+            raise RuntimeError(
+                f"Project sandbox '{sanitized}' already exists at '{project_path_str}'. "
+                f"Choose a different app_name, or pass overwrite=True to recreate it."
+            )
+        shutil.rmtree(project_dir, ignore_errors=True)
+
+    os.makedirs(project_dir, exist_ok=True)
+
+    res = subprocess.run(
+        ["git", "init", project_path_str],
+        capture_output=True,
+        text=True
+    )
+    if res.returncode != 0:
+        raise RuntimeError(f"Failed to git init project sandbox: {res.stderr or res.stdout}")
+
+    save_sandbox_session(project_path_str, "", "active", purpose="project", app_name=sanitized)
+
+    logger.info(f"Project sandbox '{sanitized}' created at '{project_path_str}'.")
+    return project_path_str, ""
+
+def delete_project_sandbox(app_name: str) -> bool:
+    """
+    Permanently deletes a project sandbox directory. This is the only path that
+    removes project app files — ship/abort never do, since ending a session
+    shouldn't delete the user's app. Returns True if a directory was deleted.
+    """
+    sanitized = sanitize_session_name(app_name)
+    project_dir = src.config.ROOT_DIR / ".janus_sandboxes" / "projects" / sanitized
+    if not project_dir.exists():
+        return False
+
+    session = get_active_sandbox()
+    if session and session.get("active_sandbox_purpose") == "project" and \
+            session.get("active_sandbox_app_name") == sanitized:
+        clear_sandbox_session()
+
+    shutil.rmtree(project_dir, ignore_errors=True)
+    logger.info(f"Deleted project sandbox '{sanitized}'.")
+    return True
+
+def _find_free_evolution_port(start_port: int = 5001, max_attempts: int = 50) -> int:
+    """Returns the first port >= start_port that nothing is currently listening on."""
+    import socket
+    port = start_port
+    for _ in range(max_attempts):
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            in_use = sock.connect_ex(("127.0.0.1", port)) == 0
+        finally:
+            sock.close()
+        if not in_use:
+            return port
+        port += 1
+    raise RuntimeError(f"Could not find a free evolution port starting from {start_port}.")
+
+def spawn_evolution_daemon(sandbox_dir, branch_name: str) -> dict:
+    """
+    Launches a concurrent child Janus daemon process inside an evolution
+    sandbox worktree, pointed at the already-duplicated DB and running on an
+    offset port, so the agent can autonomously work inside the sandbox using
+    its own live heartbeat loop. Opt-in — create_sandbox_session() never calls
+    this automatically, since most evolution sandbox usage (e.g. dispatch_task)
+    is a write-files-then-test flow that doesn't need a live child process.
+
+    Reuses the subprocess-launch + spawn_log bookkeeping shape from
+    SafeReplication.spawn_child() (src/skills.py), not its tree-copy/DB-reseed —
+    the worktree and DB copy already exist from _create_evolution_sandbox().
+    """
+    sandbox_dir = Path(sandbox_dir)
+    child_db_path = sandbox_dir / "janus_test.db"
+    if not child_db_path.exists():
+        raise RuntimeError(f"No isolated database found at '{child_db_path}' — cannot spawn evolution daemon.")
+
+    branch_suffix = branch_name.rsplit("-", 1)[-1] if branch_name else sandbox_dir.name
+    self_party_id = f"evolution_{branch_suffix}"
+    port = _find_free_evolution_port()
+
+    env = os.environ.copy()
+    env["DB_PATH"] = str(child_db_path)
+    env["DB_TYPE"] = "sqlite"
+    env["JANUS_EVOLUTION_PORT"] = str(port)
+    env["JANUS_PARENT_DB_PATH"] = str(Path(src.config.DB_PATH).resolve())
+    env["JANUS_ROLE"] = "evolution_child"
+    env["JANUS_PARENT_PARTY_ID"] = "parent"
+    env["JANUS_SELF_PARTY_ID"] = self_party_id
+    current_pythonpath = env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = (
+        f"{sandbox_dir}{os.pathsep}{current_pythonpath}" if current_pythonpath else str(sandbox_dir)
+    )
+
+    conn = get_connection(read_only_constitution=True)
+    try:
+        conn.execute("""
+        INSERT OR REPLACE INTO spawn_log (child_path, status, spawned_at)
+        VALUES (?, 'spawning', CURRENT_TIMESTAMP);
+        """, (str(sandbox_dir),))
+        conn.commit()
+    finally:
+        conn.close()
+
+    main_py = str(sandbox_dir / "src" / "main.py")
+    process = subprocess.Popen(
+        [sys.executable, main_py],
+        cwd=str(sandbox_dir),
+        env=env,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True
+    )
+    child_pid = process.pid
+
+    conn = get_connection(read_only_constitution=True)
+    try:
+        conn.execute("""
+        UPDATE spawn_log
+        SET child_pid = ?, status = 'alive', last_heartbeat = CURRENT_TIMESTAMP
+        WHERE child_path = ?;
+        """, (child_pid, str(sandbox_dir)))
+        conn.commit()
+    finally:
+        conn.close()
+
+    logger.info(
+        f"Spawned evolution child daemon for '{sandbox_dir}' "
+        f"(pid={child_pid}, port={port}, party={self_party_id})."
+    )
+    return {
+        "success": True,
+        "child_path": str(sandbox_dir),
+        "child_pid": child_pid,
+        "port": port,
+        "self_party_id": self_party_id,
+    }
 
 def apply_changes_to_sandbox(proposed_mods: dict):
     """
@@ -440,16 +609,43 @@ def parse_pytest_results(logs: str) -> dict:
         "coverage": coverage
     }
 
+def _ship_project_sandbox(session: dict) -> list:
+    """
+    Clears the active-session pointer for a project sandbox without touching
+    the directory or its independent git history. Returns the project's own
+    tracked files (for informational purposes), copying nothing into ROOT_DIR.
+    """
+    sandbox_root = Path(session["active_sandbox_path"])
+    tracked_files = []
+    if sandbox_root.exists():
+        res = subprocess.run(
+            ["git", "-C", str(sandbox_root), "ls-files"],
+            capture_output=True,
+            text=True
+        )
+        if res.returncode == 0:
+            tracked_files = [f for f in res.stdout.splitlines() if f.strip()]
+    clear_sandbox_session()
+    return tracked_files
+
 def ship_sandbox_session() -> list:
     """
     Copies all modified/new files in the sandbox back to the active workspace,
     then cleans up the sandbox worktree and branch.
     Returns: list of files copied.
+
+    For purpose="project" sessions, "shipping" doesn't mean merging into Janus's
+    own codebase — it means the app is done being actively worked on for now.
+    Delegates to _ship_project_sandbox(), which leaves the directory and its
+    independent git history untouched.
     """
     session = get_active_sandbox()
     if not session:
         raise RuntimeError("No active sandbox session.")
-        
+
+    if session.get("active_sandbox_purpose") == "project":
+        return _ship_project_sandbox(session)
+
     sandbox_root = Path(session["active_sandbox_path"])
     branch_name = session["active_sandbox_branch"]
     
@@ -556,17 +752,144 @@ def ship_sandbox_session() -> list:
     
     return copied_files
 
+def promote_evolution_sandbox() -> dict:
+    """
+    Promotes a verified evolution sandbox: ships code back to main (reusing
+    ship_sandbox_session() unchanged), then conservatively surfaces what else
+    changed in the sandbox's duplicated DB without blindly touching the live
+    parent DB:
+      - Schema deltas (new or altered tables) are detected and queued in
+        pending_schema_migrations for manual review — never auto-applied.
+      - Memory deltas are limited to episodic_memory rows tagged with the
+        evolution child's own party_id, written after it was spawned — no
+        other tables are auto-ported.
+    Returns a summary dict: copied_files, queued_migrations, ported_memories.
+    """
+    session = get_active_sandbox()
+    if not session:
+        raise RuntimeError("No active sandbox session.")
+    if session.get("active_sandbox_purpose") != "evolution":
+        raise RuntimeError("promote_evolution_sandbox() only applies to purpose='evolution' sessions.")
+
+    sandbox_root = Path(session["active_sandbox_path"])
+    branch_name = session["active_sandbox_branch"]
+    child_db_path = sandbox_root / "janus_test.db"
+    branch_suffix = branch_name.rsplit("-", 1)[-1] if branch_name else sandbox_root.name
+    child_party_id = f"evolution_{branch_suffix}"
+
+    # Capture child DB schema + tagged memories BEFORE ship_sandbox_session() deletes
+    # the worktree and its duplicated DB.
+    schema_deltas = []
+    tagged_memories = []
+    if child_db_path.exists():
+        import sqlite3
+        child_conn = sqlite3.connect(str(child_db_path))
+        try:
+            child_tables = dict(child_conn.execute(
+                "SELECT name, sql FROM sqlite_master WHERE type='table' AND sql IS NOT NULL;"
+            ).fetchall())
+        finally:
+            child_conn.close()
+
+        parent_conn = get_connection(read_only_constitution=True)
+        try:
+            parent_tables = dict(parent_conn.execute(
+                "SELECT name, sql FROM sqlite_master WHERE type='table' AND sql IS NOT NULL;"
+            ).fetchall())
+            spawn_row = parent_conn.execute(
+                "SELECT spawned_at FROM spawn_log WHERE child_path = ?;", (str(sandbox_root),)
+            ).fetchone()
+        finally:
+            parent_conn.close()
+
+        # New tables, or existing tables whose DDL changed (e.g. an added column).
+        schema_deltas = [
+            sql for name, sql in child_tables.items()
+            if name not in parent_tables or parent_tables[name] != sql
+        ]
+
+        if spawn_row and spawn_row[0]:
+            spawned_at = spawn_row[0]
+            child_conn = sqlite3.connect(str(child_db_path))
+            try:
+                tagged_memories = child_conn.execute("""
+                    SELECT speaker, message_content, context_type
+                    FROM episodic_memory
+                    WHERE party_id = ? AND timestamp > ?
+                    ORDER BY id ASC;
+                """, (child_party_id, spawned_at)).fetchall()
+            finally:
+                child_conn.close()
+
+    # Ship code back to main (regression check + file copy-back + worktree/branch
+    # cleanup). Raises and aborts the session if a regression is detected — schema/
+    # memory promotion below is intentionally skipped in that case.
+    copied_files = ship_sandbox_session()
+
+    # Queue schema deltas for manual review — never auto-applied to the live parent DB.
+    queued_migrations = 0
+    if schema_deltas:
+        conn = get_connection(read_only_constitution=True)
+        try:
+            for ddl in schema_deltas:
+                conn.execute("""
+                    INSERT INTO pending_schema_migrations (source_sandbox, ddl_statement)
+                    VALUES (?, ?);
+                """, (str(sandbox_root), ddl))
+            conn.commit()
+        finally:
+            conn.close()
+        queued_migrations = len(schema_deltas)
+        log_episodic_memory(
+            speaker="system",
+            message_content=(
+                f"Promotion detected {queued_migrations} new/altered table(s) in evolution "
+                f"sandbox '{branch_name}' not matching the parent DB. Queued in "
+                f"pending_schema_migrations for manual review — not auto-applied."
+            ),
+            context_type="user_visible"
+        )
+
+    # Port only the child's own tagged, post-spawn episodic memories.
+    ported_memories = 0
+    if tagged_memories:
+        conn = get_connection(read_only_constitution=True)
+        try:
+            for speaker, message_content, context_type in tagged_memories:
+                conn.execute("""
+                    INSERT INTO episodic_memory (speaker, message_content, context_type, party_id)
+                    VALUES (?, ?, ?, ?);
+                """, (speaker, message_content, context_type, child_party_id))
+            conn.commit()
+        finally:
+            conn.close()
+        ported_memories = len(tagged_memories)
+
+    return {
+        "copied_files": copied_files,
+        "queued_migrations": queued_migrations,
+        "ported_memories": ported_memories,
+    }
+
 def abort_sandbox_session():
     """
     Cleans up the sandbox worktree and branch, discarding all changes.
+
+    For purpose="project" sessions this only clears the active-session pointer —
+    aborting a session must not delete the user's app directory. Use
+    delete_project_sandbox() for deliberate deletion.
     """
     session = get_active_sandbox()
     if not session:
         return
-        
+
+    if session.get("active_sandbox_purpose") == "project":
+        clear_sandbox_session()
+        return
+
     sandbox_root = session["active_sandbox_path"]
     branch_name = session["active_sandbox_branch"]
-    
+
     cleanup_git_sandbox(sandbox_root, branch_name)
     clear_sandbox_session()
 
