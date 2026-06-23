@@ -154,6 +154,34 @@ async def test_modify_code_path_verification(mock_query, mock_query_memories, mo
     assert len(system_errors) >= 1
     assert "parent directory 'invalid_parent_dir' does not exist" in system_errors[0][0]
 
+@pytest.mark.asyncio
+@patch("src.daemon.send_webhook_notification")
+@patch("src.memory.add_memory")
+@patch("src.memory.query_memories")
+@patch("src.skills.query_agent")
+async def test_governor_halt_sends_webhook_notification(
+    mock_query, mock_query_memories, mock_add_memory, mock_webhook, tmp_path, monkeypatch
+):
+    """A Smart Governor halt (stagnation or hard loop cap) must dispatch a 'governor_halt' webhook notification."""
+    mock_query_memories.return_value = []
+    mock_add_memory.return_value = None
+    mock_query.return_value = ""
+
+    monkeypatch.setenv("JANUS_TEST_MODE", "1")
+    monkeypatch.setattr(src.config, "N_LOOP_LIMIT", 1)
+    monkeypatch.setattr(src.config, "ROOT_DIR", tmp_path)
+
+    daemon_task = asyncio.create_task(run_heartbeat_loop())
+    await asyncio.sleep(3.5)
+    daemon_task.cancel()
+    try:
+        await daemon_task
+    except asyncio.CancelledError:
+        pass
+
+    assert mock_webhook.called
+    assert mock_webhook.call_args[0][0] == "governor_halt"
+
 # --- Consolidating from test_phase5_layered_cognition.py ---
 
 def test_schema_and_seeding():

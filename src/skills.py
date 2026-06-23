@@ -19,6 +19,7 @@ from openai import OpenAI
 
 # Decoupled SDK backend library dependencies
 from src.explorer import search_web, fetch_webpage
+from src.notifications import send_webhook_notification
 from src.codebase import query_codebase_context, index_codebase
 from src.sandbox import execute_code_safely
 from src.self_modification import stage_and_test, generate_diff, apply_search_replace_blocks
@@ -502,7 +503,11 @@ class SafeGoals:
                 (type, description, confidence_score, source_reason)
             )
             conn.commit()
-            return cursor.lastrowid
+            proposal_id = cursor.lastrowid
+            send_webhook_notification(
+                "goal_proposal", f"New {type} goal proposal #{proposal_id}: {description}"
+            )
+            return proposal_id
         finally:
             conn.close()
 
