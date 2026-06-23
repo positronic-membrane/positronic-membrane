@@ -303,6 +303,17 @@ def test_safe_goals_proposal_crud():
     with pytest.raises(ValueError):
         sg.approve_proposal(99999)
 
+@patch("src.skills.send_webhook_notification")
+def test_propose_goal_sends_webhook_notification(mock_webhook):
+    sg = SafeGoals()
+    pid = sg.propose_goal("stretch", "Audit sandbox container hardening", 0.75, "Recurring CVE chatter")
+
+    mock_webhook.assert_called_once()
+    event_type, message = mock_webhook.call_args[0]
+    assert event_type == "goal_proposal"
+    assert f"#{pid}" in message
+    assert "Audit sandbox container hardening" in message
+
 def test_goal_proposals_slash_commands():
     sg = SafeGoals()
 

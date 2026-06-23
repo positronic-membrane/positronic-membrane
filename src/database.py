@@ -701,7 +701,9 @@ def init_db():
         ("user_presence_status", "idle", 1),
         ("governor.stagnant_threshold", "3", 1),
         ("memory.retention_days", "30", 1),
-        ("memory.last_cleanup_time", "", 1)
+        ("memory.last_cleanup_time", "", 1),
+        ("webhooks.slack_url", "", 0),
+        ("webhooks.discord_url", "", 0)
     ]
     for key, value, modifiable in default_configs:
         cursor.execute("""
@@ -2172,6 +2174,10 @@ def log_deliberation(proposed_action: str, debate_json: dict, critic_decision: i
     """, (proposed_action, json.dumps(debate_json), critic_decision, utility_score, justification))
     conn.commit()
     conn.close()
+
+    if critic_decision == 0:
+        from src.notifications import send_webhook_notification
+        send_webhook_notification("critic_veto", f"Critic vetoed action '{proposed_action}': {justification}")
 
 def get_recent_episodic_memories(limit: int = 10, context_type: str = None, party_id: Optional[str] = None) -> list:
     """Retrieves the most recent episodic memories."""

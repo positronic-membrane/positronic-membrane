@@ -1,5 +1,6 @@
 import sqlite3
 import threading
+from unittest.mock import patch
 
 import pytest
 
@@ -224,3 +225,32 @@ def test_janus_documents_backfill_migration_adds_purpose_and_metadata(tmp_path):
         assert row[3] == "{}"
     finally:
         src.config.DB_PATH = orig_db_path
+
+
+@patch("src.notifications.send_webhook_notification")
+def test_log_deliberation_sends_webhook_on_veto(mock_webhook):
+    """A Critic veto (critic_decision=0) must dispatch a webhook notification."""
+    log_deliberation(
+        proposed_action="modify_code: src/foo.py",
+        debate_json={"proposer_output": "x", "critic_output": "y"},
+        critic_decision=0,
+        utility_score=0.0,
+        justification="Violates constitution rule X",
+    )
+    mock_webhook.assert_called_once()
+    event_type, message = mock_webhook.call_args[0]
+    assert event_type == "critic_veto"
+    assert "modify_code: src/foo.py" in message
+
+
+@patch("src.notifications.send_webhook_notification")
+def test_log_deliberation_no_webhook_on_approval(mock_webhook):
+    """An approved action (critic_decision=1) must not dispatch any webhook notification."""
+    log_deliberation(
+        proposed_action="scan_workspace",
+        debate_json={"proposer_output": "x", "critic_output": "y"},
+        critic_decision=1,
+        utility_score=1.0,
+        justification="Safe and compliant",
+    )
+    mock_webhook.assert_not_called()
