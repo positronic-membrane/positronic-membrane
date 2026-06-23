@@ -537,6 +537,19 @@ def init_db():
     """)
 
     cursor.execute("""
+    CREATE TABLE IF NOT EXISTS goal_proposals (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        type TEXT NOT NULL CHECK(type IN ('short','long','stretch','aspirational')),
+        description TEXT NOT NULL,
+        confidence_score REAL NOT NULL,
+        source_reason TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'proposed' CHECK(status IN ('proposed','approved','rejected')),
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    """)
+
+    cursor.execute("""
     CREATE TABLE IF NOT EXISTS llm_cache (
         prompt_hash TEXT PRIMARY KEY,
         response TEXT NOT NULL,
@@ -1265,6 +1278,43 @@ def init_db():
             sdk['logger'].info(f"Updated curiosity vector to: {new_topics}")
         else:
             sdk['logger'].warning(f"Failed to parse curiosity topics from response: '{curiosity_resp}'")
+            new_topics = curiosity
+
+        try:
+            goal_proposal_prompt = f\"\"\"
+            You are the Proposer. Based on our updated curiosity vector and current active goals, decide
+            whether a new GOAL (not an action) is worth proposing to the user for ratification.
+
+            UPDATED CURIOSITY TOPICS:
+            {new_topics}
+
+            ACTIVE GOALS & CHECKPOINTS:
+            {goals_block}
+
+            If one or more new goals are warranted, output one line per goal in exactly this format:
+            GOAL_PROPOSAL: <type>|<description>|<confidence_score>|<source_reason>
+            Where <type> is one of: short, long, stretch, aspirational, and <confidence_score> is a number
+            between 0.0 and 1.0. If no new goal is warranted, output exactly:
+            GOAL_PROPOSAL: NONE
+            \"\"\"
+
+            goal_proposal_resp = sdk['swarm'].query_agent("proposer", goal_proposal_prompt)
+            for line in re.findall(r"goal_proposal:\\s*(.+)", goal_proposal_resp, re.IGNORECASE):
+                line = line.strip()
+                if not line or line.upper() == "NONE":
+                    continue
+                fields = [f.strip() for f in line.split("|")]
+                if len(fields) != 4:
+                    sdk['logger'].warning(f"Skipping malformed goal proposal line: '{line}'")
+                    continue
+                p_type, p_desc, p_conf, p_reason = fields
+                try:
+                    proposal_id = sdk['goals'].propose_goal(p_type.lower(), p_desc, float(p_conf), p_reason)
+                    sdk['logger'].info(f"Queued goal proposal [{proposal_id}]: '{p_desc}'")
+                except Exception as pe:
+                    sdk['logger'].warning(f"Failed to queue goal proposal from line '{line}': {pe}")
+        except Exception as gpe:
+            sdk['logger'].error(f"Goal proposal generation step failed: {gpe}")
 
         return f"Reflection cycle complete. Action: '{proposed_action}'"
 

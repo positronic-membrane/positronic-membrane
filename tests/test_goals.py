@@ -1,9 +1,13 @@
+from unittest.mock import patch
+
 import pytest
+from fastapi.testclient import TestClient
 
 import src.config
 from src.database import get_connection, init_db
 from src.persona import handle_goal_command
 from src.skills import DynamicSkillExecutor, SafeGoals
+from src.web_server import app
 
 
 @pytest.fixture(autouse=True)
@@ -242,3 +246,147 @@ def test_aspirational_goals_do_not_auto_complete():
     # Aspirational goal stays active
     goals_after = sg.get_goals(type="aspirational")
     assert goals_after[0]["status"] == "active"
+
+def test_safe_goals_proposal_crud():
+    sg = SafeGoals()
+
+    # No proposals initially
+    assert sg.get_proposals() == []
+
+    # Propose a goal
+    pid = sg.propose_goal("short", "Investigate flaky sandbox tests", 0.75, "Recurring failures in episodic logs")
+    assert pid > 0
+
+    proposals = sg.get_proposals()
+    assert len(proposals) == 1
+    assert proposals[0]["id"] == pid
+    assert proposals[0]["status"] == "proposed"
+    assert proposals[0]["type"] == "short"
+    assert proposals[0]["confidence_score"] == 0.75
+
+    # Filter by status
+    assert len(sg.get_proposals(status="proposed")) == 1
+    assert len(sg.get_proposals(status="approved")) == 0
+
+    # Invalid type rejected
+    with pytest.raises(ValueError):
+        sg.propose_goal("urgent", "Bad type", 0.5, "n/a")
+
+    # Approve promotes into goals table as 'proposed'
+    res = sg.approve_proposal(pid)
+    assert res["success"] is True
+    goal_id = res["goal_id"]
+
+    goals = sg.get_goals()
+    promoted = next(g for g in goals if g["id"] == goal_id)
+    assert promoted["status"] == "proposed"
+    assert promoted["description"] == "Investigate flaky sandbox tests"
+    assert promoted["type"] == "short"
+
+    proposals_after = sg.get_proposals()
+    assert proposals_after[0]["status"] == "approved"
+
+    # Cannot re-approve or reject an already-resolved proposal
+    with pytest.raises(ValueError):
+        sg.approve_proposal(pid)
+    with pytest.raises(ValueError):
+        sg.reject_proposal(pid)
+
+    # Reject a second proposal
+    pid2 = sg.propose_goal("long", "Build skill staging harness", 0.6, "Predecessor unblocked")
+    res2 = sg.reject_proposal(pid2)
+    assert res2["success"] is True
+    rejected = next(p for p in sg.get_proposals() if p["id"] == pid2)
+    assert rejected["status"] == "rejected"
+
+    # Unknown proposal id
+    with pytest.raises(ValueError):
+        sg.approve_proposal(99999)
+
+def test_goal_proposals_slash_commands():
+    sg = SafeGoals()
+
+    # Empty state
+    res_empty = handle_goal_command("/goal proposals")
+    assert "No goal proposals pending" in res_empty
+
+    pid = sg.propose_goal("stretch", "Adopt smart governor v2", 0.9, "Stagnation cycles increasing")
+
+    res_list = handle_goal_command("/goal proposals")
+    assert "Subconscious Goal Proposals" in res_list
+    assert f"[{pid}]" in res_list
+    assert "Adopt smart governor v2" in res_list
+    assert "0.90" in res_list
+
+    # Approve via CLI
+    res_approve = handle_goal_command(f"/goal approve {pid}")
+    assert "[✔]" in res_approve
+    assert "approved and promoted to Goal" in res_approve
+
+    goals = sg.get_goals(type="stretch")
+    assert any(g["description"] == "Adopt smart governor v2" for g in goals)
+
+    # Re-approving fails gracefully
+    res_reapprove = handle_goal_command(f"/goal approve {pid}")
+    assert "[Error]" in res_reapprove
+
+    # Reject a different proposal
+    pid2 = sg.propose_goal("short", "Tune llm_cache TTL", 0.4, "Disk growth observed")
+    res_reject = handle_goal_command(f"/goal reject {pid2}")
+    assert "[✔]" in res_reject
+    assert "rejected" in res_reject
+
+    # Invalid id
+    res_bad = handle_goal_command("/goal approve not-a-number")
+    assert "[Error] Proposal ID must be an integer." in res_bad
+
+def test_reflection_cycle_generates_goal_proposal():
+    sg = SafeGoals()
+
+    def side_effect(agent_id, prompt, system_override=None, **kwargs):
+        if "goal_proposal" in prompt.lower():
+            return (
+                "GOAL_PROPOSAL: short|Audit sandbox network egress rules|0.8|Repeated boundary_encounter events\n"
+                "GOAL_PROPOSAL: NONE"
+            )
+        if agent_id == "proposer":
+            return "PROPOSED_ACTION: Review recent episodic logs"
+        elif agent_id == "critic":
+            return "Decision: 1\nJustification: Safe."
+        elif agent_id == "archivist":
+            if "curiosity_topics" in prompt.lower():
+                return "CURIOSITY_TOPICS: sandbox egress, network policy"
+            return "Execution summary nugget."
+        return ""
+
+    with patch("src.skills.query_agent", side_effect=side_effect), \
+         patch("src.memory.query_memories", return_value=[]), \
+         patch("src.memory.add_memory", return_value=None), \
+         patch("src.skills.get_active_curiosity_topics", return_value=[]), \
+         patch("src.skills.update_curiosity_topics", return_value=None):
+        res = DynamicSkillExecutor.execute("run_reflection_cycle", {}, party_id="system")
+
+    assert res["success"] is True
+
+    proposals = sg.get_proposals()
+    assert len(proposals) == 1
+    assert proposals[0]["description"] == "Audit sandbox network egress rules"
+    assert proposals[0]["type"] == "short"
+    assert proposals[0]["confidence_score"] == 0.8
+
+def test_api_get_goal_proposals():
+    sg = SafeGoals()
+    sg.propose_goal("long", "Expose proposals over the API", 0.55, "API parity with CLI")
+
+    client = TestClient(app)
+    orig_require = src.config.REQUIRE_AUTH
+    try:
+        src.config.REQUIRE_AUTH = False
+        resp = client.get("/api/goals/proposals")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert isinstance(body, list)
+        assert len(body) == 1
+        assert body[0]["description"] == "Expose proposals over the API"
+    finally:
+        src.config.REQUIRE_AUTH = orig_require
