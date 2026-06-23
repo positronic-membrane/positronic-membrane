@@ -10,6 +10,7 @@ from src.llm import query_agent
 from src.middleware import validate_action, SafetyViolationError, check_loop_safety
 from src.memory import add_memory, query_memories, orchestrate_workspace_snapshot
 from src.watcher import DirectoryWatcher
+from src.notifications import send_webhook_notification
 from src.database import (
     increment_boredom,
     reset_boredom,
@@ -632,6 +633,7 @@ async def run_mid_layer_loop():
                         message_content=log_msg,
                         context_type="background_thought"
                     )
+                    send_webhook_notification("governor_halt", log_msg)
                     await pause_until_user_active()
                 elif loop_count > hard_cap:
                     log_msg = f"Smart Governor Halt: background loop hard cap of {hard_cap} exceeded. Pausing background automations."
@@ -641,6 +643,7 @@ async def run_mid_layer_loop():
                         message_content=log_msg,
                         context_type="background_thought"
                     )
+                    send_webhook_notification("governor_halt", log_msg)
                     await pause_until_user_active()
             else:
                 reset_consecutive_background_loops()

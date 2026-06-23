@@ -19,6 +19,7 @@ from openai import OpenAI
 
 # Decoupled SDK backend library dependencies
 from src.explorer import search_web, fetch_webpage
+from src.notifications import send_webhook_notification
 from src.codebase import query_codebase_context, index_codebase
 from src.sandbox import execute_code_safely
 from src.self_modification import stage_and_test, generate_diff, apply_search_replace_blocks
@@ -502,7 +503,11 @@ class SafeGoals:
                 (type, description, confidence_score, source_reason)
             )
             conn.commit()
-            return cursor.lastrowid
+            proposal_id = cursor.lastrowid
+            send_webhook_notification(
+                "goal_proposal", f"New {type} goal proposal #{proposal_id}: {description}"
+            )
+            return proposal_id
         finally:
             conn.close()
 
@@ -646,20 +651,24 @@ class SafeGoals:
 class SafeDocuments:
     """Safe document management wrapper for database-backed dynamic skills."""
     
-    def list(self, tag_filter: Optional[str] = None) -> list:
+    def list(self, tag_filter: Optional[str] = None, purpose: Optional[str] = None) -> list:
         import json
         conn = get_connection(read_only_constitution=True)
         try:
             cursor = conn.cursor()
+            query = "SELECT id, title, tags, purpose, metadata, created_at, updated_at FROM janus_documents"
+            conditions = []
+            params = []
             if tag_filter:
-                cursor.execute(
-                    "SELECT id, title, tags, created_at, updated_at FROM janus_documents WHERE tags LIKE ? ORDER BY updated_at DESC;",
-                    (f'%"{tag_filter}"%',)
-                )
-            else:
-                cursor.execute(
-                    "SELECT id, title, tags, created_at, updated_at FROM janus_documents ORDER BY updated_at DESC;"
-                )
+                conditions.append("tags LIKE ?")
+                params.append(f'%"{tag_filter}"%')
+            if purpose:
+                conditions.append("purpose = ?")
+                params.append(purpose)
+            if conditions:
+                query += " WHERE " + " AND ".join(conditions)
+            query += " ORDER BY updated_at DESC;"
+            cursor.execute(query, tuple(params))
             rows = cursor.fetchall()
             docs = []
             for row in rows:
@@ -667,14 +676,18 @@ class SafeDocuments:
                     did = row['id']
                     title = row['title']
                     tags = row['tags']
+                    doc_purpose = row['purpose']
+                    metadata = row['metadata']
                     created = row['created_at']
                     updated = row['updated_at']
                 except (TypeError, KeyError, IndexError):
-                    did, title, tags, created, updated = row
+                    did, title, tags, doc_purpose, metadata, created, updated = row
                 docs.append({
                     "id": did,
                     "title": title,
                     "tags": json.loads(tags) if tags else [],
+                    "purpose": doc_purpose,
+                    "metadata": json.loads(metadata) if metadata else {},
                     "created_at": created,
                     "updated_at": updated
                 })
@@ -688,7 +701,8 @@ class SafeDocuments:
         try:
             cursor = conn.cursor()
             cursor.execute(
-                "SELECT id, title, content, tags, created_at, updated_at FROM janus_documents WHERE title = ?;",
+                "SELECT id, title, content, tags, purpose, metadata, created_at, updated_at "
+                "FROM janus_documents WHERE title = ?;",
                 (title,)
             )
             row = cursor.fetchone()
@@ -699,34 +713,47 @@ class SafeDocuments:
                 title = row['title']
                 content = row['content']
                 tags = row['tags']
+                purpose = row['purpose']
+                metadata = row['metadata']
                 created = row['created_at']
                 updated = row['updated_at']
             except (TypeError, KeyError, IndexError):
-                did, title, content, tags, created, updated = row
+                did, title, content, tags, purpose, metadata, created, updated = row
             return {
                 "id": did,
                 "title": title,
                 "content": content,
                 "tags": json.loads(tags) if tags else [],
+                "purpose": purpose,
+                "metadata": json.loads(metadata) if metadata else {},
                 "created_at": created,
                 "updated_at": updated
             }
         finally:
             conn.close()
 
-    def upsert(self, title: str, content: str, tags: Optional[list] = None) -> bool:
+    def upsert(
+        self, title: str, content: str, tags: Optional[list] = None,
+        purpose: str = "memory", metadata: Optional[dict] = None
+    ) -> bool:
         import json
+        if purpose not in ("memory", "knowledge"):
+            raise ValueError("purpose must be one of: 'memory', 'knowledge'")
+
         conn = get_connection(read_only_constitution=True)
         try:
             cursor = conn.cursor()
             tags_json = json.dumps(tags if isinstance(tags, list) else [])
+            metadata_json = json.dumps(metadata if isinstance(metadata, dict) else {})
             cursor.execute(
                 """
-                INSERT INTO janus_documents (title, content, tags, updated_at)
-                VALUES (?, ?, ?, CURRENT_TIMESTAMP)
-                ON CONFLICT(title) DO UPDATE SET content=excluded.content, tags=excluded.tags, updated_at=excluded.updated_at;
+                INSERT INTO janus_documents (title, content, tags, purpose, metadata, updated_at)
+                VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(title) DO UPDATE SET
+                    content=excluded.content, tags=excluded.tags, purpose=excluded.purpose,
+                    metadata=excluded.metadata, updated_at=excluded.updated_at;
                 """,
-                (title, content, tags_json)
+                (title, content, tags_json, purpose, metadata_json)
             )
             conn.commit()
             return True
