@@ -186,6 +186,47 @@ def test_concurrent_writes_do_not_lock_database():
     conn.close()
 
 
+def test_janus_documents_backfill_migration_adds_purpose_and_metadata(tmp_path):
+    """Pre-existing DBs created before V2-T2 only have the original 5 janus_documents columns;
+    re-running init_db() must backfill purpose/metadata without dropping existing rows."""
+    legacy_db = tmp_path / "legacy_janus.db"
+    conn = sqlite3.connect(str(legacy_db))
+    conn.execute("""
+        CREATE TABLE janus_documents (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            title      TEXT NOT NULL UNIQUE,
+            content    TEXT NOT NULL DEFAULT '',
+            tags       TEXT NOT NULL DEFAULT '[]',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+    """)
+    conn.execute("INSERT INTO janus_documents (title, content) VALUES ('Pre-existing Doc', 'old content');")
+    conn.commit()
+    conn.close()
+
+    orig_db_path = src.config.DB_PATH
+    src.config.DB_PATH = str(legacy_db)
+    try:
+        init_db()
+        conn = get_connection(read_only_constitution=True)
+        cursor = conn.cursor()
+        cursor.execute("PRAGMA table_info(janus_documents);")
+        columns = {row[1] for row in cursor.fetchall()}
+        assert {"purpose", "metadata"}.issubset(columns)
+
+        cursor.execute(
+            "SELECT title, content, purpose, metadata FROM janus_documents WHERE title = 'Pre-existing Doc';"
+        )
+        row = cursor.fetchone()
+        conn.close()
+        assert row[1] == "old content"
+        assert row[2] == "memory"
+        assert row[3] == "{}"
+    finally:
+        src.config.DB_PATH = orig_db_path
+
+
 @patch("src.notifications.send_webhook_notification")
 def test_log_deliberation_sends_webhook_on_veto(mock_webhook):
     """A Critic veto (critic_decision=0) must dispatch a webhook notification."""

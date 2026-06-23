@@ -69,6 +69,24 @@ class TestSafeDocumentsWrapper:
         assert doc["title"] == "Doc1"
         assert doc["content"] == "Hello content"
         assert doc["tags"] == ["tag1"]
+        # purpose/metadata default to 'memory' / {} when not specified
+        assert doc["purpose"] == "memory"
+        assert doc["metadata"] == {}
+
+    def test_upsert_with_knowledge_purpose_and_metadata(self):
+        sd = SafeDocuments()
+        sd.upsert(
+            "Curated Spec", "Important roadmap", purpose="knowledge",
+            metadata={"source_url": "https://example.com/spec", "confidence": 0.9}
+        )
+        doc = sd.get("Curated Spec")
+        assert doc["purpose"] == "knowledge"
+        assert doc["metadata"] == {"source_url": "https://example.com/spec", "confidence": 0.9}
+
+    def test_upsert_rejects_invalid_purpose(self):
+        sd = SafeDocuments()
+        with pytest.raises(ValueError):
+            sd.upsert("Bad Doc", "content", purpose="archived")
 
     def test_list_and_filter(self):
         sd = SafeDocuments()
@@ -82,6 +100,19 @@ class TestSafeDocumentsWrapper:
         filtered = sd.list(tag_filter="finance")
         assert len(filtered) == 1
         assert filtered[0]["title"] == "Doc A"
+
+    def test_list_filter_by_purpose(self):
+        sd = SafeDocuments()
+        sd.upsert("Memory Doc", "ephemeral note")
+        sd.upsert("Knowledge Doc", "curated content", purpose="knowledge")
+
+        knowledge_docs = sd.list(purpose="knowledge")
+        assert len(knowledge_docs) == 1
+        assert knowledge_docs[0]["title"] == "Knowledge Doc"
+
+        memory_docs = sd.list(purpose="memory")
+        assert any(d["title"] == "Memory Doc" for d in memory_docs)
+        assert not any(d["title"] == "Knowledge Doc" for d in memory_docs)
 
     def test_delete(self):
         sd = SafeDocuments()
@@ -111,6 +142,22 @@ class TestDatabaseHelpers:
         doc = get_document("Updatable")
         assert doc["content"] == "new"
         assert doc["tags"] == ["tag1"]
+
+    def test_update_document_preserves_purpose_when_not_specified(self):
+        """A content-only update must not silently downgrade a 'knowledge' doc back to 'memory'."""
+        create_document("Curated Doc", "v1", purpose="knowledge", metadata={"confidence": 0.8})
+        assert update_document("Curated Doc", content="v2") is True
+        doc = get_document("Curated Doc")
+        assert doc["content"] == "v2"
+        assert doc["purpose"] == "knowledge"
+        assert doc["metadata"] == {"confidence": 0.8}
+
+    def test_update_document_can_change_purpose_explicitly(self):
+        create_document("Promotable Doc", "draft note")
+        assert update_document("Promotable Doc", purpose="knowledge", metadata={"promoted": True}) is True
+        doc = get_document("Promotable Doc")
+        assert doc["purpose"] == "knowledge"
+        assert doc["metadata"] == {"promoted": True}
 
     def test_delete_document(self):
         create_document("Delete Me", "temp")
@@ -210,6 +257,31 @@ class TestDatabaseSyncSkills:
         assert doc is not None
         assert doc["content"] == "# Roadmap V1\n- Task 1\n- Task 2"
         assert doc["tags"] == ["v1", "active"]
+        assert doc["purpose"] == "memory"
+
+    def test_commit_draft_to_db_with_knowledge_purpose(self):
+        DynamicSkillExecutor.execute(
+            "write_draft_file",
+            {"filename": "architecture.md", "content": "# Architecture\nCurated and authoritative."},
+            party_id="contrib1"
+        )
+
+        res = DynamicSkillExecutor.execute(
+            "commit_draft_to_db",
+            {
+                "filename": "architecture.md",
+                "doc_title": "Architecture Doc",
+                "purpose": "knowledge",
+                "metadata": {"source": "design review"},
+            },
+            party_id="contrib1"
+        )
+        assert res["success"]
+        assert "knowledge" in res["result"].lower()
+
+        doc = get_document("Architecture Doc")
+        assert doc["purpose"] == "knowledge"
+        assert doc["metadata"] == {"source": "design review"}
 
     def test_checkout_db_to_draft(self):
         # 1. Seed database document
@@ -263,6 +335,19 @@ class TestDocumentMemorySkillReadOnly:
         assert "Doc A" in res["result"]
         assert "Doc B" in res["result"]
 
+    def test_skill_list_filtered_by_purpose(self):
+        create_document("Memory Note", "aaa", purpose="memory")
+        create_document("Knowledge Doc", "bbb", purpose="knowledge")
+
+        res = DynamicSkillExecutor.execute(
+            "document_memory",
+            {"action": "list", "purpose": "knowledge"},
+            party_id="contrib1"
+        )
+        assert res["success"]
+        assert "Knowledge Doc" in res["result"]
+        assert "Memory Note" not in res["result"]
+
     def test_skill_get(self):
         create_document("Doc Get", "Body of doc", tags=["view"])
         res = DynamicSkillExecutor.execute(
@@ -273,6 +358,7 @@ class TestDocumentMemorySkillReadOnly:
         assert res["success"]
         assert "Doc Get" in res["result"]
         assert "Body of doc" in res["result"]
+        assert "memory" in res["result"].lower()
 
     def test_skill_unsupported_actions_raise(self):
         # Old mutate actions should raise ValueError
