@@ -107,6 +107,68 @@ def test_llm_cache_and_retry(mock_create):
     assert res_cached == "Hello cache content"
     assert mock_create.call_count == 1
 
+
+def test_llm_cache_cleanup_ttl():
+    import datetime
+
+    from src.skills import DynamicSkillExecutor
+
+    conn = get_connection(read_only_constitution=False)
+    import sqlite3
+    conn.row_factory = sqlite3.Row
+
+    # Seed ttl_days config
+    conn.execute(
+        "INSERT OR REPLACE INTO system_config (config_key, config_value, is_agent_modifiable) "
+        "VALUES ('llm_cache.ttl_days', '7', 1);"
+    )
+    # Clear last run time to ensure it triggers
+    conn.execute(
+        "INSERT OR REPLACE INTO system_config (config_key, config_value, is_agent_modifiable) "
+        "VALUES ('llm_cache.last_cleanup_time', '', 1);"
+    )
+    conn.commit()
+
+    def insert_cache_row(prompt_hash, days_ago):
+        target_time = datetime.datetime.now(datetime.UTC) - datetime.timedelta(days=days_ago)
+        ts_str = target_time.strftime("%Y-%m-%d %H:%M:%S")
+        conn.execute(
+            "INSERT INTO llm_cache (prompt_hash, response, created_at) VALUES (?, ?, ?);",
+            (prompt_hash, "cached response", ts_str)
+        )
+        conn.commit()
+
+    # 1. Insert a fresh cache row (2 days old)
+    insert_cache_row("fresh_hash", 2)
+    # 2. Insert an expired cache row (10 days old)
+    insert_cache_row("expired_hash", 10)
+
+    rows = conn.execute("SELECT prompt_hash FROM llm_cache;").fetchall()
+    assert len(rows) == 2
+
+    # Execute the cleanup skill
+    res = DynamicSkillExecutor.execute("cleanup_llm_cache", {}, party_id="system")
+    assert res["success"] is True
+    assert "LLM cache cleanup complete" in res["result"]
+
+    # Verify only the fresh row remains
+    rows_after = conn.execute("SELECT prompt_hash FROM llm_cache;").fetchall()
+    assert len(rows_after) == 1
+    assert rows_after[0]["prompt_hash"] == "fresh_hash"
+
+    # Verify last_cleanup_time is now populated
+    last_cleanup = conn.execute(
+        "SELECT config_value FROM system_config WHERE config_key = 'llm_cache.last_cleanup_time';"
+    ).fetchone()
+    assert last_cleanup["config_value"] != ""
+
+    # Re-run immediately: it should skip cleanup
+    res_skipped = DynamicSkillExecutor.execute("cleanup_llm_cache", {}, party_id="system")
+    assert res_skipped["success"] is True
+    assert "LLM cache cleanup skipped" in res_skipped["result"]
+    conn.close()
+
+
 @patch("openai.resources.chat.completions.Completions.create")
 def test_llm_cost_limiting(mock_create):
     from src.llm import BillingViolationError

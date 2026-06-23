@@ -702,6 +702,8 @@ def init_db():
         ("governor.stagnant_threshold", "3", 1),
         ("memory.retention_days", "30", 1),
         ("memory.last_cleanup_time", "", 1),
+        ("llm_cache.ttl_days", "7", 1),
+        ("llm_cache.last_cleanup_time", "", 1),
         ("webhooks.slack_url", "", 0),
         ("webhooks.discord_url", "", 0)
     ]
@@ -1827,6 +1829,61 @@ def init_db():
         '{"type": "object", "properties": {}}', ?, 'cleanup_episodic_memory', 'contributor', 'interval', '{"interval_seconds": 86400}'
     );
     """, (_cleanup_code,))
+
+    # Ensure cleanup_llm_cache is unconditionally updated/registered
+    _llm_cache_cleanup_code = """def cleanup_llm_cache():
+    # 1. Fetch llm_cache.ttl_days
+    config_row = sdk['db'].query("SELECT config_value FROM system_config WHERE config_key = 'llm_cache.ttl_days';")
+    ttl_days = 7
+    if config_row:
+        try:
+            val = config_row[0].get('config_value') if isinstance(config_row[0], dict) else config_row[0][0]
+            ttl_days = int(val)
+        except Exception:
+            pass
+
+    # 2. Prevent daily duplicates by checking last run time
+    last_run_row = sdk['db'].query(
+        "SELECT config_value FROM system_config WHERE config_key = 'llm_cache.last_cleanup_time';"
+    )
+    import datetime
+    now_str = datetime.datetime.utcnow().isoformat()
+    if last_run_row:
+        try:
+            row0 = last_run_row[0]
+            last_run_val = row0.get('config_value') if isinstance(row0, dict) else row0[0]
+            if last_run_val:
+                last_run_time = datetime.datetime.fromisoformat(last_run_val)
+                if (datetime.datetime.utcnow() - last_run_time).total_seconds() < 86400:
+                    return f"LLM cache cleanup skipped. Last run was at {last_run_val}."
+        except Exception:
+            pass
+
+    # 3. Purge expired cache rows
+    sdk['db'].query(
+        "DELETE FROM llm_cache WHERE created_at < datetime('now', '-' || ? || ' days');",
+        (ttl_days,)
+    )
+
+    # 4. Save last run time
+    sdk['db'].query(
+        "INSERT OR REPLACE INTO system_config (config_key, config_value, is_agent_modifiable) "
+        "VALUES ('llm_cache.last_cleanup_time', ?, 1);",
+        (now_str,)
+    )
+    return f"LLM cache cleanup complete. Purged cache entries older than {ttl_days} days."
+"""
+    cursor.execute("""
+    INSERT OR REPLACE INTO agent_skills (
+        skill_id, name, description, parameters_schema, code_blob,
+        entry_point_function, required_role, trigger_type, trigger_config
+    ) VALUES (
+        'cleanup_llm_cache', 'Cleanup LLM Cache',
+        'Applies time-to-live cleanup logic to older llm_cache rows to bound disk growth.',
+        '{"type": "object", "properties": {}}', ?, 'cleanup_llm_cache', 'contributor',
+        'interval', '{"interval_seconds": 86400}'
+    );
+    """, (_llm_cache_cleanup_code,))
 
     # Check if parties table exists; if not, apply multi-party migrations
     cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='parties';")
