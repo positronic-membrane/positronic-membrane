@@ -369,6 +369,21 @@ def init_db():
     """)
 
     cursor.execute("""
+    CREATE TABLE IF NOT EXISTS swarm_disputes (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        proposed_action TEXT NOT NULL,
+        debate_transcript TEXT NOT NULL,
+        veto_count INTEGER NOT NULL,
+        status TEXT NOT NULL DEFAULT 'open' CHECK(status IN ('open', 'resolved')),
+        resolution TEXT,
+        resolution_notes TEXT,
+        resolved_at TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    """)
+
+    cursor.execute("""
     CREATE TABLE IF NOT EXISTS episodic_memory (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -705,7 +720,9 @@ def init_db():
         ("llm_cache.ttl_days", "7", 1),
         ("llm_cache.last_cleanup_time", "", 1),
         ("webhooks.slack_url", "", 0),
-        ("webhooks.discord_url", "", 0)
+        ("webhooks.discord_url", "", 0),
+        ("consecutive_critic_vetoes", "0", 0),
+        ("dispute_paused", "false", 0)
     ]
     for key, value, modifiable in default_configs:
         cursor.execute("""
@@ -2236,6 +2253,13 @@ def log_deliberation(proposed_action: str, debate_json: dict, critic_decision: i
         from src.notifications import send_webhook_notification
         send_webhook_notification("critic_veto", f"Critic vetoed action '{proposed_action}': {justification}")
 
+        veto_count = increment_consecutive_critic_vetoes()
+        if veto_count >= 3:
+            create_swarm_dispute(proposed_action, veto_count)
+            reset_consecutive_critic_vetoes()
+    else:
+        reset_consecutive_critic_vetoes()
+
 def get_recent_episodic_memories(limit: int = 10, context_type: str = None, party_id: Optional[str] = None) -> list:
     """Retrieves the most recent episodic memories."""
     conn = get_connection(read_only_constitution=True)
@@ -2570,12 +2594,180 @@ def reset_consecutive_background_loops():
     conn = get_connection(read_only_constitution=True)
     cursor = conn.cursor()
     cursor.execute("""
-    UPDATE system_config 
-    SET config_value = '0', updated_at = CURRENT_TIMESTAMP 
+    UPDATE system_config
+    SET config_value = '0', updated_at = CURRENT_TIMESTAMP
     WHERE config_key = 'consecutive_background_loops';
     """)
     conn.commit()
     conn.close()
+
+def get_consecutive_critic_vetoes() -> int:
+    """Retrieves the current consecutive_critic_vetoes config value."""
+    conn = get_connection(read_only_constitution=True)
+    cursor = conn.cursor()
+    cursor.execute("SELECT config_value FROM system_config WHERE config_key = 'consecutive_critic_vetoes';")
+    row = cursor.fetchone()
+    conn.close()
+    return int(row[0]) if row else 0
+
+def increment_consecutive_critic_vetoes() -> int:
+    """Increments the consecutive_critic_vetoes counter by 1 and returns the new value."""
+    conn = get_connection(read_only_constitution=True)
+    cursor = conn.cursor()
+    cursor.execute("""
+    UPDATE system_config
+    SET config_value = CAST(CAST(config_value AS INTEGER) + 1 AS TEXT), updated_at = CURRENT_TIMESTAMP
+    WHERE config_key = 'consecutive_critic_vetoes';
+    """)
+    conn.commit()
+
+    # Retrieve the new value
+    cursor.execute("SELECT config_value FROM system_config WHERE config_key = 'consecutive_critic_vetoes';")
+    row = cursor.fetchone()
+    conn.close()
+    return int(row[0]) if row else 0
+
+def reset_consecutive_critic_vetoes():
+    """Resets the consecutive_critic_vetoes counter to 0."""
+    conn = get_connection(read_only_constitution=True)
+    cursor = conn.cursor()
+    cursor.execute("""
+    UPDATE system_config
+    SET config_value = '0', updated_at = CURRENT_TIMESTAMP
+    WHERE config_key = 'consecutive_critic_vetoes';
+    """)
+    conn.commit()
+    conn.close()
+
+def create_swarm_dispute(proposed_action: str, veto_count: int) -> int:
+    """
+    Records a swarm dispute after `veto_count` consecutive Critic vetoes: snapshots the
+    last `veto_count` internal_deliberations rows as the debate transcript, flags
+    dispute_paused so the daemon stops triggering new Proposer/Critic ticks, and fires
+    a notification webhook.
+    """
+    conn = get_connection(read_only_constitution=True)
+    cursor = conn.cursor()
+    cursor.execute("""
+    SELECT proposed_action, agent_debate_json, critic_decision, justification, timestamp
+    FROM internal_deliberations
+    ORDER BY id DESC
+    LIMIT ?;
+    """, (veto_count,))
+    rows = cursor.fetchall()
+    transcript = [
+        {
+            "proposed_action": action,
+            "agent_debate_json": debate_json,
+            "critic_decision": decision,
+            "justification": justification,
+            "timestamp": str(timestamp)
+        }
+        for action, debate_json, decision, justification, timestamp in reversed(rows)
+    ]
+
+    cursor.execute("""
+    INSERT INTO swarm_disputes (proposed_action, debate_transcript, veto_count, status)
+    VALUES (?, ?, ?, 'open');
+    """, (proposed_action, json.dumps(transcript), veto_count))
+    dispute_id = cursor.lastrowid
+
+    cursor.execute("""
+    UPDATE system_config
+    SET config_value = 'true', updated_at = CURRENT_TIMESTAMP
+    WHERE config_key = 'dispute_paused';
+    """)
+    conn.commit()
+    conn.close()
+
+    from src.notifications import send_webhook_notification
+    send_webhook_notification(
+        "dispute_detected",
+        f"Repeated Critic vetoes ({veto_count}x) on action '{proposed_action}'. "
+        f"Dispute [{dispute_id}] logged and the autonomous loop is paused pending resolution via /goals resolve."
+    )
+    return dispute_id
+
+def get_open_disputes() -> list:
+    """Retrieves all unresolved swarm disputes, most recent first."""
+    conn = get_connection(read_only_constitution=True)
+    cursor = conn.cursor()
+    cursor.execute("""
+    SELECT id, created_at, proposed_action, veto_count, status
+    FROM swarm_disputes
+    WHERE status = 'open'
+    ORDER BY id DESC;
+    """)
+    rows = cursor.fetchall()
+    conn.close()
+    return [
+        {"id": r[0], "created_at": r[1], "proposed_action": r[2], "veto_count": r[3], "status": r[4]}
+        for r in rows
+    ]
+
+def get_dispute(dispute_id: int) -> Optional[dict]:
+    """Retrieves a single swarm dispute by id, including its debate transcript."""
+    conn = get_connection(read_only_constitution=True)
+    cursor = conn.cursor()
+    cursor.execute("""
+    SELECT id, created_at, proposed_action, debate_transcript, veto_count, status, resolution, resolution_notes, resolved_at
+    FROM swarm_disputes
+    WHERE id = ?;
+    """, (dispute_id,))
+    row = cursor.fetchone()
+    conn.close()
+    if not row:
+        return None
+    return {
+        "id": row[0],
+        "created_at": row[1],
+        "proposed_action": row[2],
+        "debate_transcript": json.loads(row[3]),
+        "veto_count": row[4],
+        "status": row[5],
+        "resolution": row[6],
+        "resolution_notes": row[7],
+        "resolved_at": row[8],
+    }
+
+def resolve_dispute(dispute_id: int, resolution: str, notes: Optional[str] = None) -> dict:
+    """
+    Resolves an open swarm dispute, clears the dispute_paused flag (resuming the
+    autonomous loop), and resets the consecutive veto counter.
+    """
+    if resolution not in ("override", "abort", "rewrite_rules"):
+        raise ValueError(f"Invalid resolution '{resolution}'. Must be one of: override, abort, rewrite_rules.")
+
+    conn = get_connection(read_only_constitution=True)
+    cursor = conn.cursor()
+    cursor.execute("SELECT status FROM swarm_disputes WHERE id = ?;", (dispute_id,))
+    row = cursor.fetchone()
+    if not row:
+        conn.close()
+        raise ValueError(f"Dispute ID {dispute_id} not found.")
+    if row[0] == "resolved":
+        conn.close()
+        raise ValueError(f"Dispute ID {dispute_id} is already resolved.")
+
+    cursor.execute("""
+    UPDATE swarm_disputes
+    SET status = 'resolved', resolution = ?, resolution_notes = ?, resolved_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+    WHERE id = ?;
+    """, (resolution, notes, dispute_id))
+
+    cursor.execute("""
+    UPDATE system_config
+    SET config_value = 'false', updated_at = CURRENT_TIMESTAMP
+    WHERE config_key = 'dispute_paused';
+    """)
+    cursor.execute("""
+    UPDATE system_config
+    SET config_value = '0', updated_at = CURRENT_TIMESTAMP
+    WHERE config_key = 'consecutive_critic_vetoes';
+    """)
+    conn.commit()
+    conn.close()
+    return {"success": True, "dispute_id": dispute_id, "resolution": resolution}
 
 def set_system_config_value(key: str, value: str, is_agent: bool = True):
     """

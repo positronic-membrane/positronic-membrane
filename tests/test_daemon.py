@@ -182,6 +182,49 @@ async def test_governor_halt_sends_webhook_notification(
     assert mock_webhook.called
     assert mock_webhook.call_args[0][0] == "governor_halt"
 
+@pytest.mark.asyncio
+@patch("src.memory.add_memory")
+@patch("src.memory.query_memories")
+@patch("src.skills.query_agent")
+async def test_dispute_paused_skips_reflection_trigger(
+    mock_query, mock_query_memories, mock_add_memory, tmp_path, monkeypatch
+):
+    """While dispute_paused is set, the mid-layer loop must not run the Proposer/Critic
+    reflection cycle, even when a swarm reflection trigger is pending."""
+    import src.daemon
+
+    mock_query_memories.return_value = []
+    mock_add_memory.return_value = None
+    mock_query.return_value = ""
+
+    monkeypatch.setenv("JANUS_TEST_MODE", "1")
+    monkeypatch.setattr(src.config, "BOREDOM_THRESHOLD", 99)
+    monkeypatch.setattr(src.config, "ROOT_DIR", tmp_path)
+
+    conn = get_connection()
+    conn.execute("UPDATE system_config SET config_value = 'true' WHERE config_key = 'dispute_paused';")
+    conn.execute("UPDATE system_config SET config_value = '99' WHERE config_key = 'boredom_threshold';")
+    conn.commit()
+    conn.close()
+
+    src.daemon._pending_swarm_triggers.clear()
+    src.daemon._pending_swarm_triggers.append("reflection")
+
+    with patch.object(DynamicSkillExecutor, "execute", wraps=DynamicSkillExecutor.execute) as mock_execute:
+        daemon_task = asyncio.create_task(run_heartbeat_loop())
+        await asyncio.sleep(1.5)
+        daemon_task.cancel()
+        try:
+            await daemon_task
+        except asyncio.CancelledError:
+            pass
+
+        reflection_calls = [c for c in mock_execute.call_args_list if c[0][0] == "run_reflection_cycle"]
+        assert reflection_calls == []
+
+    # The trigger is still pending since it was never drained while paused.
+    assert "reflection" in src.daemon._pending_swarm_triggers
+
 # --- Consolidating from test_phase5_layered_cognition.py ---
 
 def test_schema_and_seeding():
