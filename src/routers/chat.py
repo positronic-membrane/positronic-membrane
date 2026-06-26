@@ -125,8 +125,16 @@ def post_chat(data: ChatRequest, current_party = Depends(require_role('user'))):
 
 
 @router.post("/api/chat/stream")
-def post_chat_stream(data: ChatRequest, current_party=Depends(require_role('user'))):
-    """SSE streaming chat — yields tokens progressively to prevent proxy timeouts."""
+async def post_chat_stream(data: ChatRequest, current_party=Depends(require_role('user'))):
+    """SSE streaming chat — yields tokens progressively to prevent proxy timeouts.
+
+    Runs the blocking persona generator in a daemon thread and bridges events into
+    an async generator via an asyncio.Queue.  An immediate heartbeat comment is sent
+    the moment the connection opens so Cloudflare never sees an idle origin, and a
+    periodic heartbeat is sent every 15 s while the LLM is generating.
+    """
+    import threading
+
     user_msg = data.message.strip()
     if not user_msg:
         raise HTTPException(status_code=400, detail="Message cannot be empty")
@@ -134,31 +142,64 @@ def post_chat_stream(data: ChatRequest, current_party=Depends(require_role('user
     party_id = current_party["party_id"]
     log_episodic_memory("user", user_msg, "user_visible", party_id=party_id)
 
-    def _generate():
+    async def _generate():
         collected = []
-        try:
-            if user_msg.startswith("/"):
-                response = asyncio.run(src.persona.handle_web_slash_command(user_msg))
-                collected.append(response)
-                yield f"data: {json.dumps({'type': 'token', 'text': response})}\n\n"
-            elif src.persona.detect_metacognitive_intent(user_msg):
-                response = src.persona.generate_metacognitive_narrative(user_msg)
-                collected.append(response)
-                yield f"data: {json.dumps({'type': 'token', 'text': response})}\n\n"
-            else:
-                for event_type, content in src.persona.stream_persona_response(user_msg, party_id):
-                    if event_type == "token":
-                        collected.append(content)
-                    yield f"data: {json.dumps({'type': event_type, 'text': content})}\n\n"
-        except Exception as e:
-            logger.error(f"Error in streaming chat: {e}", exc_info=True)
-            yield f"data: {json.dumps({'type': 'error', 'text': str(e)})}\n\n"
-        finally:
-            full_response = "".join(collected)
-            if full_response:
-                log_episodic_memory("persona", full_response, "user_visible", party_id=party_id)
-                process_sandbox_updates(full_response)
-            yield f"data: {json.dumps({'type': 'done'})}\n\n"
+        q: asyncio.Queue = asyncio.Queue()
+        _DONE = object()
+        loop = asyncio.get_running_loop()
+
+        def _worker():
+            try:
+                if user_msg.startswith("/"):
+                    new_loop = asyncio.new_event_loop()
+                    try:
+                        resp = new_loop.run_until_complete(
+                            src.persona.handle_web_slash_command(user_msg)
+                        )
+                    finally:
+                        new_loop.close()
+                    loop.call_soon_threadsafe(q.put_nowait, ("token", resp))
+                elif src.persona.detect_metacognitive_intent(user_msg):
+                    resp = src.persona.generate_metacognitive_narrative(user_msg)
+                    loop.call_soon_threadsafe(q.put_nowait, ("token", resp))
+                else:
+                    for evt, content in src.persona.stream_persona_response(user_msg, party_id):
+                        if evt == "done":
+                            break
+                        loop.call_soon_threadsafe(q.put_nowait, (evt, content))
+            except Exception as exc:
+                logger.error(f"Error in streaming chat worker: {exc}", exc_info=True)
+                loop.call_soon_threadsafe(q.put_nowait, ("error", str(exc)))
+            finally:
+                loop.call_soon_threadsafe(q.put_nowait, _DONE)
+
+        # Send a heartbeat comment immediately — establishes the SSE connection with
+        # Cloudflare before the LLM generates its first token.
+        yield ": heartbeat\n\n"
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+        while True:
+            try:
+                item = await asyncio.wait_for(q.get(), timeout=15)
+            except asyncio.TimeoutError:
+                # Keep Cloudflare from timing out during slow generation.
+                yield ": heartbeat\n\n"
+                continue
+
+            if item is _DONE:
+                break
+
+            evt_type, content = item
+            if evt_type == "token":
+                collected.append(content)
+            yield f"data: {json.dumps({'type': evt_type, 'text': content})}\n\n"
+
+        full_response = "".join(collected)
+        if full_response:
+            log_episodic_memory("persona", full_response, "user_visible", party_id=party_id)
+            process_sandbox_updates(full_response)
+        yield f"data: {json.dumps({'type': 'done'})}\n\n"
 
     return StreamingResponse(
         _generate(),
