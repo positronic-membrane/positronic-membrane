@@ -230,7 +230,8 @@ def query_agent(agent_id: str, prompt_content: str, system_override: str = None)
         try:
             client = OpenAI(
                 base_url=base_url,
-                api_key=api_key
+                api_key=api_key,
+                timeout=30.0,
             )
             completion_args = {
                 "model": model,

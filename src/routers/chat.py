@@ -1,6 +1,7 @@
 import json
 import logging
 import asyncio
+import concurrent.futures
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect, Query
 
@@ -95,7 +96,23 @@ def post_chat(data: ChatRequest, current_party = Depends(require_role('user'))):
         elif src.persona.detect_metacognitive_intent(user_msg):
             response = src.persona.generate_metacognitive_narrative(user_msg)
         else:
-            response = src.persona.generate_persona_response_autonomous(user_msg, party_id=party_id)
+            # Hard wall-clock cap so the response escapes before a reverse-proxy
+            # (Cloudflare default: 100 s) kills the connection and returns a 524.
+            # Per-LLM-call timeout is 30 s (set in llm.py); 5 ReAct turns × ~20 s
+            # leaves headroom here at 85 s.
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as _pool:
+                _fut = _pool.submit(
+                    src.persona.generate_persona_response_autonomous,
+                    user_msg,
+                    party_id,
+                )
+                try:
+                    response = _fut.result(timeout=85)
+                except concurrent.futures.TimeoutError:
+                    raise HTTPException(
+                        status_code=503,
+                        detail="Response timed out — the swarm is still thinking. Try again in a moment.",
+                    )
 
         log_episodic_memory("persona", response, "user_visible", party_id=party_id)
         process_sandbox_updates(response)
