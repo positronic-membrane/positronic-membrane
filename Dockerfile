@@ -1,6 +1,5 @@
 FROM python:3.12-slim
 
-# Install system dependencies
 RUN apt-get update && apt-get install -y \
     git \
     build-essential \
@@ -9,14 +8,17 @@ RUN apt-get update && apt-get install -y \
 
 WORKDIR /app
 
-# Copy dependency configs
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# Copy only what pip needs to resolve dependencies before the rest of the source.
+# This keeps the install layer cached as long as pyproject.toml is unchanged.
+COPY pyproject.toml .
+COPY src/ src/
 
-# Copy all repository files (relying on .dockerignore to exclude databases, venv, secrets)
+# Install package with dev extras (pulls in pytest, pytest-asyncio, ruff).
+RUN pip install --no-cache-dir ".[dev]"
+
+# Copy remaining files (tests/, alembic.ini, static assets, etc.)
 COPY . .
 
-EXPOSE 8000
+EXPOSE 5005
 
-# Entrypoint script to start Web Server and background Swarm Daemon
 CMD ["sh", "-c", "python -m src.web_server & python -m src.daemon"]

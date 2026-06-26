@@ -130,6 +130,11 @@ To run agent code validations safely without RCE risks on your host system:
 *   Build the sandbox image ahead of time: `docker build -t janus:latest .` — `DockerSandboxExecutor`
     preflight-checks that the daemon is reachable and the image exists before running tests, and
     fails fast with an actionable error if either check fails (it does not auto-build).
+*   **Image lifecycle:** Build once per host. The image is a stable test runtime; the worktree under
+    test is mounted at `/workspace` at container start, so code changes never require a rebuild.
+    Rebuild only when `pyproject.toml` dependencies change, the image is deleted, or you provision a
+    new host. Restarting Positronic Membrane, the web server, or creating a new sandbox session does
+    not require a rebuild.
 *   Janus runs validation tests inside ephemeral, `--network none`-isolated containers (configurable
     via `DOCKER_NETWORK`) with resource limits (`DOCKER_MEMORY_LIMIT`, `DOCKER_CPU_LIMIT`,
     `DOCKER_PIDS_LIMIT`) and fixed hardening (`--cap-drop=ALL`, `--security-opt=no-new-privileges`)
