@@ -60,6 +60,12 @@ DOCKER_MEMORY_LIMIT = os.getenv("DOCKER_MEMORY_LIMIT", "512m")
 DOCKER_CPU_LIMIT = os.getenv("DOCKER_CPU_LIMIT", "1.0")
 DOCKER_PIDS_LIMIT = os.getenv("DOCKER_PIDS_LIMIT", "256")
 
+# Neo4j Graph DB (Aura or self-hosted)
+NEO4J_URI      = os.getenv("NEO4J_URI", "")
+NEO4J_USERNAME = os.getenv("NEO4J_USERNAME", "neo4j")
+NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD", "")
+NEO4J_DATABASE = os.getenv("NEO4J_DATABASE", "neo4j")
+
 # Skills Library (sibling repo for registry sync)
 SKILLS_LIBRARY_REPO   = os.getenv("SKILLS_LIBRARY_REPO",   "git@github.com:jmccauley75gh/janus-skills-library.git")
 SKILLS_LIBRARY_BRANCH = os.getenv("SKILLS_LIBRARY_BRANCH", "main")

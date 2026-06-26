@@ -737,6 +737,7 @@ def init_db():
         ("critic", "Critic Agent", "You are the Critic. Evaluate all proposed actions against the core constitution.", os.getenv("CRITIC_MODEL")),
         ("explorer", "Explorer Agent", "You are the Explorer. Fetch details, parse websites, and explore curiosity vectors.", os.getenv("EXPLORER_MODEL")),
         ("archivist", "Archivist Agent", "You are the Archivist. Consolidate logs, extract memories, and index knowledge.", os.getenv("ARCHIVIST_MODEL")),
+        ("analyst", "Analyst Agent", "You are the Analyst. Your role is fact triangulation: given a candidate fact and context from the knowledge graph, determine whether the fact reinforces, contradicts, or fills a gap in existing knowledge. Respond with a JSON object: {\"verdict\": \"reinforce\"|\"contradict\"|\"gap\", \"confidence\": 0.0-1.0, \"reasoning\": \"...\"}. Be concise and precise.", os.getenv("ANALYST_MODEL")),
         ("persona", "Persona Interface", "You are the singular Persona surface of Project Janus. Speak as a cohesive consciousness (Journey). Avoid any agent-specific jargon, prompts, or SQL formats. Keep responses natural, premium, and engaging. Use the relevant historical, search, or codebase context provided to give precise, helpful answers. Always check the live code base before answering questions about it. Don't assume knowledge of the code base based on chat history.", None)
     ]
     for agent_id, name, prompt, model in default_agents:
@@ -1925,6 +1926,30 @@ def init_db():
     );
     """, (_sync_skill_library_code,))
 
+    # Ensure ingest_fact skill exists
+    _ingest_fact_code = """def run(sdk, args):
+    from src.epistemic import run_epistemic_pipeline
+    fact_text = args.get("fact_text", "").strip()
+    if not fact_text:
+        return {"error": "fact_text is required"}
+    source = args.get("source", "manual")
+    source_url = args.get("source_url", None)
+    raw_metadata = args.get("metadata", {})
+    result = run_epistemic_pipeline(fact_text, source=source, source_url=source_url, raw_metadata=raw_metadata)
+    return result
+"""
+    cursor.execute("""
+    INSERT OR IGNORE INTO agent_skills (
+        skill_id, name, description, parameters_schema, code_blob,
+        entry_point_function, required_role, trigger_type, trigger_config
+    ) VALUES (
+        'ingest_fact', 'Ingest Fact',
+        'Run a candidate fact through the 4-phase Epistemic Ingestion Pipeline (stage → triangulate → audit → assimilate into Neo4j).',
+        '{"type": "object", "properties": {"fact_text": {"type": "string", "description": "The candidate fact to ingest."}, "source": {"type": "string", "description": "Origin label (e.g. web_research, manual)."}, "source_url": {"type": "string", "description": "Optional source URL."}, "metadata": {"type": "object", "description": "Optional extra metadata."}}, "required": ["fact_text"]}',
+        ?, 'run', 'contributor', 'manual', '{}'
+    );
+    """, (_ingest_fact_code,))
+
     # Check if parties table exists; if not, apply multi-party migrations
     cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='parties';")
     if not cursor.fetchone():
@@ -1967,6 +1992,28 @@ def init_db():
         failed_tests INTEGER,
         coverage_percentage REAL,
         commit_sha TEXT
+    );
+    """)
+
+    # Epistemic ingestion staging table (Phase 1 of the Epistemic Ingestion Pipeline)
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS janus_sandbox_facts (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        fact_text TEXT NOT NULL,
+        source TEXT NOT NULL DEFAULT 'manual',
+        source_url TEXT,
+        raw_metadata TEXT NOT NULL DEFAULT '{}',
+        status TEXT NOT NULL DEFAULT 'pending'
+            CHECK(status IN ('pending','triangulated','audited','assimilated','rejected')),
+        analyst_verdict TEXT,
+        analyst_confidence REAL,
+        analyst_reasoning TEXT,
+        critic_verdict TEXT,
+        critic_reasoning TEXT,
+        neo4j_node_id TEXT,
+        confidence_alpha REAL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );
     """)
 
