@@ -602,6 +602,10 @@ document.addEventListener("DOMContentLoaded", () => {
         }
     }
 
+    function stageActionError(data) {
+        return data.error || data.detail || "Unknown error";
+    }
+
     async function handleStageApply() {
         try {
             const res = await fetch("/api/stage/action", {
@@ -610,11 +614,11 @@ document.addEventListener("DOMContentLoaded", () => {
                 body: JSON.stringify({ action: "apply" })
             });
             const data = await res.json();
-            if (data.success) {
+            if (res.ok && data.success) {
                 loadStagingStatus();
                 appendMessage("system", "Staged changes successfully applied to active codebase.");
             } else {
-                alert(`Error: ${data.error}`);
+                alert(`Error: ${stageActionError(data)}`);
             }
         } catch (err) {
             console.error(err);
@@ -630,11 +634,11 @@ document.addEventListener("DOMContentLoaded", () => {
                 body: JSON.stringify({ action: "cancel" })
             });
             const data = await res.json();
-            if (data.success) {
+            if (res.ok && data.success) {
                 loadStagingStatus();
                 appendMessage("system", "Staging workspace cleaned and discarded.");
             } else {
-                alert(`Error: ${data.error}`);
+                alert(`Error: ${stageActionError(data)}`);
             }
         } catch (err) {
             console.error(err);
@@ -651,11 +655,11 @@ document.addEventListener("DOMContentLoaded", () => {
                 body: JSON.stringify({ action: "heal" })
             });
             const data = await res.json();
-            if (data.success) {
+            if (res.ok && data.success) {
                 loadStagingStatus();
                 alert(data.passed ? "Self-healing PASSED all tests!" : "Self-healing completed, but tests still failing. Check logs.");
             } else {
-                alert(`Error: ${data.error}`);
+                alert(`Error: ${stageActionError(data)}`);
             }
         } catch (err) {
             console.error(err);
@@ -668,11 +672,11 @@ document.addEventListener("DOMContentLoaded", () => {
         const instInput = document.getElementById("stage-refine-instructions");
         const instructions = instInput.value.trim();
         if (!file_path || !instructions) return;
-        
+
         instInput.value = "";
         const logsBox = document.getElementById("stage-val-logs");
         logsBox.textContent = `Regenerating modifications for '${file_path}' asynchronously...\n(This might take several seconds)`;
-        
+
         try {
             const res = await fetch("/api/stage/action", {
                 method: "POST",
@@ -680,10 +684,10 @@ document.addEventListener("DOMContentLoaded", () => {
                 body: JSON.stringify({ action: "refine", file_path: file_path, instructions: instructions })
             });
             const data = await res.json();
-            if (data.success) {
+            if (res.ok && data.success) {
                 loadStagingStatus();
             } else {
-                alert(`Error: ${data.error}`);
+                alert(`Error: ${stageActionError(data)}`);
             }
         } catch (err) {
             console.error(err);

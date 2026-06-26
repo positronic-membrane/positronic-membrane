@@ -231,7 +231,7 @@ def query_agent(agent_id: str, prompt_content: str, system_override: str = None)
             client = OpenAI(
                 base_url=base_url,
                 api_key=api_key,
-                timeout=80.0,
+                timeout=getattr(src.config, "LLM_CALL_TIMEOUT", 80.0),
             )
             completion_args = {
                 "model": model,

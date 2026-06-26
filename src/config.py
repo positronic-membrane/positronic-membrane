@@ -36,7 +36,9 @@ BOREDOM_THRESHOLD = int(os.getenv("BOREDOM_THRESHOLD", "5"))
 N_LOOP_LIMIT = int(os.getenv("N_LOOP_LIMIT", "20"))
 
 # Sandbox execution configs
-SANDBOX_TEST_TIMEOUT = int(os.getenv("SANDBOX_TEST_TIMEOUT", "60"))
+SANDBOX_TEST_TIMEOUT = int(os.getenv("SANDBOX_TEST_TIMEOUT", "300"))
+CHAT_TIMEOUT = int(os.getenv("CHAT_TIMEOUT", "85"))
+LLM_CALL_TIMEOUT = float(os.getenv("LLM_CALL_TIMEOUT", "80.0"))
 SANDBOX_PROVIDER = os.getenv("SANDBOX_PROVIDER", "docker")  # "local", "docker", or "e2b"
 ALLOW_LOCAL_SANDBOX_EXEC = os.getenv("ALLOW_LOCAL_SANDBOX_EXEC", "False").lower() in ("true", "1", "yes")
 E2B_API_KEY = os.getenv("E2B_API_KEY", "")

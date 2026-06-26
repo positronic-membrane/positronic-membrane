@@ -98,8 +98,8 @@ def post_chat(data: ChatRequest, current_party = Depends(require_role('user'))):
         else:
             # Hard wall-clock cap so the response escapes before a reverse-proxy
             # (Cloudflare default: 100 s) kills the connection and returns a 524.
-            # Per-LLM-call timeout is 30 s (set in llm.py); 5 ReAct turns × ~20 s
-            # leaves headroom here at 85 s.
+            # Both this value and LLM_CALL_TIMEOUT are tunable via .env.
+            _chat_timeout = getattr(src.config, "CHAT_TIMEOUT", 85)
             with concurrent.futures.ThreadPoolExecutor(max_workers=1) as _pool:
                 _fut = _pool.submit(
                     src.persona.generate_persona_response_autonomous,
@@ -107,7 +107,7 @@ def post_chat(data: ChatRequest, current_party = Depends(require_role('user'))):
                     party_id,
                 )
                 try:
-                    response = _fut.result(timeout=85)
+                    response = _fut.result(timeout=_chat_timeout)
                 except concurrent.futures.TimeoutError:
                     raise HTTPException(
                         status_code=503,
