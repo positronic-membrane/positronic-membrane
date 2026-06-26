@@ -2,7 +2,7 @@ import re
 import asyncio
 import logging
 import src.config
-from src.llm import query_agent
+from src.llm import query_agent, query_agent_stream
 from src.memory import query_memories
 from src.database import (
     get_connection,
@@ -1036,16 +1036,18 @@ def handle_docs_command(command_str: str) -> str:
         )
 
 
-def generate_persona_response(user_query: str, party_id: Optional[str] = None) -> str:
+def _build_persona_prompt(user_query: str, party_id=None) -> tuple:
     """
-    Queries ChromaDB (Primary Concepts & Codebase) and episodic logs for context,
-    performs web searches if requested, and formulates a conversational response.
+    Assembles the full prompt and system_override for the Persona agent.
+    Returns (prompt: str, system_override: str).
+    Extracted from generate_persona_response so both the blocking and streaming
+    paths share identical context preparation.
     """
     from src.sandbox_session import get_active_sandbox, get_sandbox_modified_files
-    
+
     if party_id is None:
         party_id = get_session_party_id()
-        
+
     # Fetch interaction profile style guidelines for this party
     response_style = "balanced"
     tone_bias = "neutral"
@@ -1076,7 +1078,7 @@ def generate_persona_response(user_query: str, party_id: Optional[str] = None) -
 
     style_guidelines = f"\n\n### Response Style Guidelines:\n- Response Style: {response_style}\n- Tone Bias: {tone_bias}"
     system_override = base_prompt + style_guidelines
-    
+
     # 1. Fetch self model traits
     traits_list = []
     conn = get_connection(read_only_constitution=True)
@@ -1112,9 +1114,9 @@ def generate_persona_response(user_query: str, party_id: Optional[str] = None) -
             chat_history.append(f"{speaker.upper()}: {msg}")
     history_summary = "\n".join(chat_history) if chat_history else "No previous conversation."
 
-    # 3. Assemble semantic/knowledge context (including web searches, codebase queries, active sandbox, ChromaDB)
+    # 3. Assemble semantic/knowledge context (web search, codebase, active sandbox, ChromaDB)
     semantic_context = ""
-    
+
     # Active Sandbox Session details
     try:
         active_sb = get_active_sandbox()
@@ -1124,18 +1126,18 @@ def generate_persona_response(user_query: str, party_id: Optional[str] = None) -
             sandbox_info += f"- Path: {active_sb['active_sandbox_path']}\n"
             sandbox_info += f"- Branch: {active_sb['active_sandbox_branch']}\n"
             sandbox_info += f"- Test Status: {status.upper()}\n"
-            
+
             modified = get_sandbox_modified_files()
             if modified:
                 sandbox_info += f"- Modified Files: {', '.join(modified)}\n"
-            
+
             if status == "failed" and active_sb.get("active_sandbox_test_logs"):
                 sandbox_info += f"- Last Sandbox Pytest Failures:\n{active_sb['active_sandbox_test_logs']}\n"
-            
+
             semantic_context += sandbox_info + "\n"
     except Exception as sb_err:
         logger.error(f"Failed to inject sandbox session details into prompt: {sb_err}")
-    
+
     # Live Web Search
     search_query = detect_search_intent(user_query)
     if search_query:
@@ -1185,7 +1187,6 @@ def generate_persona_response(user_query: str, party_id: Optional[str] = None) -
 
     semantic_str = semantic_context.strip() if semantic_context.strip() else "None available."
 
-    # Format into XML tags
     xml_block = (
         f"<self_traits>\n{self_traits_str}\n</self_traits>\n"
         f"<episodic_memory>\n{history_summary}\n</episodic_memory>\n"
@@ -1198,12 +1199,113 @@ def generate_persona_response(user_query: str, party_id: Optional[str] = None) -
 USER MESSAGE:
 {user_query}
 """
+    return prompt, system_override
 
+
+def generate_persona_response(user_query: str, party_id: Optional[str] = None) -> str:
+    """
+    Queries ChromaDB (Primary Concepts & Codebase) and episodic logs for context,
+    performs web searches if requested, and formulates a conversational response.
+    """
     try:
+        prompt, system_override = _build_persona_prompt(user_query, party_id)
         return query_agent("persona", prompt, system_override=system_override)
     except Exception as e:
         logger.error(f"Failed to generate persona response: {e}")
         raise
+
+
+def stream_persona_response(user_msg: str, party_id=None):
+    """
+    Generator yielding (event_type, content) tuples for SSE delivery.
+    event_type is one of: "token", "status", "done".
+
+    Mirrors generate_persona_response_autonomous() but streams the final LLM
+    turn token-by-token. Intermediate turns (skill calls) run blocking and emit
+    "status" events so the client knows work is in progress.
+
+    Speculative streaming: each turn begins streaming immediately. If the first
+    ~15 characters start with '{' the response is buffered silently (it's a
+    skill-call JSON block). Otherwise tokens are flushed to the client as they
+    arrive.
+    """
+    from src.daemon import parse_action
+    from src.skills import DynamicSkillExecutor
+
+    current_query = user_msg
+    max_turns = 5
+
+    for _turn in range(max_turns):
+        prompt, system_override = _build_persona_prompt(current_query, party_id)
+
+        chunks = []
+        flushed = False
+
+        for chunk in query_agent_stream("persona", prompt, system_override=system_override):
+            chunks.append(chunk)
+            if not flushed:
+                assembled = "".join(chunks).lstrip()
+                if len(assembled) >= 15:
+                    if not assembled.startswith("{"):
+                        flushed = True
+                        for c in chunks:
+                            yield ("token", c)
+                    # else: buffering — may be a skill-call JSON block
+            else:
+                yield ("token", chunk)
+
+        full_response = "".join(chunks)
+
+        skill_id, arguments, mock_result = parse_action(full_response)
+        sandbox_blocks = re.findall(r"```sandbox\s*\n(.*?)\n```", full_response, re.DOTALL)
+        is_syntax_error = mock_result and mock_result.startswith("Error:")
+
+        if skill_id or sandbox_blocks or is_syntax_error:
+            log_episodic_memory("persona", full_response, "background_thought", party_id=party_id)
+
+        if not skill_id and not sandbox_blocks:
+            if is_syntax_error:
+                log_episodic_memory("sandbox_automation", mock_result, "background_thought", party_id=party_id)
+                current_query = (
+                    f"Tool execution failed with a syntax error:\n{mock_result}\n"
+                    "Please correct the syntax and try again using the valid JSON format: "
+                    "{\"skill_id\": \"<skill_id>\", \"arguments\": { ... }}."
+                )
+                yield ("status", "Correcting tool call…")
+                continue
+            # Final response — flush buffer if speculative streaming never fired
+            if not flushed:
+                yield ("token", full_response)
+            break
+
+        # Execute skill / sandbox
+        execution_summary = ""
+
+        if skill_id:
+            yield ("status", f"Using tool: {skill_id}…")
+            try:
+                res = DynamicSkillExecutor.execute(skill_id, arguments, party_id=party_id or get_session_party_id())
+                if res["success"]:
+                    execution_summary += f"[Skill '{skill_id}' executed successfully]\nResult: {res['result']}\n\n"
+                else:
+                    execution_summary += f"[Skill '{skill_id}' failed]\nError: {res['error']}\n\n"
+            except Exception as e:
+                execution_summary += f"[Skill '{skill_id}' error]\nException: {e}\n\n"
+
+        if sandbox_blocks:
+            yield ("status", "Executing sandbox commands…")
+            results = [execute_chat_sandbox_commands(b) for b in sandbox_blocks]
+            execution_summary += "[Sandbox Commands Executed]\n" + "\n\n".join(results)
+
+        log_episodic_memory("sandbox_automation", execution_summary.strip(), "background_thought", party_id=party_id)
+
+        has_failure = any(w in execution_summary for w in ("Failed", "Error", "Exception"))
+        if has_failure:
+            current_query = "Some actions or skills failed. Please review the background thought history, address the failure, and try again or proceed."
+        else:
+            current_query = "Executed requested actions/skills. Please review the background thought history and continue."
+
+    yield ("done", "")
 
 def execute_chat_sandbox_commands(block: str) -> str:
     """

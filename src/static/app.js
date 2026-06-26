@@ -238,48 +238,84 @@ document.addEventListener("DOMContentLoaded", () => {
         const text = chatInput.value.trim();
         if (!text) return;
 
-        // Clear input field immediately
         chatInput.value = "";
         chatInput.style.height = "auto";
-
-        // Append user message
         appendMessage("user", text);
         scrollToBottom();
 
-        // Append typing indicator
         const indicator = appendTypingIndicator();
         scrollToBottom();
 
+        let msgDiv = null;
+        let rawTokens = "";
+
         try {
-            const res = await fetch("/api/chat", {
+            const res = await fetch("/api/chat/stream", {
                 method: "POST",
-                headers: {
-                    "Content-Type": "application/json"
-                },
-                body: JSON.stringify({ message: text })
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ message: text }),
             });
 
-            const rawText = await res.text();
-            indicator.remove();
-
-            let data;
-            try {
-                data = JSON.parse(rawText);
-            } catch (_) {
-                appendMessage("persona", `*(Swarm core returned an unreadable response — status ${res.status})*`);
+            if (!res.ok) {
+                indicator.remove();
+                let errText = `HTTP ${res.status}`;
+                try { const d = await res.json(); errText = d.detail || d.error || errText; } catch (_) {}
+                appendMessage("persona", `*(System Error: ${errText})*`);
                 scrollToBottom();
                 return;
             }
 
-            if (!res.ok) {
-                const detail = data.detail || data.error || `HTTP ${res.status}`;
-                appendMessage("persona", `*(System Error: ${detail})*`);
-            } else if (data.response) {
-                appendMessage("persona", data.response);
-            } else if (data.error) {
-                appendMessage("persona", `*(System Error: ${data.error})*`);
+            const reader = res.body.getReader();
+            const decoder = new TextDecoder();
+            let sseBuffer = "";
+
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+
+                sseBuffer += decoder.decode(value, { stream: true });
+                const lines = sseBuffer.split("\n");
+                sseBuffer = lines.pop(); // keep any incomplete trailing line
+
+                for (const line of lines) {
+                    if (!line.startsWith("data: ")) continue;
+                    let event;
+                    try { event = JSON.parse(line.slice(6)); } catch (_) { continue; }
+
+                    if (event.type === "token") {
+                        if (!msgDiv) {
+                            indicator.remove();
+                            msgDiv = document.createElement("div");
+                            msgDiv.classList.add("message", "persona");
+                            chatMessages.appendChild(msgDiv);
+                        }
+                        rawTokens += event.text;
+                        msgDiv.innerHTML = formatMessageText(rawTokens);
+                        scrollToBottom();
+                    } else if (event.type === "status") {
+                        if (!msgDiv) {
+                            indicator.remove();
+                            msgDiv = document.createElement("div");
+                            msgDiv.classList.add("message", "persona");
+                            chatMessages.appendChild(msgDiv);
+                        }
+                        msgDiv.innerHTML = formatMessageText(`_${event.text}_`);
+                        scrollToBottom();
+                    } else if (event.type === "error") {
+                        indicator.remove();
+                        appendMessage("persona", `*(System Error: ${event.text})*`);
+                        scrollToBottom();
+                    } else if (event.type === "done") {
+                        if (!msgDiv) {
+                            indicator.remove();
+                        }
+                        if (msgDiv && rawTokens) {
+                            msgDiv.innerHTML = formatMessageText(rawTokens);
+                        }
+                        scrollToBottom();
+                    }
+                }
             }
-            scrollToBottom();
         } catch (err) {
             indicator.remove();
             appendMessage("persona", `*(Failed to reach swarm core: ${err.message})*`);

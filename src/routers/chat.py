@@ -4,6 +4,7 @@ import asyncio
 import concurrent.futures
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect, Query
+from fastapi.responses import StreamingResponse
 
 from src.routers.dependencies import (
     ChatRequest,
@@ -116,11 +117,54 @@ def post_chat(data: ChatRequest, current_party = Depends(require_role('user'))):
 
         log_episodic_memory("persona", response, "user_visible", party_id=party_id)
         process_sandbox_updates(response)
-        
+
         return {"response": response}
     except Exception as e:
         logger.error(f"Error processing chat POST: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/api/chat/stream")
+def post_chat_stream(data: ChatRequest, current_party=Depends(require_role('user'))):
+    """SSE streaming chat — yields tokens progressively to prevent proxy timeouts."""
+    user_msg = data.message.strip()
+    if not user_msg:
+        raise HTTPException(status_code=400, detail="Message cannot be empty")
+
+    party_id = current_party["party_id"]
+    log_episodic_memory("user", user_msg, "user_visible", party_id=party_id)
+
+    def _generate():
+        collected = []
+        try:
+            if user_msg.startswith("/"):
+                response = asyncio.run(src.persona.handle_web_slash_command(user_msg))
+                collected.append(response)
+                yield f"data: {json.dumps({'type': 'token', 'text': response})}\n\n"
+            elif src.persona.detect_metacognitive_intent(user_msg):
+                response = src.persona.generate_metacognitive_narrative(user_msg)
+                collected.append(response)
+                yield f"data: {json.dumps({'type': 'token', 'text': response})}\n\n"
+            else:
+                for event_type, content in src.persona.stream_persona_response(user_msg, party_id):
+                    if event_type == "token":
+                        collected.append(content)
+                    yield f"data: {json.dumps({'type': event_type, 'text': content})}\n\n"
+        except Exception as e:
+            logger.error(f"Error in streaming chat: {e}", exc_info=True)
+            yield f"data: {json.dumps({'type': 'error', 'text': str(e)})}\n\n"
+        finally:
+            full_response = "".join(collected)
+            if full_response:
+                log_episodic_memory("persona", full_response, "user_visible", party_id=party_id)
+                process_sandbox_updates(full_response)
+            yield f"data: {json.dumps({'type': 'done'})}\n\n"
+
+    return StreamingResponse(
+        _generate(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @router.get("/api/v1/memory/{key}")
