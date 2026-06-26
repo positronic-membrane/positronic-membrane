@@ -10,6 +10,7 @@ Positronic Membrane is a self-modifying, multi-agent developer swarm focused on 
 *   **Critic:** Audits all proposals against security constraints and the core constitution.
 *   **Explorer:** Crawls the web and researches unfamiliar symbols.
 *   **Archivist:** Indexes codebase changes and compresses memory profiles.
+*   **Analyst:** Triangulates candidate facts against the knowledge graph, returning a structured verdict (`reinforce`, `contradict`, or `gap`) with a confidence score.
 
 ---
 
@@ -122,4 +123,4 @@ Positronic Membrane stores its own executable capabilities inside the database (
     *   **schema:** JSON parameter layout validation.
     *   **code_blob:** Executable Python code containing the implementation.
     *   **entry_point_function:** Function to trigger.
-*   Before a skill runs, it undergoes an AST validation audit inside `src/sandbox.py` blocking imports of forbidden modules (`os`, `subprocess`, etc.).
+*   Skills stored in `agent_skills` are developer-authored and executed as-is via `DynamicSkillExecutor` — they are not AST-audited. The AST sandbox (`src/sandbox.py`) applies only to ad-hoc code snippets submitted via the `execute_code` skill, not to installed skills.

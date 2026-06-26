@@ -83,6 +83,7 @@ This section documents the steps taken on **June 12, 2026** to successfully migr
             `defer_permissions` delegated control checks to the VM, and `local` marked it as a local drive, resolving the sandbox lock.
 
 ### Step 4: Antigravity CLI Installation
+<!-- TODO: verify — the URL and tool name below could not be confirmed against a known public source; retain for migration history but do not treat as a reproducible step -->
 *   **Action:** Installed the `agy` command-line utility on the droplet:
     ```bash
     curl -fsSL https://antigravity.google/cli/install.sh | bash

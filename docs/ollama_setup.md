@@ -117,6 +117,7 @@ PROPOSER_MODEL=llama3.1:8b
 CRITIC_MODEL=qwen2.5-coder:1.5b      # Light and fast for auditing actions
 EXPLORER_MODEL=qwen2.5-coder:7b
 ARCHIVIST_MODEL=qwen2.5-coder:1.5b   # Lightweight for parsing logs and memory
+ANALYST_MODEL=qwen2.5-coder:1.5b     # Fact triangulation against the knowledge graph
 ```
 
 > [!TIP]

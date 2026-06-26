@@ -78,12 +78,14 @@ To support clean development workflows, the core sandboxing framework in `src/sa
 
 ### A. Evolution Sandboxes
 * **Purpose:** Developing the "next version" of Janus without writing changes back to the active working copy.
-* **Mechanism:** 
-  1. A separate Git worktree is created on an `evolution/<version>` branch.
-  2. The production database is duplicated into the worktree.
-  3. A concurrent child Janus daemon process is spawned in the worktree, pointing to the duplicated database and running on an offset port (e.g., `5001`).
-  4. Parent and child can communicate in the background using SQLite `swarm_messages`.
-* **Promotion:** When the new version is verified, the parent Janus runs a promotion script that merges the code changes into the main branch, updates the database schema, and ports over the delta memories/logs accumulated in the parent's DB during the sandbox's lifespan.
+* **Mechanism (implemented):**
+  1. A separate Git worktree is created on an `evolution/sandbox-<name>` branch under `.janus_sandboxes/session_<name>`.
+  2. The active SQLite database is copied into the worktree.
+  3. Validation tests are run inside the sandbox via the configured `SandboxExecutor` before changes can be shipped back.
+* **Mechanism (planned, not yet implemented):**
+  * Spawning a concurrent child daemon process in the worktree on an offset port (e.g., `5001`) and inter-process communication via `swarm_messages`.
+  * Automated promotion script to merge changes and port delta memories back to the parent DB.
+* **Current entry point:** `/sandbox start <name>` (CLI) or `POST /api/sandbox/action` (web API).
 
 ### B. Project Sandboxes
 * **Purpose:** Creating entirely new, independent software applications from scratch.
