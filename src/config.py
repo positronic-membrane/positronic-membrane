@@ -60,6 +60,10 @@ DOCKER_MEMORY_LIMIT = os.getenv("DOCKER_MEMORY_LIMIT", "512m")
 DOCKER_CPU_LIMIT = os.getenv("DOCKER_CPU_LIMIT", "1.0")
 DOCKER_PIDS_LIMIT = os.getenv("DOCKER_PIDS_LIMIT", "256")
 
+# Skills Library (sibling repo for registry sync)
+SKILLS_LIBRARY_REPO   = os.getenv("SKILLS_LIBRARY_REPO",   "git@github.com:jmccauley75gh/janus-skills-library.git")
+SKILLS_LIBRARY_BRANCH = os.getenv("SKILLS_LIBRARY_BRANCH", "main")
+
 # OpenRouter Configuration
 OPENROUTER_BASE_URL = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")

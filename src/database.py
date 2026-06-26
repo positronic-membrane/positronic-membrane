@@ -1902,6 +1902,29 @@ def init_db():
     );
     """, (_llm_cache_cleanup_code,))
 
+    # Ensure sync_skill_library skill exists and is up to date
+    _sync_skill_library_code = """def run(sdk, args):
+    from src.skill_harness import sync_from_registry
+    repo_url = args.get("repo_url", None)
+    synced, failed, errors = sync_from_registry(repo_url=repo_url)
+    lines = [f"Synced: {synced}  Failed: {failed}"]
+    if errors:
+        lines.append("Errors:")
+        lines.extend(f"  - {e}" for e in errors)
+    return {"synced": synced, "failed": failed, "errors": errors, "summary": "\\n".join(lines)}
+"""
+    cursor.execute("""
+    INSERT OR IGNORE INTO agent_skills (
+        skill_id, name, description, parameters_schema, code_blob,
+        entry_point_function, required_role, trigger_type, trigger_config
+    ) VALUES (
+        'sync_skill_library', 'Sync Skill Library',
+        'Clone janus-skills-library and compile verified skills into agent_skills via the staging harness.',
+        '{"type": "object", "properties": {"repo_url": {"type": "string", "description": "Override the library repo URL (optional)."}}}',
+        ?, 'run', 'admin', 'manual', '{}'
+    );
+    """, (_sync_skill_library_code,))
+
     # Check if parties table exists; if not, apply multi-party migrations
     cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='parties';")
     if not cursor.fetchone():
