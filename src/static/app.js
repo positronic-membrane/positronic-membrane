@@ -258,15 +258,26 @@ document.addEventListener("DOMContentLoaded", () => {
                 },
                 body: JSON.stringify({ message: text })
             });
-            const data = await res.json();
 
-            // Remove typing indicator
+            const rawText = await res.text();
             indicator.remove();
 
-            if (data.error) {
-                appendMessage("persona", `*(System Error: ${data.error})*`);
+            let data;
+            try {
+                data = JSON.parse(rawText);
+            } catch (_) {
+                appendMessage("persona", `*(Swarm core returned an unreadable response — status ${res.status})*`);
+                scrollToBottom();
+                return;
+            }
+
+            if (!res.ok) {
+                const detail = data.detail || data.error || `HTTP ${res.status}`;
+                appendMessage("persona", `*(System Error: ${detail})*`);
             } else if (data.response) {
                 appendMessage("persona", data.response);
+            } else if (data.error) {
+                appendMessage("persona", `*(System Error: ${data.error})*`);
             }
             scrollToBottom();
         } catch (err) {

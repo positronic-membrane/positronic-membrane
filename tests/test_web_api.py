@@ -163,7 +163,7 @@ def test_registry_update(web_server):
         data = json.loads(resp.read().decode("utf-8"))
         assert data["success"] is True
 
-@patch("src.web_server.generate_persona_response_autonomous")
+@patch("src.persona.generate_persona_response_autonomous")
 def test_post_chat_normal(mock_persona, web_server):
     mock_persona.return_value = "Hello from persona"
     url = f"{web_server}/api/chat"

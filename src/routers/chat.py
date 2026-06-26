@@ -15,7 +15,6 @@ from src.routers.dependencies import (
     process_sandbox_updates
 )
 from src.database import log_episodic_memory, get_recent_episodic_memories
-import src.web_server
 import src.persona
 
 
@@ -96,7 +95,7 @@ def post_chat(data: ChatRequest, current_party = Depends(require_role('user'))):
         elif src.persona.detect_metacognitive_intent(user_msg):
             response = src.persona.generate_metacognitive_narrative(user_msg)
         else:
-            response = src.web_server.generate_persona_response_autonomous(user_msg, party_id=party_id)
+            response = src.persona.generate_persona_response_autonomous(user_msg, party_id=party_id)
 
         log_episodic_memory("persona", response, "user_visible", party_id=party_id)
         process_sandbox_updates(response)
@@ -212,7 +211,7 @@ async def websocket_chat(websocket: WebSocket, token: Optional[str] = Query(None
             elif src.persona.detect_metacognitive_intent(user_msg):
                 response = src.persona.generate_metacognitive_narrative(user_msg)
             else:
-                response = src.web_server.generate_persona_response_autonomous(user_msg, party_id=party_id)
+                response = src.persona.generate_persona_response_autonomous(user_msg, party_id=party_id)
                 
             log_episodic_memory("persona", response, "user_visible", party_id=party_id)
             process_sandbox_updates(response)

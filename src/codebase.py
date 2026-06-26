@@ -92,15 +92,19 @@ def index_codebase(workspace_dir: Path = None):
     
     ignored_dirs = {".git", ".venv", "venv", "__pycache__", "data", ".pytest_cache", ".janus_sandboxes", ".janus_snapshots"}
     ignored_files = {".DS_Store", "janus.db", "janus.db-journal", "janus.db-wal", "janus.db-shm"}
-    
+    # Extensions that produce no useful summary and would trigger expensive embedding calls
+    ignored_extensions = {".pyc", ".pyo", ".db", ".sqlite", ".sqlite3", ".db-wal", ".db-shm", ".db-journal",
+                          ".jpg", ".jpeg", ".png", ".gif", ".ico", ".svg", ".woff", ".woff2", ".ttf", ".eot",
+                          ".zip", ".tar", ".gz", ".lock", ".bin"}
+
     indexed_count = 0
-    
+
     for root, dirs, files in os.walk(workspace_dir):
         # Prune ignored directories in-place
         dirs[:] = [d for d in dirs if d not in ignored_dirs]
-        
+
         for file in files:
-            if file in ignored_files or file.endswith((".pyc", ".pyo")):
+            if file in ignored_files or Path(file).suffix in ignored_extensions:
                 continue
                 
             file_path = Path(root) / file

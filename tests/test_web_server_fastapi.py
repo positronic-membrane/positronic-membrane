@@ -171,7 +171,7 @@ def test_websocket_chat():
     client = TestClient(app)
 
     from unittest.mock import patch
-    with patch("src.web_server.generate_persona_response_autonomous") as mock_persona:
+    with patch("src.persona.generate_persona_response_autonomous") as mock_persona:
         mock_persona.return_value = "Response from agent!"
 
         import src.config
