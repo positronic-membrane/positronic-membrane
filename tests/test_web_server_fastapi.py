@@ -235,6 +235,7 @@ def test_header_resolution_isolation():
     # Enable Auth for test
     import src.config
     from src.database import get_connection
+    from unittest.mock import patch
 
     original_require_auth = src.config.REQUIRE_AUTH
     src.config.REQUIRE_AUTH = True
@@ -242,66 +243,69 @@ def test_header_resolution_isolation():
     client = TestClient(app)
     db_conn = get_connection(read_only_constitution=False)
 
-    try:
-        # 1. Insert Party A matching via public_key column
-        party_a_id = "party_a"
-        db_conn.execute(
-            "INSERT INTO parties (id, name, role, public_key, metadata) VALUES (?, ?, ?, ?, ?);",
-            (party_a_id, "User A", "user", "api_key_a", '{}')
-        )
-        # Seed profile
-        db_conn.execute(
-            "INSERT INTO interaction_profiles (party_id, response_style, tone_bias) VALUES (?, ?, ?);",
-            (party_a_id, "concise", "sarcastic")
-        )
+    # The test exercises auth header routing, not LLM responses; mock the
+    # persona so the handler returns 200 without a real LLM endpoint.
+    with patch("src.persona.generate_persona_response_autonomous", return_value="ok"):
+        try:
+            # 1. Insert Party A matching via public_key column
+            party_a_id = "party_a"
+            db_conn.execute(
+                "INSERT INTO parties (id, name, role, public_key, metadata) VALUES (?, ?, ?, ?, ?);",
+                (party_a_id, "User A", "user", "api_key_a", '{}')
+            )
+            # Seed profile
+            db_conn.execute(
+                "INSERT INTO interaction_profiles (party_id, response_style, tone_bias) VALUES (?, ?, ?);",
+                (party_a_id, "concise", "sarcastic")
+            )
 
-        # 2. Insert Party B matching via metadata JSON api_key
-        party_b_id = "party_b"
-        db_conn.execute(
-            "INSERT INTO parties (id, name, role, public_key, metadata) VALUES (?, ?, ?, ?, ?);",
-            (party_b_id, "User B", "user", None, '{"api_key": "api_key_b"}')
-        )
+            # 2. Insert Party B matching via metadata JSON api_key
+            party_b_id = "party_b"
+            db_conn.execute(
+                "INSERT INTO parties (id, name, role, public_key, metadata) VALUES (?, ?, ?, ?, ?);",
+                (party_b_id, "User B", "user", None, '{"api_key": "api_key_b"}')
+            )
 
-        # 3. Insert Party C matching via metadata JSON device_fingerprint
-        party_c_id = "party_c"
-        db_conn.execute(
-            "INSERT INTO parties (id, name, role, public_key, metadata) VALUES (?, ?, ?, ?, ?);",
-            (party_c_id, "User C", "user", None, '{"device_fingerprint": "fingerprint_c"}')
-        )
-        db_conn.commit()
+            # 3. Insert Party C matching via metadata JSON device_fingerprint
+            party_c_id = "party_c"
+            db_conn.execute(
+                "INSERT INTO parties (id, name, role, public_key, metadata) VALUES (?, ?, ?, ?, ?);",
+                (party_c_id, "User C", "user", None, '{"device_fingerprint": "fingerprint_c"}')
+            )
+            db_conn.commit()
 
-        # Clear LRU caches to make sure it loads fresh
-        import src.web_server
-        src.web_server.resolve_party_by_api_key.cache_clear()
-        src.web_server.resolve_party_by_fingerprint.cache_clear()
+            # Clear LRU caches to make sure it loads fresh
+            import src.web_server
+            src.web_server.resolve_party_by_api_key.cache_clear()
+            src.web_server.resolve_party_by_fingerprint.cache_clear()
 
-        # Match A via X-API-Key (public_key column)
-        resp = client.post("/api/chat", json={"message": "ping"}, headers={"X-API-Key": "api_key_a"})
-        assert resp.status_code == 200
+            # Match A via X-API-Key (public_key column)
+            resp = client.post("/api/chat", json={"message": "ping"}, headers={"X-API-Key": "api_key_a"})
+            assert resp.status_code == 200
 
-        # Match B via X-API-Key (metadata JSON)
-        resp = client.post("/api/chat", json={"message": "ping"}, headers={"X-API-Key": "api_key_b"})
-        assert resp.status_code == 200
+            # Match B via X-API-Key (metadata JSON)
+            resp = client.post("/api/chat", json={"message": "ping"}, headers={"X-API-Key": "api_key_b"})
+            assert resp.status_code == 200
 
-        # Match C via X-Device-Fingerprint (metadata JSON)
-        resp = client.post("/api/chat", json={"message": "ping"}, headers={"X-Device-Fingerprint": "fingerprint_c"})
-        assert resp.status_code == 200
+            # Match C via X-Device-Fingerprint (metadata JSON)
+            resp = client.post("/api/chat", json={"message": "ping"}, headers={"X-Device-Fingerprint": "fingerprint_c"})
+            assert resp.status_code == 200
 
-        # Hierarchy: Check X-API-Key wins over X-Device-Fingerprint
-        # Key 'api_key_a' (party_a, user) + Fingerprint 'fingerprint_c' (party_c, user)
-        # If API Key wins, we authenticate as party_a
-        from unittest.mock import MagicMock
+            # Hierarchy: Check X-API-Key wins over X-Device-Fingerprint
+            # Key 'api_key_a' (party_a, user) + Fingerprint 'fingerprint_c' (party_c, user)
+            # If API Key wins, we authenticate as party_a
+            from unittest.mock import MagicMock
 
-        import src.web_server as ws_module
-        req_mock = MagicMock()
-        req_mock.headers = {
-            "X-API-Key": "api_key_a",
-            "X-Device-Fingerprint": "fingerprint_c"
-        }
-        resolved = ws_module.get_current_party(req_mock)
-        assert resolved["party_id"] == party_a_id
+            import src.web_server as ws_module
+            req_mock = MagicMock()
+            req_mock.headers = {
+                "X-API-Key": "api_key_a",
+                "X-Device-Fingerprint": "fingerprint_c"
+            }
+            resolved = ws_module.get_current_party(req_mock)
+            assert resolved["party_id"] == party_a_id
 
-    finally:
-        db_conn.close()
-        src.config.REQUIRE_AUTH = original_require_auth
+        finally:
+            db_conn.close()
+            src.config.REQUIRE_AUTH = original_require_auth
 
