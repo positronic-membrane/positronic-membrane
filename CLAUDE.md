@@ -9,6 +9,24 @@ that presents itself through a single conversational voice ("Journey"/Persona). 
 project (see CONTRIBUTING.md — open an issue before sending PRs; squash-merge workflow). Distinct package
 name in `pyproject.toml` is `project-janus`.
 
+## Branching & versioning
+
+**ALWAYS create a branch before starting work on any issue or feature. Never commit directly to `main`.**
+
+```bash
+# Before starting any issue
+git checkout main && git pull origin main
+git checkout -b <branch-name>
+```
+
+Branch naming convention:
+- `v3/t1-skills-library`   — work scoped to a versioned milestone (v3, v4, …)
+- `backlog/t5-experience-log` — work picked up from the unslotted backlog
+
+One branch per issue. If two issues are tightly intertwined, use a single branch and note both issue numbers in the PR.
+
+Versioning uses three-part semver (`MAJOR.MINOR.PATCH`). Merge via squash only — each issue lands as one atomic commit on `main`. After merging, delete the branch both locally and on the remote.
+
 ## Commands
 
 ```bash
