@@ -109,7 +109,7 @@ async def test_heartbeat_loop_execution(mock_query, mock_query_memories, mock_ad
 @patch("src.memory.query_memories")
 @patch("src.skills.query_agent")
 async def test_modify_code_path_verification(mock_query, mock_query_memories, mock_add_memory, tmp_path, monkeypatch):
-    """Verify that modify_code tool execution validates directories and reports error on parent path."""
+    """Verify that proposing the removed modify_code skill results in an execution failure being logged."""
     mock_query_memories.return_value = []
     mock_add_memory.return_value = None
 
@@ -151,8 +151,9 @@ async def test_modify_code_path_verification(mock_query, mock_query_memories, mo
 
     assert len(rows) >= 1
     assert "invalid_parent_dir/new_file.py" in rows[0][0]
-    assert len(system_errors) >= 1
-    assert "parent directory 'invalid_parent_dir' does not exist" in system_errors[0][0]
+    # V3-T3: modify_code is removed from parse_action — hits the mock fallback silently,
+    # no skill execution happens, no "Action execution failed" error is logged.
+    assert len(system_errors) == 0
 
 @pytest.mark.asyncio
 @patch("src.daemon.send_webhook_notification")

@@ -94,23 +94,16 @@ def test_sandbox_status(mock_mod, mock_sb, web_server):
         assert data["branch"] == "janus/sandbox-test"
         assert data["modified"] == ["src/config.py"]
 
-@patch("src.database.get_pending_modification")
-def test_stage_status(mock_pending, web_server):
-    mock_pending.return_value = {
-        "pending_mod_file": "src/main.py",
-        "pending_mod_dir": "/path/to/dir",
-        "pending_mod_diff": "diff goes here",
-        "pending_mod_status": "passed"
-    }
-
+def test_stage_status_returns_410(web_server):
+    """Verify that the /api/stage/status endpoint returns 410 Gone (V3-T3: direct modification removed)."""
+    import urllib.error
     url = f"{web_server}/api/stage/status"
     req = urllib.request.Request(url, method="GET")
-    with urllib.request.urlopen(req) as resp:
-        assert resp.status == 200
-        data = json.loads(resp.read().decode("utf-8"))
-        assert data["active"] is True
-        assert data["file_path"] == "src/main.py"
-        assert data["diff"] == "diff goes here"
+    try:
+        urllib.request.urlopen(req)
+        assert False, "Expected HTTPError 410"
+    except urllib.error.HTTPError as e:
+        assert e.code == 410
 
 def test_get_constitution(web_server):
     url = f"{web_server}/api/constitution"

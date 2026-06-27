@@ -92,20 +92,9 @@ ARCHIVIST_API_KEY = os.getenv("ARCHIVIST_API_KEY", None)
 def get_effective_workspace_root() -> Path:
     """
     Returns the Path to the active workspace directory.
-    If a staging modification is active, returns its staging folder.
-    Else if a sandbox session is active, returns its worktree folder.
+    If a sandbox session is active, returns its worktree folder.
     Else returns ROOT_DIR.
     """
-    # 1. Check if staging session is active
-    try:
-        from src.database import get_pending_modification
-        pending = get_pending_modification()
-        if pending and pending.get("pending_mod_dir"):
-            return Path(pending["pending_mod_dir"])
-    except Exception:
-        pass
-        
-    # 2. Check if sandbox session is active
     try:
         from src.sandbox_session import get_active_sandbox
         active = get_active_sandbox()
@@ -113,5 +102,5 @@ def get_effective_workspace_root() -> Path:
             return Path(active["active_sandbox_path"])
     except Exception:
         pass
-        
+
     return ROOT_DIR

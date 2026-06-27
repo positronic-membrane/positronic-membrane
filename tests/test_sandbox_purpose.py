@@ -74,8 +74,7 @@ def test_project_sandbox_safefs_confinement(tmp_path):
         "active_sandbox_app_name": "myapp",
     }
 
-    with patch("src.database.get_pending_modification", return_value=None), \
-         patch("src.sandbox_session.get_active_sandbox", return_value=mock_active_sandbox):
+    with patch("src.sandbox_session.get_active_sandbox", return_value=mock_active_sandbox):
         fs = SafeFS()
 
         fs.write("notes.txt", "hello")

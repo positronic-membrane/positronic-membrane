@@ -144,11 +144,9 @@ def test_generate_persona_response_autonomous_no_commands(mock_gen, mock_get_sb)
 @patch("src.sandbox_session.get_active_sandbox")
 @patch("src.persona.generate_persona_response")
 @patch("src.persona.execute_chat_sandbox_commands")
-@patch("src.persona.parse_proposed_changes")
-def test_generate_persona_response_autonomous_react_loop(mock_parse, mock_exec, mock_gen, mock_get_sb):
+def test_generate_persona_response_autonomous_react_loop(mock_exec, mock_gen, mock_get_sb):
     """Verify ReAct loop when persona outputs sandbox commands."""
     mock_get_sb.return_value = {"active_sandbox_path": "/dummy", "active_sandbox_branch": "dummy-branch"}
-    mock_parse.return_value = {} # No file writes
 
     # First query response: has sandbox commands
     resp1 = "Let me run tests first.\n```sandbox\ntest\n```"
@@ -178,12 +176,10 @@ def test_generate_persona_response_autonomous_react_loop(mock_parse, mock_exec, 
 @patch("src.sandbox_session.get_active_sandbox")
 @patch("src.persona.generate_persona_response")
 @patch("src.persona.execute_chat_sandbox_commands")
-@patch("src.persona.parse_proposed_changes")
-def test_generate_persona_response_autonomous_loop_limit(mock_parse, mock_exec, mock_gen, mock_get_sb):
+def test_generate_persona_response_autonomous_loop_limit(mock_exec, mock_gen, mock_get_sb):
     """Verify that loop cap is enforced (max 5 turns) to prevent runaway execution."""
     mock_get_sb.return_value = {"active_sandbox_path": "/dummy", "active_sandbox_branch": "dummy-branch"}
     mock_exec.return_value = "- test: PASSED"
-    mock_parse.return_value = {}  # Mock parsing to return no file modifications
 
     # Persona always returns a sandbox command, causing an infinite loop if unchecked
     mock_gen.return_value = "Still checking...\n```sandbox\ntest\n```"
@@ -196,11 +192,9 @@ def test_generate_persona_response_autonomous_loop_limit(mock_parse, mock_exec, 
 
 @patch("src.sandbox_session.get_active_sandbox")
 @patch("src.persona.generate_persona_response")
-@patch("src.persona.parse_proposed_changes")
-def test_generate_persona_response_autonomous_syntax_retry(mock_parse, mock_gen, mock_get_sb):
+def test_generate_persona_response_autonomous_syntax_retry(mock_gen, mock_get_sb):
     """Verify that a tool syntax error triggers a retry turn in the ReAct loop."""
     mock_get_sb.return_value = None
-    mock_parse.return_value = {}
 
     # Turn 1: Outputs a malformed JSON tool call block
     resp1 = 'I will execute: {"skill_id": "web_search", "arguments": "query": "test"}'

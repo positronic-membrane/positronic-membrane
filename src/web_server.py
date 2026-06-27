@@ -14,7 +14,6 @@ from src.routers.dependencies import (
     ip_request_history,
     ChatRequest,
     SandboxActionRequest,
-    StageActionRequest,
     ConstitutionAmendRequest,
     ConstitutionDeleteRequest,
     RegistryUpdateRequest,
