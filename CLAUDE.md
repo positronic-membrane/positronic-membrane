@@ -27,6 +27,20 @@ One branch per issue. If two issues are tightly intertwined, use a single branch
 
 Versioning uses three-part semver (`MAJOR.MINOR.PATCH`). Merge via squash only — each issue lands as one atomic commit on `main`. After merging, delete the branch both locally and on the remote.
 
+## Code review convention
+
+Run `/code-review high` on every feature branch before opening a PR. Fix all findings before pushing. This is the primary quality gate in the absence of human reviewers.
+
+```bash
+# On your feature branch, before opening a PR:
+/code-review high        # standard issues — run every time
+/code-review high --fix  # auto-apply findings
+```
+
+Reserve `/code-review ultra` for:
+- Version milestone merges (end of a V3 sprint, etc.)
+- Any PR touching security-sensitive paths: `src/auth.py`, `src/sandbox*.py`, `src/self_modification.py`, `core_constitution`
+
 ## Commands
 
 ```bash
