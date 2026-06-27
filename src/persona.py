@@ -1215,21 +1215,80 @@ def generate_persona_response(user_query: str, party_id: Optional[str] = None) -
         raise
 
 
+def _find_json_blocks(text: str) -> list:
+    """Return list of (json_string, start, end) for each top-level balanced {} block."""
+    blocks = []
+    depth = 0
+    start = -1
+    for i, ch in enumerate(text):
+        if ch == '{':
+            if depth == 0:
+                start = i
+            depth += 1
+        elif ch == '}':
+            if depth > 0:
+                depth -= 1
+                if depth == 0 and start != -1:
+                    blocks.append((text[start:i + 1], start, i + 1))
+                    start = -1
+    return blocks
+
+
+def _extract_skill_calls(text: str) -> list:
+    """Return list of (skill_id, arguments) for every skill-call JSON block found."""
+    import json as _json
+    results = []
+    for blob, _, _ in _find_json_blocks(text):
+        try:
+            data = _json.loads(blob)
+            if isinstance(data, dict):
+                skill_id = data.get("skill_id") or data.get("tool") or data.get("tool_name")
+                arguments = data.get("arguments") or data.get("args") or {}
+                if skill_id:
+                    results.append((skill_id, arguments))
+        except (ValueError, KeyError):
+            pass
+    return results
+
+
+def _strip_skill_call_json(text: str) -> str:
+    """Remove skill-call JSON blocks from text, leaving only conversational content."""
+    import json as _json
+    ranges_to_remove = []
+    for blob, start, end in _find_json_blocks(text):
+        try:
+            data = _json.loads(blob)
+            if isinstance(data, dict) and (data.get("skill_id") or data.get("tool") or data.get("tool_name")):
+                ranges_to_remove.append((start, end))
+        except (ValueError, KeyError):
+            pass
+    if not ranges_to_remove:
+        return text
+    result = []
+    prev = 0
+    for start, end in ranges_to_remove:
+        result.append(text[prev:start])
+        prev = end
+    result.append(text[prev:])
+    return "".join(result).strip()
+
+
 def stream_persona_response(user_msg: str, party_id=None):
     """
     Generator yielding (event_type, content) tuples for SSE delivery.
     event_type is one of: "token", "status", "done".
 
-    Mirrors generate_persona_response_autonomous() but streams the final LLM
-    turn token-by-token. Intermediate turns (skill calls) run blocking and emit
-    "status" events so the client knows work is in progress.
+    Each ReAct turn is fully buffered before any content is yielded.  Once the
+    complete response is available we scan for skill-call JSON blocks using a
+    balanced-brace extractor; if any are found we execute ALL of them (in order),
+    strip their JSON from the text, yield any remaining conversational preamble,
+    and re-prompt.  If no skill calls are found the response is the final answer
+    and is yielded as tokens to the client.
 
-    Speculative streaming: each turn begins streaming immediately. If the first
-    ~15 characters start with '{' the response is buffered silently (it's a
-    skill-call JSON block). Otherwise tokens are flushed to the client as they
-    arrive.
+    The async SSE layer in post_chat_stream sends heartbeat SSE comments every
+    15 s independently of this generator, so Cloudflare never sees an idle
+    connection even while the LLM is generating or a skill is executing.
     """
-    from src.daemon import parse_action
     from src.skills import DynamicSkillExecutor
 
     current_query = user_msg
@@ -1238,50 +1297,33 @@ def stream_persona_response(user_msg: str, party_id=None):
     for _turn in range(max_turns):
         prompt, system_override = _build_persona_prompt(current_query, party_id)
 
+        # Buffer every token for this turn — we need the complete response to
+        # know whether it contains skill calls.
         chunks = []
-        flushed = False
-
         for chunk in query_agent_stream("persona", prompt, system_override=system_override):
             chunks.append(chunk)
-            if not flushed:
-                assembled = "".join(chunks).lstrip()
-                if len(assembled) >= 15:
-                    if not assembled.startswith("{"):
-                        flushed = True
-                        for c in chunks:
-                            yield ("token", c)
-                    # else: buffering — may be a skill-call JSON block
-            else:
-                yield ("token", chunk)
-
         full_response = "".join(chunks)
 
-        skill_id, arguments, mock_result = parse_action(full_response)
+        skill_calls = _extract_skill_calls(full_response)
         sandbox_blocks = re.findall(r"```sandbox\s*\n(.*?)\n```", full_response, re.DOTALL)
-        is_syntax_error = mock_result and mock_result.startswith("Error:")
 
-        if skill_id or sandbox_blocks or is_syntax_error:
-            log_episodic_memory("persona", full_response, "background_thought", party_id=party_id)
-
-        if not skill_id and not sandbox_blocks:
-            if is_syntax_error:
-                log_episodic_memory("sandbox_automation", mock_result, "background_thought", party_id=party_id)
-                current_query = (
-                    f"Tool execution failed with a syntax error:\n{mock_result}\n"
-                    "Please correct the syntax and try again using the valid JSON format: "
-                    "{\"skill_id\": \"<skill_id>\", \"arguments\": { ... }}."
-                )
-                yield ("status", "Correcting tool call…")
-                continue
-            # Final response — flush buffer if speculative streaming never fired
-            if not flushed:
-                yield ("token", full_response)
+        if not skill_calls and not sandbox_blocks:
+            # No tool use — this is the final conversational answer.
+            yield ("token", full_response)
             break
 
-        # Execute skill / sandbox
-        execution_summary = ""
+        # Tool use detected: log the raw turn, yield any conversational text
+        # that preceded / followed the JSON blocks, then execute all calls.
+        log_episodic_memory("persona", full_response, "background_thought", party_id=party_id)
 
-        if skill_id:
+        preamble = _strip_skill_call_json(full_response)
+        if preamble:
+            yield ("token", preamble)
+
+        execution_summary = ""
+        has_failure = False
+
+        for skill_id, arguments in skill_calls:
             yield ("status", f"Using tool: {skill_id}…")
             try:
                 res = DynamicSkillExecutor.execute(skill_id, arguments, party_id=party_id or get_session_party_id())
@@ -1289,8 +1331,10 @@ def stream_persona_response(user_msg: str, party_id=None):
                     execution_summary += f"[Skill '{skill_id}' executed successfully]\nResult: {res['result']}\n\n"
                 else:
                     execution_summary += f"[Skill '{skill_id}' failed]\nError: {res['error']}\n\n"
+                    has_failure = True
             except Exception as e:
                 execution_summary += f"[Skill '{skill_id}' error]\nException: {e}\n\n"
+                has_failure = True
 
         if sandbox_blocks:
             yield ("status", "Executing sandbox commands…")
@@ -1299,7 +1343,6 @@ def stream_persona_response(user_msg: str, party_id=None):
 
         log_episodic_memory("sandbox_automation", execution_summary.strip(), "background_thought", party_id=party_id)
 
-        has_failure = any(w in execution_summary for w in ("Failed", "Error", "Exception"))
         if has_failure:
             current_query = "Some actions or skills failed. Please review the background thought history, address the failure, and try again or proceed."
         else:
