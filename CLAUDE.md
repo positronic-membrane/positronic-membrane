@@ -25,7 +25,16 @@ Branch naming convention:
 
 One branch per issue. If two issues are tightly intertwined, use a single branch and note both issue numbers in the PR.
 
-Versioning uses three-part semver (`MAJOR.MINOR.PATCH`). Merge via squash only — each issue lands as one atomic commit on `main`. After merging, delete the branch both locally and on the remote.
+Versioning uses three-part semver (`MAJOR.MINOR.PATCH`). Merge via squash only — each issue lands as one atomic commit on `main`. After merging, delete the branch both locally and on the remote:
+
+```bash
+git checkout main && git pull origin main
+git branch -d <branch-name>
+# remote branch is deleted automatically by GitHub (Automatically delete head branches setting)
+git fetch --prune origin
+```
+
+**Always include `Closes #<issue-number>` in the PR body.** GitHub automatically closes the linked issue when the PR merges to main. Every PR must reference its issue — if there is no issue, create one first.
 
 ## Code review convention
 
