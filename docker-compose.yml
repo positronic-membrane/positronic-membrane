@@ -24,7 +24,7 @@ services:
     container_name: janus-app
     restart: unless-stopped
     ports:
-      - "8000:8000"
+      - "5005:5005"
     environment:
       - DB_TYPE=postgres
       - DATABASE_URL=postgresql://janus_root:janus_password@db:5432/janus

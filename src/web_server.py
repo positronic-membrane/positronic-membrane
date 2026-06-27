@@ -121,4 +121,4 @@ def run_server(port=5005):
     import uvicorn
     os.makedirs(STATIC_DIR, exist_ok=True)
     logger.info(f"Starting Positronic Membrane FastAPI Web Server on port {port} via Uvicorn...")
-    uvicorn.run(app, host="127.0.0.1", port=port, log_level="warning")
+    uvicorn.run(app, host="0.0.0.0", port=port, log_level="warning")

@@ -10,6 +10,7 @@ Positronic Membrane is a self-modifying, multi-agent developer swarm focused on 
 *   **Critic:** Audits all proposals against security constraints and the core constitution.
 *   **Explorer:** Crawls the web and researches unfamiliar symbols.
 *   **Archivist:** Indexes codebase changes and compresses memory profiles.
+*   **Analyst:** Triangulates candidate facts against the knowledge graph, returning a structured verdict (`reinforce`, `contradict`, or `gap`) with a confidence score.
 
 ---
 
@@ -44,7 +45,7 @@ DB_PATH=/path/to/janus.db
 VECTOR_DB_PATH=/path/to/chromadb
 
 # executors
-SANDBOX_PROVIDER=local             # "local", "docker", or "e2b"
+SANDBOX_PROVIDER=docker            # "local", "docker" (default), or "e2b"
 SPAWN_PROVIDER=local               # "local", "docker", or "ecs"
 
 # Offline Mock Engine
@@ -66,7 +67,38 @@ janus-server
 
 ---
 
-## 4. Console Commands
+## 4. Sandbox Setup
+
+Before using any sandbox commands or triggering autonomous code modifications, the Docker sandbox image must exist on your machine.
+
+### Build the image (one-time)
+```bash
+docker build -t janus:latest .
+```
+
+This only needs to be done **once per machine**. The image is a stable test runtime (Python + all project dependencies + pytest). When a sandbox runs, Positronic Membrane mounts the current worktree into the existing image at `/workspace` — the image itself is never rebuilt automatically.
+
+**Rebuild the image when:**
+- `pyproject.toml` dependencies change (new package added, version bumped, etc.)
+- The image is deleted from Docker (`docker rmi janus:latest`)
+- You set up on a new machine
+
+**No rebuild needed for:**
+- Restarting Positronic Membrane or the server
+- Creating a new sandbox session
+- Any code changes to `src/` (those are injected at container start time)
+
+### Alternative: Local Mode (dev only)
+To skip Docker entirely, set in `.env`:
+```env
+SANDBOX_PROVIDER=local
+ALLOW_LOCAL_SANDBOX_EXEC=True
+```
+This runs pytest directly on the host with no isolation. Never use in production.
+
+---
+
+## 5. Console Commands
 
 When using the CLI (`python -m src.main --cli`), the chat console supports interactive slash commands:
 
@@ -85,10 +117,10 @@ When using the CLI (`python -m src.main --cli`), the chat console supports inter
 
 ---
 
-## 5. Dynamic Skills Management
+## 6. Dynamic Skills Management
 Positronic Membrane stores its own executable capabilities inside the database (`agent_skills` table). This allows agents to write, test, and install **new skills** at runtime.
 *   A skill consists of:
     *   **schema:** JSON parameter layout validation.
     *   **code_blob:** Executable Python code containing the implementation.
     *   **entry_point_function:** Function to trigger.
-*   Before a skill runs, it undergoes an AST validation audit inside `src/sandbox.py` blocking imports of forbidden modules (`os`, `subprocess`, etc.).
+*   Skills stored in `agent_skills` are developer-authored and executed as-is via `DynamicSkillExecutor` — they are not AST-audited. The AST sandbox (`src/sandbox.py`) applies only to ad-hoc code snippets submitted via the `execute_code` skill, not to installed skills.

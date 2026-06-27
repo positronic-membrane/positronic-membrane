@@ -29,34 +29,36 @@ This guide outlines deployment steps to transition Positronic Membrane from a lo
 
 ## 2. Dockerizing Janus
 
-To run in the cloud, containerize Janus using the following `Dockerfile` outline:
+The production `Dockerfile` is in the repository root. Key design points:
 
 ```dockerfile
 FROM python:3.12-slim
 
-# Install system dependencies
 RUN apt-get update && apt-get install -y \
     git \
-    docker.io \
     build-essential \
     libpq-dev \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# Copy dependency configs
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# Copy only what pip needs to resolve dependencies before the rest of the source.
+# This keeps the install layer cached as long as pyproject.toml is unchanged.
+COPY pyproject.toml .
+COPY src/ src/
 
-# Copy source directory
-COPY src/ ./src
-COPY tests/ ./tests
+# Install package with dev extras (pulls in pytest, pytest-asyncio, ruff).
+RUN pip install --no-cache-dir ".[dev]"
 
-EXPOSE 8000
+# Copy remaining files (tests/, alembic.ini, static assets, etc.)
+COPY . .
 
-# Entrypoint script to start Web Server and background Swarm Daemon
-CMD ["sh", "-c", "janus-server & python -m src.daemon"]
+EXPOSE 5005
+
+CMD ["sh", "-c", "python -m src.web_server & python -m src.daemon"]
 ```
+
+> **Note:** The web server entry point (`janus-server`) calls `run_server()` in `src/web_server.py`. Neither `src/web_server` nor `src/daemon` currently define a `__main__` block, so the CMD above runs module-level import only and does not start the processes. For production Docker deployments, run `janus-server` for the web process. A standalone daemon entry point (`janus-daemon`) is not yet defined — tracking item for a future release.
 
 ---
 
@@ -82,22 +84,16 @@ The database schema configures two security roles to enforce safety guardrails:
 *   `janus_agent`: Restrictive runtime agent role. The cursor middleware connects with this role for regular operations. It revokes write permissions (INSERT/UPDATE/DELETE) on the `core_constitution` table, ensuring rules cannot be modified at the database level.
 
 ### Database Migrations with Alembic
-Positronic Membrane utilizes **Alembic** to manage database schema evolutions. SQLite databases are automatically initialized using zero-config SQL bootstrapping, but migrations should be run to synchronize updates:
+Alembic is wired up (`alembic.ini`, `src/migrations/`) but the `versions/` directory currently contains only an empty baseline revision. **Schema changes are not applied via Alembic** — they are applied by editing `init_db()` in `src/database.py` directly, which runs `CREATE TABLE IF NOT EXISTS` (plus hand-rolled `ALTER TABLE` migrations) on every boot.
 
-#### 1. Baseline Initialization (Existing Databases)
-If you are deploying updates to an already existing database, stamp the baseline first:
+The Alembic commands below are available but are currently no-ops beyond the baseline stamp:
+
+#### Baseline Stamp (if upgrading an existing database)
 ```bash
 .venv/bin/alembic stamp head
 ```
 
-#### 2. Running Pending Migrations
-To bring your database schema up to date with the latest code release:
-```bash
-.venv/bin/alembic upgrade head
-```
-
-#### 3. Generating a New Schema Migration
-If you modify database columns or add tables in python, generate a new migration file:
+#### Generating a New Migration (future use)
 ```bash
 .venv/bin/alembic revision --autogenerate -m "describe your changes"
 ```
@@ -130,6 +126,11 @@ To run agent code validations safely without RCE risks on your host system:
 *   Build the sandbox image ahead of time: `docker build -t janus:latest .` — `DockerSandboxExecutor`
     preflight-checks that the daemon is reachable and the image exists before running tests, and
     fails fast with an actionable error if either check fails (it does not auto-build).
+*   **Image lifecycle:** Build once per host. The image is a stable test runtime; the worktree under
+    test is mounted at `/workspace` at container start, so code changes never require a rebuild.
+    Rebuild only when `pyproject.toml` dependencies change, the image is deleted, or you provision a
+    new host. Restarting Positronic Membrane, the web server, or creating a new sandbox session does
+    not require a rebuild.
 *   Janus runs validation tests inside ephemeral, `--network none`-isolated containers (configurable
     via `DOCKER_NETWORK`) with resource limits (`DOCKER_MEMORY_LIMIT`, `DOCKER_CPU_LIMIT`,
     `DOCKER_PIDS_LIMIT`) and fixed hardening (`--cap-drop=ALL`, `--security-opt=no-new-privileges`)

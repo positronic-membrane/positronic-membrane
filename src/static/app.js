@@ -238,37 +238,84 @@ document.addEventListener("DOMContentLoaded", () => {
         const text = chatInput.value.trim();
         if (!text) return;
 
-        // Clear input field immediately
         chatInput.value = "";
         chatInput.style.height = "auto";
-
-        // Append user message
         appendMessage("user", text);
         scrollToBottom();
 
-        // Append typing indicator
         const indicator = appendTypingIndicator();
         scrollToBottom();
 
+        let msgDiv = null;
+        let rawTokens = "";
+
         try {
-            const res = await fetch("/api/chat", {
+            const res = await fetch("/api/chat/stream", {
                 method: "POST",
-                headers: {
-                    "Content-Type": "application/json"
-                },
-                body: JSON.stringify({ message: text })
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ message: text }),
             });
-            const data = await res.json();
 
-            // Remove typing indicator
-            indicator.remove();
-
-            if (data.error) {
-                appendMessage("persona", `*(System Error: ${data.error})*`);
-            } else if (data.response) {
-                appendMessage("persona", data.response);
+            if (!res.ok) {
+                indicator.remove();
+                let errText = `HTTP ${res.status}`;
+                try { const d = await res.json(); errText = d.detail || d.error || errText; } catch (_) {}
+                appendMessage("persona", `*(System Error: ${errText})*`);
+                scrollToBottom();
+                return;
             }
-            scrollToBottom();
+
+            const reader = res.body.getReader();
+            const decoder = new TextDecoder();
+            let sseBuffer = "";
+
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+
+                sseBuffer += decoder.decode(value, { stream: true });
+                const lines = sseBuffer.split("\n");
+                sseBuffer = lines.pop(); // keep any incomplete trailing line
+
+                for (const line of lines) {
+                    if (!line.startsWith("data: ")) continue;
+                    let event;
+                    try { event = JSON.parse(line.slice(6)); } catch (_) { continue; }
+
+                    if (event.type === "token") {
+                        if (!msgDiv) {
+                            indicator.remove();
+                            msgDiv = document.createElement("div");
+                            msgDiv.classList.add("message", "persona");
+                            chatMessages.appendChild(msgDiv);
+                        }
+                        rawTokens += event.text;
+                        msgDiv.innerHTML = formatMessageText(rawTokens);
+                        scrollToBottom();
+                    } else if (event.type === "status") {
+                        if (!msgDiv) {
+                            indicator.remove();
+                            msgDiv = document.createElement("div");
+                            msgDiv.classList.add("message", "persona");
+                            chatMessages.appendChild(msgDiv);
+                        }
+                        msgDiv.innerHTML = formatMessageText(`_${event.text}_`);
+                        scrollToBottom();
+                    } else if (event.type === "error") {
+                        indicator.remove();
+                        appendMessage("persona", `*(System Error: ${event.text})*`);
+                        scrollToBottom();
+                    } else if (event.type === "done") {
+                        if (!msgDiv) {
+                            indicator.remove();
+                        }
+                        if (msgDiv && rawTokens) {
+                            msgDiv.innerHTML = formatMessageText(rawTokens);
+                        }
+                        scrollToBottom();
+                    }
+                }
+            }
         } catch (err) {
             indicator.remove();
             appendMessage("persona", `*(Failed to reach swarm core: ${err.message})*`);
@@ -591,6 +638,10 @@ document.addEventListener("DOMContentLoaded", () => {
         }
     }
 
+    function stageActionError(data) {
+        return data.error || data.detail || "Unknown error";
+    }
+
     async function handleStageApply() {
         try {
             const res = await fetch("/api/stage/action", {
@@ -599,11 +650,11 @@ document.addEventListener("DOMContentLoaded", () => {
                 body: JSON.stringify({ action: "apply" })
             });
             const data = await res.json();
-            if (data.success) {
+            if (res.ok && data.success) {
                 loadStagingStatus();
                 appendMessage("system", "Staged changes successfully applied to active codebase.");
             } else {
-                alert(`Error: ${data.error}`);
+                alert(`Error: ${stageActionError(data)}`);
             }
         } catch (err) {
             console.error(err);
@@ -619,11 +670,11 @@ document.addEventListener("DOMContentLoaded", () => {
                 body: JSON.stringify({ action: "cancel" })
             });
             const data = await res.json();
-            if (data.success) {
+            if (res.ok && data.success) {
                 loadStagingStatus();
                 appendMessage("system", "Staging workspace cleaned and discarded.");
             } else {
-                alert(`Error: ${data.error}`);
+                alert(`Error: ${stageActionError(data)}`);
             }
         } catch (err) {
             console.error(err);
@@ -640,11 +691,11 @@ document.addEventListener("DOMContentLoaded", () => {
                 body: JSON.stringify({ action: "heal" })
             });
             const data = await res.json();
-            if (data.success) {
+            if (res.ok && data.success) {
                 loadStagingStatus();
                 alert(data.passed ? "Self-healing PASSED all tests!" : "Self-healing completed, but tests still failing. Check logs.");
             } else {
-                alert(`Error: ${data.error}`);
+                alert(`Error: ${stageActionError(data)}`);
             }
         } catch (err) {
             console.error(err);
@@ -657,11 +708,11 @@ document.addEventListener("DOMContentLoaded", () => {
         const instInput = document.getElementById("stage-refine-instructions");
         const instructions = instInput.value.trim();
         if (!file_path || !instructions) return;
-        
+
         instInput.value = "";
         const logsBox = document.getElementById("stage-val-logs");
         logsBox.textContent = `Regenerating modifications for '${file_path}' asynchronously...\n(This might take several seconds)`;
-        
+
         try {
             const res = await fetch("/api/stage/action", {
                 method: "POST",
@@ -669,10 +720,10 @@ document.addEventListener("DOMContentLoaded", () => {
                 body: JSON.stringify({ action: "refine", file_path: file_path, instructions: instructions })
             });
             const data = await res.json();
-            if (data.success) {
+            if (res.ok && data.success) {
                 loadStagingStatus();
             } else {
-                alert(`Error: ${data.error}`);
+                alert(`Error: ${stageActionError(data)}`);
             }
         } catch (err) {
             console.error(err);

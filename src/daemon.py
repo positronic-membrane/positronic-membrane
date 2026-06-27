@@ -770,14 +770,23 @@ async def run_heartbeat_loop():
     Main entry point for the layered cognition daemon.
     Runs concurrent high-level, mid-level, and priority reflex queue worker routines.
     """
-    global _reflex_queue, _loop
+    global _reflex_queue, _loop, _consecutive_stagnant_cycles
+    global _last_git_diff_hash, _last_db_write_count, _last_completed_checkpoints
+    global _last_executed_intervals
     logger.info("Initializing Janus Layered Cognition Heartbeat Loop...")
-    
+
     _reflex_queue = asyncio.PriorityQueue()
     _loop = asyncio.get_running_loop()
-    
+
+    # Reset all process-startup state so each daemon run starts clean,
+    # matching what happens in production (fresh process every restart).
     reset_consecutive_background_loops()
     reset_boredom()
+    _consecutive_stagnant_cycles = 0
+    _last_git_diff_hash = None
+    _last_db_write_count = None
+    _last_completed_checkpoints = None
+    _last_executed_intervals = {}
     
     log_episodic_memory(
         speaker="system",

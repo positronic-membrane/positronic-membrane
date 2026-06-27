@@ -1,8 +1,10 @@
 import json
 import logging
 import asyncio
+import concurrent.futures
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect, Query
+from fastapi.responses import StreamingResponse
 
 from src.routers.dependencies import (
     ChatRequest,
@@ -15,7 +17,6 @@ from src.routers.dependencies import (
     process_sandbox_updates
 )
 from src.database import log_episodic_memory, get_recent_episodic_memories
-import src.web_server
 import src.persona
 
 
@@ -96,15 +97,115 @@ def post_chat(data: ChatRequest, current_party = Depends(require_role('user'))):
         elif src.persona.detect_metacognitive_intent(user_msg):
             response = src.persona.generate_metacognitive_narrative(user_msg)
         else:
-            response = src.web_server.generate_persona_response_autonomous(user_msg, party_id=party_id)
+            # Hard wall-clock cap so the response escapes before a reverse-proxy
+            # (Cloudflare default: 100 s) kills the connection and returns a 524.
+            # Both this value and LLM_CALL_TIMEOUT are tunable via .env.
+            _chat_timeout = getattr(src.config, "CHAT_TIMEOUT", 85)
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as _pool:
+                _fut = _pool.submit(
+                    src.persona.generate_persona_response_autonomous,
+                    user_msg,
+                    party_id,
+                )
+                try:
+                    response = _fut.result(timeout=_chat_timeout)
+                except concurrent.futures.TimeoutError:
+                    raise HTTPException(
+                        status_code=503,
+                        detail="Response timed out — the swarm is still thinking. Try again in a moment.",
+                    )
 
         log_episodic_memory("persona", response, "user_visible", party_id=party_id)
         process_sandbox_updates(response)
-        
+
         return {"response": response}
     except Exception as e:
         logger.error(f"Error processing chat POST: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/api/chat/stream")
+async def post_chat_stream(data: ChatRequest, current_party=Depends(require_role('user'))):
+    """SSE streaming chat — yields tokens progressively to prevent proxy timeouts.
+
+    Runs the blocking persona generator in a daemon thread and bridges events into
+    an async generator via an asyncio.Queue.  An immediate heartbeat comment is sent
+    the moment the connection opens so Cloudflare never sees an idle origin, and a
+    periodic heartbeat is sent every 15 s while the LLM is generating.
+    """
+    import threading
+
+    user_msg = data.message.strip()
+    if not user_msg:
+        raise HTTPException(status_code=400, detail="Message cannot be empty")
+
+    party_id = current_party["party_id"]
+    log_episodic_memory("user", user_msg, "user_visible", party_id=party_id)
+
+    async def _generate():
+        collected = []
+        q: asyncio.Queue = asyncio.Queue()
+        _DONE = object()
+        loop = asyncio.get_running_loop()
+
+        def _worker():
+            try:
+                if user_msg.startswith("/"):
+                    new_loop = asyncio.new_event_loop()
+                    try:
+                        resp = new_loop.run_until_complete(
+                            src.persona.handle_web_slash_command(user_msg)
+                        )
+                    finally:
+                        new_loop.close()
+                    loop.call_soon_threadsafe(q.put_nowait, ("token", resp))
+                elif src.persona.detect_metacognitive_intent(user_msg):
+                    resp = src.persona.generate_metacognitive_narrative(user_msg)
+                    loop.call_soon_threadsafe(q.put_nowait, ("token", resp))
+                else:
+                    for evt, content in src.persona.stream_persona_response(user_msg, party_id):
+                        if evt == "done":
+                            break
+                        loop.call_soon_threadsafe(q.put_nowait, (evt, content))
+            except Exception as exc:
+                logger.error(f"Error in streaming chat worker: {exc}", exc_info=True)
+                loop.call_soon_threadsafe(q.put_nowait, ("error", str(exc)))
+            finally:
+                loop.call_soon_threadsafe(q.put_nowait, _DONE)
+
+        # Send a heartbeat comment immediately — establishes the SSE connection with
+        # Cloudflare before the LLM generates its first token.
+        yield ": heartbeat\n\n"
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+        while True:
+            try:
+                item = await asyncio.wait_for(q.get(), timeout=15)
+            except asyncio.TimeoutError:
+                # Keep Cloudflare from timing out during slow generation.
+                yield ": heartbeat\n\n"
+                continue
+
+            if item is _DONE:
+                break
+
+            evt_type, content = item
+            if evt_type == "token":
+                collected.append(content)
+            yield f"data: {json.dumps({'type': evt_type, 'text': content})}\n\n"
+
+        full_response = "".join(collected)
+        if full_response:
+            log_episodic_memory("persona", full_response, "user_visible", party_id=party_id)
+            process_sandbox_updates(full_response)
+        yield f"data: {json.dumps({'type': 'done'})}\n\n"
+
+    return StreamingResponse(
+        _generate(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @router.get("/api/v1/memory/{key}")
@@ -212,7 +313,7 @@ async def websocket_chat(websocket: WebSocket, token: Optional[str] = Query(None
             elif src.persona.detect_metacognitive_intent(user_msg):
                 response = src.persona.generate_metacognitive_narrative(user_msg)
             else:
-                response = src.web_server.generate_persona_response_autonomous(user_msg, party_id=party_id)
+                response = src.persona.generate_persona_response_autonomous(user_msg, party_id=party_id)
                 
             log_episodic_memory("persona", response, "user_visible", party_id=party_id)
             process_sandbox_updates(response)

@@ -28,18 +28,22 @@ Swarm AI experimentation and local autonomous agent daemon orchestration. Design
 
 ## Quick Start
 
-1. Install system and python dependencies:
+1. Run the setup bootstrap script (creates `.venv`, installs all dependencies, copies `.env.example` → `.env`):
    ```bash
-   pip install -r requirements.txt
+   ./setup.sh
    ```
-2. Set up your environment file `.env` using [Ollama Setup & Model Guide](docs/ollama_setup.md).
+2. Configure your `.env` file using the [Ollama Setup & Model Guide](docs/ollama_setup.md).
 3. Initialize the database and run the alignment wizard:
    ```bash
-   python -m src.main
+   janus-cli
    ```
-4. To start the FastAPI API server:
+4. To start the FastAPI API server (port 5005):
    ```bash
-   python -m src.web_server
+   janus-server
+   ```
+5. Build the Docker sandbox image (one-time — required before using `/sandbox` commands):
+   ```bash
+   docker build -t janus:latest .
    ```
 
 ---
@@ -52,7 +56,7 @@ When running Positronic Membrane in CLI mode (`python -m src.main --cli`), the i
 *   `/amend <rule_key> | <rule_text>`: Proposes a new rule or amendment to be sealed in the read-only core constitution table (requires interactive `y/n` confirmation).
 *   `/modify <relative_file_path> | <instructions>`: Synchronously drafts, audits, stages, and runs tests for a single file modification, prompting you to commit or reject it immediately.
 *   `/stage [limit]`: Automatically parses proposed codebase changes from the most recent message (or the last `limit` messages) in the conversation, presenting an interactive menu to confirm, remove, or edit changes before running a combined staging, auditing, and test validation transaction.
-*   `/sandbox start <name>`: Initializes an isolated sandbox workspace using Git Worktree on branch `janus/sandbox-<name>` under `.janus_sandboxes/session_<name>`.
+*   `/sandbox start <name>`: Initializes an isolated sandbox workspace using Git Worktree on branch `evolution/sandbox-<name>` under `.janus_sandboxes/session_<name>`.
 *   `/sandbox status`: Displays the active sandbox path, branch, status, and modified files.
 *   `/sandbox diff`: Shows a cumulative unified diff of all changes currently in the sandbox.
 *   `/sandbox ship`: Runs validation tests inside the sandbox, prompts to apply all sandbox changes back to the active workspace, and disposes of the worktree environment and branch.

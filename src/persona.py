@@ -2,7 +2,7 @@ import re
 import asyncio
 import logging
 import src.config
-from src.llm import query_agent
+from src.llm import query_agent, query_agent_stream
 from src.memory import query_memories
 from src.database import (
     get_connection,
@@ -1036,16 +1036,18 @@ def handle_docs_command(command_str: str) -> str:
         )
 
 
-def generate_persona_response(user_query: str, party_id: Optional[str] = None) -> str:
+def _build_persona_prompt(user_query: str, party_id=None) -> tuple:
     """
-    Queries ChromaDB (Primary Concepts & Codebase) and episodic logs for context,
-    performs web searches if requested, and formulates a conversational response.
+    Assembles the full prompt and system_override for the Persona agent.
+    Returns (prompt: str, system_override: str).
+    Extracted from generate_persona_response so both the blocking and streaming
+    paths share identical context preparation.
     """
     from src.sandbox_session import get_active_sandbox, get_sandbox_modified_files
-    
+
     if party_id is None:
         party_id = get_session_party_id()
-        
+
     # Fetch interaction profile style guidelines for this party
     response_style = "balanced"
     tone_bias = "neutral"
@@ -1076,7 +1078,7 @@ def generate_persona_response(user_query: str, party_id: Optional[str] = None) -
 
     style_guidelines = f"\n\n### Response Style Guidelines:\n- Response Style: {response_style}\n- Tone Bias: {tone_bias}"
     system_override = base_prompt + style_guidelines
-    
+
     # 1. Fetch self model traits
     traits_list = []
     conn = get_connection(read_only_constitution=True)
@@ -1112,9 +1114,9 @@ def generate_persona_response(user_query: str, party_id: Optional[str] = None) -
             chat_history.append(f"{speaker.upper()}: {msg}")
     history_summary = "\n".join(chat_history) if chat_history else "No previous conversation."
 
-    # 3. Assemble semantic/knowledge context (including web searches, codebase queries, active sandbox, ChromaDB)
+    # 3. Assemble semantic/knowledge context (web search, codebase, active sandbox, ChromaDB)
     semantic_context = ""
-    
+
     # Active Sandbox Session details
     try:
         active_sb = get_active_sandbox()
@@ -1124,18 +1126,18 @@ def generate_persona_response(user_query: str, party_id: Optional[str] = None) -
             sandbox_info += f"- Path: {active_sb['active_sandbox_path']}\n"
             sandbox_info += f"- Branch: {active_sb['active_sandbox_branch']}\n"
             sandbox_info += f"- Test Status: {status.upper()}\n"
-            
+
             modified = get_sandbox_modified_files()
             if modified:
                 sandbox_info += f"- Modified Files: {', '.join(modified)}\n"
-            
+
             if status == "failed" and active_sb.get("active_sandbox_test_logs"):
                 sandbox_info += f"- Last Sandbox Pytest Failures:\n{active_sb['active_sandbox_test_logs']}\n"
-            
+
             semantic_context += sandbox_info + "\n"
     except Exception as sb_err:
         logger.error(f"Failed to inject sandbox session details into prompt: {sb_err}")
-    
+
     # Live Web Search
     search_query = detect_search_intent(user_query)
     if search_query:
@@ -1185,7 +1187,6 @@ def generate_persona_response(user_query: str, party_id: Optional[str] = None) -
 
     semantic_str = semantic_context.strip() if semantic_context.strip() else "None available."
 
-    # Format into XML tags
     xml_block = (
         f"<self_traits>\n{self_traits_str}\n</self_traits>\n"
         f"<episodic_memory>\n{history_summary}\n</episodic_memory>\n"
@@ -1198,12 +1199,156 @@ def generate_persona_response(user_query: str, party_id: Optional[str] = None) -
 USER MESSAGE:
 {user_query}
 """
+    return prompt, system_override
 
+
+def generate_persona_response(user_query: str, party_id: Optional[str] = None) -> str:
+    """
+    Queries ChromaDB (Primary Concepts & Codebase) and episodic logs for context,
+    performs web searches if requested, and formulates a conversational response.
+    """
     try:
+        prompt, system_override = _build_persona_prompt(user_query, party_id)
         return query_agent("persona", prompt, system_override=system_override)
     except Exception as e:
         logger.error(f"Failed to generate persona response: {e}")
         raise
+
+
+def _find_json_blocks(text: str) -> list:
+    """Return list of (json_string, start, end) for each top-level balanced {} block."""
+    blocks = []
+    depth = 0
+    start = -1
+    for i, ch in enumerate(text):
+        if ch == '{':
+            if depth == 0:
+                start = i
+            depth += 1
+        elif ch == '}':
+            if depth > 0:
+                depth -= 1
+                if depth == 0 and start != -1:
+                    blocks.append((text[start:i + 1], start, i + 1))
+                    start = -1
+    return blocks
+
+
+def _extract_skill_calls(text: str) -> list:
+    """Return list of (skill_id, arguments) for every skill-call JSON block found."""
+    import json as _json
+    results = []
+    for blob, _, _ in _find_json_blocks(text):
+        try:
+            data = _json.loads(blob)
+            if isinstance(data, dict):
+                skill_id = data.get("skill_id") or data.get("tool") or data.get("tool_name")
+                arguments = data.get("arguments") or data.get("args") or {}
+                if skill_id:
+                    results.append((skill_id, arguments))
+        except (ValueError, KeyError):
+            pass
+    return results
+
+
+def _strip_skill_call_json(text: str) -> str:
+    """Remove skill-call JSON blocks from text, leaving only conversational content."""
+    import json as _json
+    ranges_to_remove = []
+    for blob, start, end in _find_json_blocks(text):
+        try:
+            data = _json.loads(blob)
+            if isinstance(data, dict) and (data.get("skill_id") or data.get("tool") or data.get("tool_name")):
+                ranges_to_remove.append((start, end))
+        except (ValueError, KeyError):
+            pass
+    if not ranges_to_remove:
+        return text
+    result = []
+    prev = 0
+    for start, end in ranges_to_remove:
+        result.append(text[prev:start])
+        prev = end
+    result.append(text[prev:])
+    return "".join(result).strip()
+
+
+def stream_persona_response(user_msg: str, party_id=None):
+    """
+    Generator yielding (event_type, content) tuples for SSE delivery.
+    event_type is one of: "token", "status", "done".
+
+    Each ReAct turn is fully buffered before any content is yielded.  Once the
+    complete response is available we scan for skill-call JSON blocks using a
+    balanced-brace extractor; if any are found we execute ALL of them (in order),
+    strip their JSON from the text, yield any remaining conversational preamble,
+    and re-prompt.  If no skill calls are found the response is the final answer
+    and is yielded as tokens to the client.
+
+    The async SSE layer in post_chat_stream sends heartbeat SSE comments every
+    15 s independently of this generator, so Cloudflare never sees an idle
+    connection even while the LLM is generating or a skill is executing.
+    """
+    from src.skills import DynamicSkillExecutor
+
+    current_query = user_msg
+    max_turns = 5
+
+    for _turn in range(max_turns):
+        prompt, system_override = _build_persona_prompt(current_query, party_id)
+
+        # Buffer every token for this turn — we need the complete response to
+        # know whether it contains skill calls.
+        chunks = []
+        for chunk in query_agent_stream("persona", prompt, system_override=system_override):
+            chunks.append(chunk)
+        full_response = "".join(chunks)
+
+        skill_calls = _extract_skill_calls(full_response)
+        sandbox_blocks = re.findall(r"```sandbox\s*\n(.*?)\n```", full_response, re.DOTALL)
+
+        if not skill_calls and not sandbox_blocks:
+            # No tool use — this is the final conversational answer.
+            yield ("token", full_response)
+            break
+
+        # Tool use detected: log the raw turn, yield any conversational text
+        # that preceded / followed the JSON blocks, then execute all calls.
+        log_episodic_memory("persona", full_response, "background_thought", party_id=party_id)
+
+        preamble = _strip_skill_call_json(full_response)
+        if preamble:
+            yield ("token", preamble)
+
+        execution_summary = ""
+        has_failure = False
+
+        for skill_id, arguments in skill_calls:
+            yield ("status", f"Using tool: {skill_id}…")
+            try:
+                res = DynamicSkillExecutor.execute(skill_id, arguments, party_id=party_id or get_session_party_id())
+                if res["success"]:
+                    execution_summary += f"[Skill '{skill_id}' executed successfully]\nResult: {res['result']}\n\n"
+                else:
+                    execution_summary += f"[Skill '{skill_id}' failed]\nError: {res['error']}\n\n"
+                    has_failure = True
+            except Exception as e:
+                execution_summary += f"[Skill '{skill_id}' error]\nException: {e}\n\n"
+                has_failure = True
+
+        if sandbox_blocks:
+            yield ("status", "Executing sandbox commands…")
+            results = [execute_chat_sandbox_commands(b) for b in sandbox_blocks]
+            execution_summary += "[Sandbox Commands Executed]\n" + "\n\n".join(results)
+
+        log_episodic_memory("sandbox_automation", execution_summary.strip(), "background_thought", party_id=party_id)
+
+        if has_failure:
+            current_query = "Some actions or skills failed. Please review the background thought history, address the failure, and try again or proceed."
+        else:
+            current_query = "Executed requested actions/skills. Please review the background thought history and continue."
+
+    yield ("done", "")
 
 def execute_chat_sandbox_commands(block: str) -> str:
     """
