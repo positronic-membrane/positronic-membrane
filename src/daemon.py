@@ -304,8 +304,7 @@ def parse_action(action_str: str) -> tuple[Optional[str], dict, Optional[str]]:
     scan_workspace_match = re.match(r"^scan_workspace\b", action_clean, re.IGNORECASE) or re.search(r"\bscan_workspace\b", action_clean, re.IGNORECASE)
     spawn_agent_match = re.match(r"^spawn_agent:\s*([a-z0-9_-]+)\s*\|\s*([^|]+)\s*\|\s*(.*)", action_clean, re.IGNORECASE) or re.search(r"\bspawn_agent:\s*([a-z0-9_-]+)\s*\|\s*([^|]+)\s*\|\s*(.*)", action_clean, re.IGNORECASE)
     execute_code_match = re.match(r"^execute_code:\s*(.*)", action_clean, re.DOTALL | re.IGNORECASE) or re.search(r"\bexecute_code:\s*(.*)", action_clean, re.DOTALL | re.IGNORECASE)
-    modify_code_match = re.match(r"^modify_code:\s*([^|]+)\s*\|\s*(.*)", action_clean, re.DOTALL | re.IGNORECASE) or re.search(r"\bmodify_code:\s*([^|]+)\s*\|\s*(.*)", action_clean, re.DOTALL | re.IGNORECASE)
-    
+
     write_draft_file_match = re.match(r"^write_draft_file:\s*([^|]+)\s*\|\s*(.*)", action_clean, re.DOTALL | re.IGNORECASE) or re.search(r"\bwrite_draft_file:\s*([^|]+)\s*\|\s*(.*)", action_clean, re.DOTALL | re.IGNORECASE)
     read_draft_file_match = re.match(r"^read_draft_file:\s*(.*)", action_clean, re.IGNORECASE) or re.search(r"\bread_draft_file:\s*(.*)", action_clean, re.IGNORECASE)
     list_draft_files_match = re.match(r"^list_draft_files\b", action_clean, re.IGNORECASE) or re.search(r"\blist_draft_files\b", action_clean, re.IGNORECASE)
@@ -314,11 +313,11 @@ def parse_action(action_str: str) -> tuple[Optional[str], dict, Optional[str]]:
     document_memory_match = re.match(r"^document_memory:\s*([^|]+)(?:\s*\|\s*(.*))?", action_clean, re.IGNORECASE) or re.search(r"\bdocument_memory:\s*([^|]+)(?:\s*\|\s*(.*))?", action_clean, re.IGNORECASE)
 
     has_tool_keyword = any(kw in action_clean.lower() for kw in [
-        "web_search", "fetch_url", "read_codebase", "scan_workspace", "spawn_agent", "execute_code", "modify_code",
+        "web_search", "fetch_url", "read_codebase", "scan_workspace", "spawn_agent", "execute_code",
         "write_draft_file", "read_draft_file", "list_draft_files", "commit_draft_to_db", "checkout_db_to_draft", "document_memory"
     ])
     any_matched = any([
-        web_search_match, fetch_url_match, read_codebase_match, scan_workspace_match, spawn_agent_match, execute_code_match, modify_code_match,
+        web_search_match, fetch_url_match, read_codebase_match, scan_workspace_match, spawn_agent_match, execute_code_match,
         write_draft_file_match, read_draft_file_match, list_draft_files_match, commit_draft_to_db_match, checkout_db_to_draft_match, document_memory_match
     ])
 
@@ -344,11 +343,6 @@ def parse_action(action_str: str) -> tuple[Optional[str], dict, Optional[str]]:
         }, None
     elif execute_code_match:
         return "execute_code", {"code": execute_code_match.group(1).strip()}, None
-    elif modify_code_match:
-        return "modify_code", {
-            "rel_path": modify_code_match.group(1).strip(),
-            "proposed_code": modify_code_match.group(2).strip()
-        }, None
     elif write_draft_file_match:
         return "write_draft_file", {
             "filename": write_draft_file_match.group(1).strip(),

@@ -4,7 +4,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from src.sandbox_session import commit_sandbox_state, discard_sandbox_changes, rollback_sandbox_last_commit
-from src.self_modification import apply_search_replace_blocks, summarize_pytest_logs
+from src.self_modification import apply_search_replace_blocks
 
 # -----------------
 # 1. Search-and-Replace Tests
@@ -51,42 +51,7 @@ line two
     assert "line two" in result
 
 # -----------------
-# 2. Pytest Log Summarizer Tests
-# -----------------
-
-def test_summarize_pytest_logs_failures():
-    raw_logs = """
-=== test session starts ===
-tests/test_utils.py .                                                    [ 50%]
-tests/test_calc.py F                                                     [100%]
-
-================================== FAILURES ===================================
-__________________________________ test_calc __________________________________
-
-    def test_calc():
->       assert 1 + 1 == 3
-E       assert 2 == 3
-
-tests/test_calc.py:5: AssertionError
-=========================== short test summary info ===========================
-FAILED tests/test_calc.py::test_calc - assert 2 == 3
-========================= 1 failed, 1 passed in 0.1s ==========================
-"""
-    summary = summarize_pytest_logs(raw_logs)
-    assert "FAILING TEST DETAILS:" in summary
-    assert "test_calc" in summary
-    assert "AssertionError" in summary
-    assert "SHORT TEST SUMMARY INFO:" in summary
-    assert "FAILED tests/test_calc.py::test_calc" in summary
-
-def test_summarize_pytest_logs_fallback():
-    raw_logs = "some arbitrary logs without standard failures section"
-    summary = summarize_pytest_logs(raw_logs)
-    assert "RAW TEST LOGS (TRUNCATED):" in summary
-    assert "some arbitrary logs" in summary
-
-# -----------------
-# 3. Git Transactional Tests
+# 2. Git Transactional Tests
 # -----------------
 
 @patch("src.sandbox_session.get_active_sandbox")

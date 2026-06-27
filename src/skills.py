@@ -22,7 +22,7 @@ from src.explorer import search_web, fetch_webpage
 from src.notifications import send_webhook_notification
 from src.codebase import query_codebase_context, index_codebase
 from src.sandbox import execute_code_safely
-from src.self_modification import stage_and_test, generate_diff, apply_search_replace_blocks
+from src.self_modification import apply_search_replace_blocks
 from src.database import (
     get_recent_episodic_memories,
     log_episodic_memory,
@@ -33,8 +33,7 @@ from src.database import (
     get_pending_swarm_messages,
     mark_swarm_message_processed,
     get_curiosity_vector,
-    update_curiosity_vector,
-    stage_modification_in_db
+    update_curiosity_vector
 )
 from src.memory import get_active_curiosity_topics, update_curiosity_topics, consolidate_memories
 from src.middleware import validate_action
@@ -59,19 +58,6 @@ class SafeCodebase:
     def scan(self) -> str:
         index_codebase()
         return "Codebase successfully scanned and indexed."
-
-    def stage_modification(self, rel_path: str, proposed_code: str) -> dict:
-        passed, test_logs, temp_dir = stage_and_test(rel_path, proposed_code)
-        status = "passed" if passed else "failed"
-        diff = generate_diff(rel_path, proposed_code)
-        stage_modification_in_db(rel_path, temp_dir, diff, status)
-        return {
-            "passed": passed,
-            "status": status,
-            "temp_dir": temp_dir,
-            "diff": diff,
-            "test_logs": test_logs
-        }
 
     def apply_search_replace(self, original_content: str, search_replace_block: str) -> str:
         return apply_search_replace_blocks(original_content, search_replace_block)

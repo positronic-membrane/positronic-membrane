@@ -7,7 +7,6 @@ from src.database import get_connection, init_db, log_deliberation, log_episodic
 from src.memory_hydration import hydrate_context
 from src.persona import (
     detect_metacognitive_intent,
-    detect_modification_intent,
     generate_metacognitive_narrative,
     generate_persona_response,
     handle_pin_command,
@@ -88,31 +87,6 @@ def test_generate_persona_response(mock_query, mock_query_memories):
     assert "Project Janus is a multi-agent swarm." in prompt_used
     assert "Hello Janus" in prompt_used
     assert "Who are you?" in prompt_used
-
-def test_detect_modification_intent():
-    """Verify that intent detection flags modification queries accurately."""
-    # Slash commands
-    path, inst = detect_modification_intent("/modify src/config.py | Change T_ACTIVE to 2")
-    assert path == "src/config.py"
-    assert inst == "Change T_ACTIVE to 2"
-
-    path, inst = detect_modification_intent("/modify src/config.py")
-    assert path == "INVALID"
-    assert inst is None
-
-    # Natural language requests
-    path, inst = detect_modification_intent("please modify src/config.py to set T_ACTIVE to 2")
-    assert path == "src/config.py"
-    assert "set T_ACTIVE to 2" in inst
-
-    path, inst = detect_modification_intent("can you change tests/test_persona.py to add some assertions?")
-    assert path == "tests/test_persona.py"
-    assert "add some assertions" in inst
-
-    # Non-modifications
-    path, inst = detect_modification_intent("can you explain src/config.py?")
-    assert path is None
-    assert inst is None
 
 # --- Consolidating from test_phase3_self_model.py ---
 

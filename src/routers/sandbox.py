@@ -1,15 +1,11 @@
 import uuid
-import re
 import sqlite3
-import shutil
 from datetime import datetime, UTC
-from pathlib import Path
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, status
 
 from src.routers.dependencies import (
     SandboxActionRequest,
-    StageActionRequest,
     ModificationCreateRequest,
     require_role,
     get_connection
@@ -54,30 +50,8 @@ def get_sandbox_diff_endpoint(current_party = Depends(require_role('user'))):
 
 @router.get("/api/stage/status")
 def get_stage_status(current_party = Depends(require_role('user'))):
-    """Returns current database staged self-modifications."""
-    try:
-        from src.database import get_pending_modification
-        pending = get_pending_modification()
-        if pending:
-            test_logs = ""
-            log_path = Path(pending["pending_mod_dir"]) / "staging_test.log"
-            if log_path.exists():
-                try:
-                    with open(log_path, "r", encoding="utf-8") as f:
-                        test_logs = f.read()
-                except Exception:
-                    pass
-            return {
-                "active": True,
-                "file_path": pending["pending_mod_file"],
-                "dir": pending["pending_mod_dir"],
-                "diff": pending["pending_mod_diff"],
-                "status": pending["pending_mod_status"],
-                "test_logs": test_logs
-            }
-        return {"active": False}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    """Removed — direct source modification is disabled (V3-T3)."""
+    raise HTTPException(status_code=410, detail="Direct source modification is disabled. Use the skill staging harness or a Project Sandbox.")
 
 
 @router.post("/api/sandbox/action")
@@ -153,172 +127,9 @@ def post_sandbox_action(data: SandboxActionRequest, current_party = Depends(requ
 
 
 @router.post("/api/stage/action")
-def post_stage_action(data: StageActionRequest, current_party = Depends(require_role('contributor'))):
-    """Applies, cancels, refines, or self-heals database staged self-modifications."""
-    try:
-        from src.database import get_pending_modification, clear_pending_modification
-        from src.self_modification import apply_staged_multi
-        import shutil
-
-        pending = get_pending_modification()
-        if not pending:
-            raise HTTPException(status_code=400, detail="No active staging session.")
-
-        if data.action == "apply":
-            files = pending["pending_mod_file"].split(",")
-            apply_staged_multi(pending["pending_mod_dir"], {f: True for f in files})
-            for f in files:
-                log_episodic_memory("system", f"User approved staged multi-file self-modification for '{f}'.", "user_visible")
-            try:
-                shutil.rmtree(pending["pending_mod_dir"])
-            except Exception:
-                pass
-            clear_pending_modification()
-            return {"success": True}
-
-        elif data.action == "cancel":
-            files = pending["pending_mod_file"].split(",")
-            for f in files:
-                log_episodic_memory("system", f"User rejected staged multi-file self-modification for '{f}'.", "user_visible")
-            try:
-                shutil.rmtree(pending["pending_mod_dir"])
-            except Exception:
-                pass
-            clear_pending_modification()
-            return {"success": True}
-
-        elif data.action == "refine":
-            if not data.file_path or not data.instructions:
-                raise HTTPException(status_code=400, detail="Missing file_path or instructions for refinement.")
-
-            from src.llm import query_agent
-            from src.database import stage_modification_in_db
-            from src.self_modification import stage_and_test_multi, generate_multi_diff
-
-            staged_files = pending["pending_mod_file"].split(",")
-            proposed_mods = {}
-            for f in staged_files:
-                path = Path(pending["pending_mod_dir"]) / f
-                if path.is_file():
-                    with open(path, "r", encoding="utf-8") as file_io:
-                        proposed_mods[f] = file_io.read()
-
-            from src.config import get_effective_workspace_root
-            full_path = get_effective_workspace_root() / data.file_path
-            current_content = ""
-            if full_path.exists():
-                with open(full_path, "r", encoding="utf-8") as file_io:
-                    current_content = file_io.read()
-
-            draft_prompt = f"""
-            You are the Proposer. The user has requested a refinement for: {data.file_path}
-            Instructions: {data.instructions}
-            Current content: {current_content}
-            Output the COMPLETE updated source code for {data.file_path}.
-            CRITICAL RULES: Output ONLY raw code. Do NOT wrap in markdown code blocks.
-            """
-            proposed_code = query_agent("proposer", draft_prompt)
-            if proposed_code.strip().startswith("```"):
-                lines = proposed_code.strip().splitlines()
-                if lines[0].startswith("```"):
-                    lines = lines[1:]
-                if lines and lines[-1].strip() == "```":
-                    lines = lines[:-1]
-                proposed_code = "\n".join(lines) + "\n"
-
-            proposed_mods[data.file_path] = proposed_code
-
-            try:
-                shutil.rmtree(pending["pending_mod_dir"])
-            except Exception:
-                pass
-
-            passed, logs, new_temp_dir = stage_and_test_multi(proposed_mods)
-            diff = generate_multi_diff(proposed_mods)
-
-            stage_modification_in_db(",".join(proposed_mods.keys()), new_temp_dir, diff, "passed" if passed else "failed")
-            try:
-                with open(Path(new_temp_dir) / "staging_test.log", "w", encoding="utf-8") as f:
-                    f.write(logs)
-            except Exception:
-                pass
-
-            return {"success": True, "passed": passed, "diff": diff, "logs": logs}
-
-        elif data.action == "heal":
-            log_path = Path(pending["pending_mod_dir"]) / "staging_test.log"
-            if not log_path.exists():
-                raise HTTPException(status_code=400, detail="No staging test logs found to heal from.")
-            with open(log_path, "r", encoding="utf-8") as f:
-                logs = f.read()
-
-            failing_tests = []
-            for match in re.findall(r"(?:FAILED|ERROR)\s+(tests/test_[a-zA-Z0-9_-]+\.py)|(tests/test_[a-zA-Z0-9_-]+\.py)::\S+\s+(?:FAILED|ERROR)", logs):
-                failing_tests.append(match[0] or match[1])
-            failing_tests = sorted(list(set(failing_tests)))
-
-            if not failing_tests:
-                raise HTTPException(status_code=400, detail="No failing tests detected in log file.")
-
-            staged_files = pending["pending_mod_file"].split(",")
-            proposed_mods = {}
-            for f in staged_files:
-                path = Path(pending["pending_mod_dir"]) / f
-                if path.is_file():
-                    with open(path, "r", encoding="utf-8") as file_io:
-                        proposed_mods[f] = file_io.read()
-
-            from src.llm import query_agent
-            from src.database import stage_modification_in_db
-            from src.self_modification import stage_and_test_multi, generate_multi_diff
-
-            from src.config import get_effective_workspace_root
-            for test_file in failing_tests:
-                full_path = get_effective_workspace_root() / test_file
-                current_content = ""
-                if full_path.exists():
-                    with open(full_path, "r", encoding="utf-8") as file_io:
-                        current_content = file_io.read()
-                from src.self_modification import summarize_pytest_logs
-                draft_prompt = f"""
-                You are the Proposer. A pre-existing test file has failed during staging.
-                Fix (self-heal) this test file to pass unit tests.
-                FAILING TEST FILE: {test_file}
-                TEST RUN LOGS: {summarize_pytest_logs(logs)}
-                CURRENT CONTENT: {current_content}
-                Output the COMPLETE updated source code for {test_file}.
-                CRITICAL RULES: Output ONLY raw code. Do NOT wrap in markdown code blocks.
-                """
-                proposed_code = query_agent("proposer", draft_prompt)
-                if proposed_code.strip().startswith("```"):
-                    lines = proposed_code.strip().splitlines()
-                    if lines[0].startswith("```"):
-                        lines = lines[1:]
-                    if lines and lines[-1].strip() == "```":
-                        lines = lines[:-1]
-                    proposed_code = "\n".join(lines) + "\n"
-                proposed_mods[test_file] = proposed_code
-
-            try:
-                shutil.rmtree(pending["pending_mod_dir"])
-            except Exception:
-                pass
-
-            passed, new_logs, new_temp_dir = stage_and_test_multi(proposed_mods)
-            diff = generate_multi_diff(proposed_mods)
-
-            stage_modification_in_db(",".join(proposed_mods.keys()), new_temp_dir, diff, "passed" if passed else "failed")
-            try:
-                with open(Path(new_temp_dir) / "staging_test.log", "w", encoding="utf-8") as f:
-                    f.write(new_logs)
-            except Exception:
-                pass
-
-            return {"success": True, "passed": passed, "diff": diff, "logs": new_logs}
-        else:
-            raise HTTPException(status_code=400, detail=f"Invalid stage action: {data.action}")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+def post_stage_action(current_party = Depends(require_role('contributor'))):
+    """Removed — direct source modification is disabled (V3-T3)."""
+    raise HTTPException(status_code=410, detail="Direct source modification is disabled. Use the skill staging harness or a Project Sandbox.")
 
 
 @router.post("/api/v1/modification", status_code=201)

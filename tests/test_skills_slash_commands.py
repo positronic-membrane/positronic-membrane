@@ -51,7 +51,7 @@ async def test_skills_list_command():
     assert "Active Swarm Skills" in res
     assert "`web_search`" in res
     assert "`fetch_url`" in res
-    assert "`modify_code`" in res
+    assert "`modify_code`" not in res
 
 @pytest.mark.asyncio
 async def test_runskill_command_successful_execution():

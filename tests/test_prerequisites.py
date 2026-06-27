@@ -1,4 +1,3 @@
-import json
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -171,80 +170,7 @@ def test_compress_episodic_memory_trigger(mock_add_memory, mock_query_agent):
     # Message 12, 13, 14 should not be in the prompt because they are the 3 kept recent ones
     assert "Dummy message content 12" not in prompt_sent
 
-@patch("src.self_modification.subprocess.run")
-@patch("urllib.request.urlopen")
-def test_github_pr_gating_flow(mock_urlopen, mock_sub_run, tmp_path):
-    """Verify that staged changes push branches and open PRs if GITHUB_ENABLED is True."""
-    # 1. Enable GitHub gating in configuration
-    orig_enabled = getattr(src.config, "GITHUB_ENABLED", False)
-    orig_token = getattr(src.config, "GITHUB_ACCESS_TOKEN", "")
-    orig_repo = getattr(src.config, "GITHUB_REPO", "")
-    orig_root = src.config.ROOT_DIR
-
-    src.config.GITHUB_ENABLED = True
-    src.config.GITHUB_ACCESS_TOKEN = "mock_token"
-    src.config.GITHUB_REPO = "mock_owner/mock_repo"
-    src.config.ROOT_DIR = tmp_path / "mock_project_root"
-    src.config.ROOT_DIR.mkdir()
-
-    # Mock branch returns "main"
-    def mock_sub_run_side_effect(cmd, **kwargs):
-        res = MagicMock()
-        if "rev-parse" in cmd:
-            res.returncode = 0
-            res.stdout = "main\n"
-        elif "cat-file" in cmd:
-            # File exists in base branch
-            res.returncode = 0
-        else:
-            res.returncode = 0
-            res.stdout = ""
-            res.stderr = ""
-        return res
-    mock_sub_run.side_effect = mock_sub_run_side_effect
-
-    # Mock urlopen return value
-    mock_resp = MagicMock()
-    mock_resp.read.return_value = b'{"html_url": "https://github.com/mock_owner/mock_repo/pull/123"}'
-    mock_urlopen.return_value.__enter__.return_value = mock_resp
-
-    # Create mock staged directory and file
-    temp_stage = tmp_path / "stage_dir"
-    temp_stage.mkdir()
-    staged_file = temp_stage / "src" / "utils.py"
-    staged_file.parent.mkdir(parents=True, exist_ok=True)
-    staged_file.write_text("def new_func(): pass\n")
-
-    # Call apply_staged_change
-    apply_staged_change(str(temp_stage), "src/utils.py")
-
-    # Verify:
-    # 1. checkout branch commands called
-    called_commands = [call[0][0] for call in mock_sub_run.call_args_list]
-
-    checkout_b_called = any("checkout" in cmd and "-b" in cmd for cmd in called_commands)
-    assert checkout_b_called
-
-    # 2. push command called with correct token URL
-    push_called = False
-    for cmd in called_commands:
-        if "push" in cmd:
-            push_called = True
-            assert "https://x-access-token:mock_token@github.com/mock_owner/mock_repo.git" in cmd
-    assert push_called
-
-    # 3. urllib POST request to pulls API issued
-    mock_urlopen.assert_called_once()
-    called_req = mock_urlopen.call_args[0][0]
-    assert called_req.full_url == "https://api.github.com/repos/mock_owner/mock_repo/pulls"
-    assert called_req.get_header("Authorization") == "token mock_token"
-
-    data_sent = json.loads(called_req.data.decode("utf-8"))
-    assert "main" == data_sent["base"]
-    assert "Janus Self-Modification: updates to src/utils.py" == data_sent["title"]
-
-    # 4. Cleanup/restore config
-    src.config.GITHUB_ENABLED = orig_enabled
-    src.config.GITHUB_ACCESS_TOKEN = orig_token
-    src.config.GITHUB_REPO = orig_repo
-    src.config.ROOT_DIR = orig_root
+def test_apply_staged_change_raises_permission_error(tmp_path):
+    """Verify that apply_staged_change raises PermissionError (V3-T3: direct modification disabled)."""
+    with pytest.raises(PermissionError, match="Direct source modification is disabled"):
+        apply_staged_change(str(tmp_path), "src/utils.py")

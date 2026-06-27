@@ -63,11 +63,10 @@ def test_parse_action_legacy_and_mock():
     assert args == {"query": "positronic membrane"}
     assert err is None
 
-    # 2. Legacy modify_code
+    # 2. Legacy modify_code is no longer in the parser (V3-T3) — hits mock fallback
     s, args, err = parse_action("modify_code: src/main.py | print('hello')")
-    assert s == "modify_code"
-    assert args == {"rel_path": "src/main.py", "proposed_code": "print('hello')"}
-    assert err is None
+    assert s is None
+    assert "Action successfully run" in err
 
     # 2b. Legacy drafts and document memory tools
     s, args, err = parse_action("write_draft_file: notes.md | hello world")
@@ -110,10 +109,10 @@ def test_parse_action_legacy_and_mock():
     assert args == {"action": "list", "tag_filter": "my-tag"}
     assert err is None
 
-    # 3. Malformed tool keyword
+    # 3. modify_code is no longer a recognized keyword (V3-T3) — treated as random text
     s, args, err = parse_action("modify_code without separator or arguments")
     assert s is None
-    assert "uses incorrect syntax" in err
+    assert "Action successfully run" in err
 
     # 3b. Malformed JSON block containing tool keywords
     s, args, err = parse_action('I will execute: {"skill_id": "web_search", "arguments": "query": "test"}')

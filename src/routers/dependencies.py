@@ -256,54 +256,5 @@ async def get_websocket_party(token: Optional[str] = None) -> Dict[str, Any]:
 
 
 def process_sandbox_updates(response_text: str):
-    """Spawns background task to auto-apply sandbox modifications from agent chat."""
-    try:
-        from src.sandbox_session import get_active_sandbox
-        active_sb = get_active_sandbox()
-        if active_sb:
-            import threading
-            def worker():
-                try:
-                    from src.persona import parse_proposed_changes
-                    from src.sandbox_session import apply_changes_to_sandbox, run_sandbox_tests
-                    proposed = parse_proposed_changes(response_text)
-                    if proposed:
-                        logger.info(f"Web UI: Extracted proposed modifications for {len(proposed)} file(s).")
-                        apply_changes_to_sandbox(proposed)
-                        logger.info("Web UI: Sandbox files updated. Executing unit tests...")
-                        passed, logs = run_sandbox_tests()
-                        status_str = "PASSED" if passed else "FAILED"
-                        logger.info(f"Web UI: Sandbox unit tests: {status_str}")
-                        
-                        if passed:
-                            log_episodic_memory(
-                                "sandbox_automation",
-                                f"Sandbox testing completed successfully for branch '{active_sb['active_sandbox_branch']}'. All tests passed.",
-                                "user_visible"
-                            )
-                        else:
-                            log_episodic_memory(
-                                "sandbox_automation",
-                                f"Sandbox testing FAILED for branch '{active_sb['active_sandbox_branch']}'. Errors/Logs:\n{logs}",
-                                "user_visible"
-                            )
-                    else:
-                        import re
-                        has_path_mentions = bool(re.findall(
-                            r"\b((?:src|tests)/[a-zA-Z0-9_/.-]+|[a-zA-Z0-9_/.-]+\.md|[a-zA-Z0-9_/.-]+\.json|requirements\.txt)\b",
-                            response_text
-                        ))
-                        has_code_blocks = "```" in response_text
-                        if has_path_mentions and has_code_blocks:
-                            log_episodic_memory(
-                                "sandbox_automation",
-                                "[Warning] Found code blocks and file paths in response, but failed to auto-extract changes. "
-                                "Ensure files are prefixed with 'Path: <relative_path>' or 'File: <relative_path>' immediately above their code blocks.",
-                                "user_visible"
-                            )
-                except Exception as err:
-                    logger.error(f"Error auto-applying to sandbox from Web UI: {err}", exc_info=True)
-            
-            threading.Thread(target=worker, daemon=True).start()
-    except Exception as e:
-        logger.error(f"Error starting sandbox updates thread: {e}", exc_info=True)
+    """No-op: auto-apply from chat response text is disabled (V3-T3). Use sandbox skills explicitly."""
+    pass

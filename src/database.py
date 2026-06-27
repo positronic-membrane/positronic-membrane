@@ -753,7 +753,7 @@ def init_db():
         ('proposer', 'verify_file_existence', "Always confirm that a target file path exists using read_codebase or scan_workspace before proposing modifications to it. Do not guess or hallucinate directories."),
         ('proposer', 'strict_tool_syntax', "Direct tool calls must be formatted exactly as PROPOSED_ACTION: <tool_name>:<arguments>. Do not wrap code content in markdown fences inside tool call arguments, and omit all conversational prefix text."),
         ('proposer', 'dependency_check', "Ensure any proposed code edits only import libraries defined in requirements.txt or the Python standard library. Verify import paths align with the active project structure."),
-        ('proposer', 'autonomous_document_writing', "When creating, writing, or updating documentation, design specs, roadmaps, logs, thoughts, or notes autonomously, you MUST use the drafts directory skills (e.g. write_draft_file) or document memory skills (e.g. document_memory) rather than modifying files in the codebase via modify_code or execute_code. Code changes should still use modify_code.")
+        ('proposer', 'autonomous_document_writing', "When creating, writing, or updating documentation, design specs, roadmaps, logs, thoughts, or notes autonomously, you MUST use the drafts directory skills (e.g. write_draft_file) or document memory skills (e.g. document_memory) rather than modifying files in the codebase directly. All code changes must go through the skill staging harness or a Project Sandbox.")
     ]
     for agent_id, rule_key, rule_text in default_rules:
         cursor.execute("""
@@ -883,30 +883,6 @@ def init_db():
                 }),
                 'def execute_code(code):\n    import re\n    code = re.sub(r"^```python\\s*", "", code, flags=re.IGNORECASE)\n    code = re.sub(r"\\s*```$", "", code, flags=re.IGNORECASE)\n    return sdk[\'sandbox\'].execute(code)\n',
                 "execute_code",
-                "contributor",
-                "manual",
-                "{}"
-            ),
-            (
-                "modify_code",
-                "Modify Code",
-                "Stages and validates code modifications to a specific file inside an isolated Git worktree staging directory, running pytest for verification.",
-                json.dumps({
-                    "type": "object",
-                    "properties": {
-                        "rel_path": {
-                            "type": "string",
-                            "description": "The relative path to the file to modify."
-                        },
-                        "proposed_code": {
-                            "type": "string",
-                            "description": "The complete new source code content for the file."
-                        }
-                    },
-                    "required": ["rel_path", "proposed_code"]
-                }),
-                'def modify_code(rel_path, proposed_code):\n    import re\n    from pathlib import Path\n    proposed_code = re.sub(r"^```python\\s*", "", proposed_code, flags=re.IGNORECASE)\n    proposed_code = re.sub(r"\\s*```$", "", proposed_code, flags=re.IGNORECASE)\n    if not sdk[\'fs\'].exists(rel_path):\n        parent_rel = str(Path(rel_path).parent)\n        if not sdk[\'fs\'].exists(parent_rel) and parent_rel != ".":\n            raise FileNotFoundError(f"Target file path \'{rel_path}\' is invalid: parent directory \'{parent_rel}\' does not exist.")\n    if "<<<<<<< SEARCH" in proposed_code and ">>>>>>> REPLACE" in proposed_code:\n        current_content = ""\n        if sdk[\'fs\'].exists(rel_path):\n            current_content = sdk[\'fs\'].read(rel_path)\n        proposed_code = sdk[\'codebase\'].apply_search_replace(current_content, proposed_code)\n    res = sdk[\'codebase\'].stage_modification(rel_path, proposed_code)\n    status = res[\'status\']\n    temp_dir = res[\'temp_dir\']\n    return f"Staged modification for file \'{rel_path}\' in isolated folder \'{temp_dir}\'.\\nUnit test status: {status.upper()}.\\nAwaiting human approval before applying changes to the live codebase."\n',
-                "modify_code",
                 "contributor",
                 "manual",
                 "{}"
@@ -1114,7 +1090,6 @@ def init_db():
             - scan_workspace
             - spawn_agent: <agent_id> | <agent_name> | <system_prompt>
             - execute_code: <python_code>
-            - modify_code: <relative_file_path> | <complete_new_code_contents>
             - write_draft_file: <filename> | <content> (Use this to create or update draft documents/notes/roadmaps/tasks in docs/drafts/ without sandbox constraints)
             - read_draft_file: <filename> (Read a draft file from docs/drafts/)
             - list_draft_files (List all drafts in docs/drafts/)
@@ -1127,7 +1102,7 @@ def init_db():
             PROPOSED_ACTION: <tool_name>:<arguments>
             
             CRITICAL: You must output the raw tool call syntax prefix immediately. Do not describe the tool or use introductory words. For example, output:
-            PROPOSED_ACTION: modify_code: src/main.py | [code contents]
+            PROPOSED_ACTION: execute_code: print("hello")
             \"\"\"
 
             proposer_resp = sdk['swarm'].query_agent("proposer", proposer_prompt)
@@ -1594,6 +1569,9 @@ def init_db():
                     entry_point_function, required_role, trigger_type, trigger_config
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
                 """, (skill_id, name, desc, schema, code, entry, role, trigger, config))
+
+    # V3-T3: Remove modify_code skill — direct source modification is disabled.
+    cursor.execute("DELETE FROM agent_skills WHERE skill_id = 'modify_code';")
 
     # Always ensure the document & drafts skills exist and are updated, even in pre-existing databases.
     # This runs unconditionally using INSERT OR REPLACE to migrate live DBs.
