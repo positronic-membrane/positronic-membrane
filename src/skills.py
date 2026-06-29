@@ -1464,6 +1464,121 @@ class SafeReplication:
             "status": status
         }
 
+class SafeGitHub:
+    """Authenticated GitHub REST API wrapper for dynamic skills."""
+
+    def __init__(self, party_id: Optional[str] = None):
+        self.party_id = party_id
+        self._base = "https://api.github.com"
+
+    def _token(self) -> str:
+        import src.config
+        token = src.config.GITHUB_ACCESS_TOKEN
+        if not token:
+            raise PermissionError("GitHub integration disabled: GITHUB_ACCESS_TOKEN not configured.")
+        return token
+
+    def _check_rate_limit(self) -> None:
+        """Enforce rolling hourly API call cap stored in system_config."""
+        import time
+        conn = get_connection(read_only_constitution=True)
+        try:
+            ws = conn.execute(
+                "SELECT config_value FROM system_config WHERE config_key='github.rate_limit_window_start'"
+            ).fetchone()
+            calls_row = conn.execute(
+                "SELECT config_value FROM system_config WHERE config_key='github.api_calls_this_hour'"
+            ).fetchone()
+        finally:
+            conn.close()
+        now = time.time()
+        window_ts = float(ws[0]) if ws and ws[0] else 0.0
+        n_calls = int(calls_row[0]) if calls_row and calls_row[0] else 0
+        if now - window_ts > 3600:
+            self._set_rate_state(str(now), "1")
+            return
+        if n_calls >= 50:
+            raise RuntimeError(
+                f"GitHub API hourly rate limit reached ({n_calls} calls). Try again later."
+            )
+        self._set_rate_state(str(window_ts) if window_ts else str(now), str(n_calls + 1))
+
+    def _set_rate_state(self, window_start: str, calls: str) -> None:
+        conn = get_connection(read_only_constitution=True)
+        try:
+            conn.execute(
+                "INSERT OR REPLACE INTO system_config (config_key, config_value, is_agent_modifiable) "
+                "VALUES ('github.rate_limit_window_start', ?, 0)",
+                (window_start,),
+            )
+            conn.execute(
+                "INSERT OR REPLACE INTO system_config (config_key, config_value, is_agent_modifiable) "
+                "VALUES ('github.api_calls_this_hour', ?, 0)",
+                (calls,),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def _api(self, method: str, path: str, body: Optional[dict] = None):
+        import urllib.request
+        self._check_rate_limit()
+        headers = {
+            "Authorization": f"Bearer {self._token()}",
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+            "Content-Type": "application/json",
+        }
+        data = json.dumps(body).encode() if body is not None else None
+        req = urllib.request.Request(
+            f"{self._base}{path}", data=data, headers=headers, method=method
+        )
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            return json.loads(resp.read().decode())
+
+    def list_open_issues(self, repo: str, label: Optional[str] = None) -> list:
+        path = f"/repos/{repo}/issues?state=open"
+        if label:
+            path += f"&labels={label}"
+        return self._api("GET", path)
+
+    def get_issue(self, repo: str, number: int) -> dict:
+        return self._api("GET", f"/repos/{repo}/issues/{number}")
+
+    def create_issue(
+        self, repo: str, title: str, body: str = "", labels: Optional[list] = None
+    ) -> dict:
+        validate_action(f"create GitHub issue on {repo}: {title}")
+        payload: dict = {"title": title, "body": body}
+        if labels:
+            payload["labels"] = labels
+        return self._api("POST", f"/repos/{repo}/issues", payload)
+
+    def add_comment(self, repo: str, number: int, body: str) -> dict:
+        validate_action(f"add GitHub comment on {repo}#{number}: {body[:80]}")
+        return self._api(
+            "POST", f"/repos/{repo}/issues/{number}/comments", {"body": body}
+        )
+
+    def close_issue(self, repo: str, number: int) -> dict:
+        validate_action(f"close GitHub issue {repo}#{number}")
+        if not has_role(self.party_id, "contributor"):
+            raise PermissionError("Closing issues requires contributor role.")
+        return self._api("PATCH", f"/repos/{repo}/issues/{number}", {"state": "closed"})
+
+    def create_pr(
+        self, repo: str, title: str, body: str, head: str, base: str = "main"
+    ) -> dict:
+        validate_action(f"create GitHub PR on {repo}: {title}")
+        if not has_role(self.party_id, "contributor"):
+            raise PermissionError("Creating pull requests requires contributor role.")
+        return self._api(
+            "POST",
+            f"/repos/{repo}/pulls",
+            {"title": title, "body": body, "head": head, "base": base},
+        )
+
+
 def has_role(party_id: Optional[str], required_role: str) -> bool:
     """Verifies that the given party meets or exceeds the required security role."""
     if required_role == 'observer':
@@ -1531,6 +1646,7 @@ class DynamicSkillExecutor:
             "explorer": SafeExplorer(),
             "codebase": SafeCodebase(),
             "sandbox": SafeSandbox(),
+            "github": SafeGitHub(party_id),
             "logger": logging.getLogger(f"JanusSkill.{name.replace(' ', '')}")
         }
 
