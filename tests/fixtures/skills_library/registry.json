@@ -278,6 +278,18 @@
       "test_file": "skills/test_web_search.py"
     },
     {
+      "skill_id": "github_integration",
+      "name": "GitHub Integration",
+      "description": "Interact with GitHub: list/read/create/comment on issues and open PRs.",
+      "parameters_schema": "{\"type\": \"object\", \"properties\": {\"action\": {\"type\": \"string\", \"enum\": [\"list_open_issues\", \"get_issue\", \"create_issue\", \"add_comment\", \"close_issue\", \"create_pr\"]}, \"repo\": {\"type\": \"string\", \"description\": \"GitHub repo in owner/name format\"}, \"number\": {\"type\": \"integer\"}, \"title\": {\"type\": \"string\"}, \"body\": {\"type\": \"string\"}, \"labels\": {\"type\": \"array\", \"items\": {\"type\": \"string\"}}, \"head\": {\"type\": \"string\"}, \"base\": {\"type\": \"string\"}, \"label\": {\"type\": \"string\"}}, \"required\": [\"action\", \"repo\"]}",
+      "entry_point_function": "run",
+      "required_role": "user",
+      "trigger_type": "manual",
+      "trigger_config": "{}",
+      "file": "skills/github_integration.py",
+      "test_file": "skills/test_github_integration.py"
+    },
+    {
       "skill_id": "write_draft_file",
       "name": "Write Draft File",
       "description": "Write or update the contents of a draft document in docs/drafts/.",

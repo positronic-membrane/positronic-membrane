@@ -722,7 +722,9 @@ def init_db():
         ("webhooks.slack_url", "", 0),
         ("webhooks.discord_url", "", 0),
         ("consecutive_critic_vetoes", "0", 0),
-        ("dispute_paused", "false", 0)
+        ("dispute_paused", "false", 0),
+        ("github.rate_limit_window_start", "", 0),
+        ("github.api_calls_this_hour", "0", 0),
     ]
     for key, value, modifiable in default_configs:
         cursor.execute("""
