@@ -1,53 +1,63 @@
 # Contributing to Positronic Membrane
 
-First off, thank you for taking the time to contribute! It’s people like you who make the open-source community such an amazing place to learn, inspire, and create.
-
-This project is currently maintained by a solo developer. To help keep things manageable and running smoothly, please follow these guidelines when participating.
+This project is solo-maintained. External contributors are welcome, but please open an issue and discuss your approach before writing code — this keeps effort aligned with the project roadmap and avoids wasted work.
 
 ---
 
-## Code of Conduct
+## Reporting Bugs
 
-By participating in this project, you agree to maintain a respectful, welcoming, and collaborative environment. Please be kind, patient, and constructive in your feedback and code reviews.
-
----
-
-## How Can I Contribute?
-
-### 1. Reporting Bugs
-If you find a bug or unexpected behavior, please check the [Issues tab](../../issues) first to see if it has already been reported. If not, open a new issue and include:
-* A clear, descriptive title.
-* Steps to reproduce the behavior.
-* What you expected to happen vs. what actually happened.
-* Any relevant screenshots, error logs, or environment details (e.g., OS version, engine/runtime version).
-
-### 2. Suggesting Enhancements
-Have an idea for a cool feature or an optimization? We'd love to hear it! 
-* Open an issue using the **Feature Request** format (or just clearly state your idea in a new issue).
-* Explain *why* this feature would be useful and how you envision it working.
-
-### 3. Submitting Code (Pull Requests)
-Before you dive into writing code, **please open an issue or comment on an existing one** to discuss the proposed changes. This ensures your hard work aligns with the project's roadmap and design philosophy.
-
-Once your approach is confirmed, please follow these steps:
-1. **Fork** the repository and create your branch from `main` (e.g., `feature/cool-new-system` or `fix/typo-in-docs`).
-2. Make your changes locally. Try to keep your commits focused and descriptive.
-3. Ensure your code runs successfully and doesn't introduce broken dependencies.
-4. Open a **Pull Request (PR)** against our `main` branch.
-5. In your PR description, link to the issue your code resolves (e.g., `Closes #12`).
+Check the [Issues tab](../../issues) first. If the bug isn't there, open a new issue and include:
+- A clear, descriptive title
+- Steps to reproduce
+- Expected vs. actual behavior
+- Relevant logs, error output, or environment details
 
 ---
 
-## Our Development Workflow
+## Suggesting Features
 
-To keep the repository history clean and easy to read:
-* All pull requests are reviewed before merging.
-* We utilize a **Squash and Merge** workflow. Your feature branch commits will be condensed into a single clean commit on the `main` branch upon merge.
+Open an issue describing what you want and why. The maintainer will confirm whether it fits the roadmap before you start coding.
+
+---
+
+## Submitting Code
+
+### Branch naming
+
+Follow the project convention — never commit directly to `main`:
+
+```bash
+git checkout main && git pull origin main
+git checkout -b <branch-name>
+```
+
+Branch name format:
+- `v3/t1-skills-library` — work scoped to a versioned milestone
+- `backlog/t5-experience-log` — work picked up from the unslotted backlog
+
+### Adding a new skill
+
+New skills belong in [janus-skills-library](https://github.com/jmccauley75gh/janus-skills-library), not in this repo. See that repo's README for the skill file format, `registry.json` schema, and test harness pattern. Positronic Membrane pulls skills from the library at boot via `sync_from_registry()`.
+
+Only open a PR here if you are adding a new Safe\* SDK wrapper in `src/skills.py` that a skill needs — the skill implementation itself still goes in janus-skills-library.
+
+### Code review
+
+Run `/code-review high` on your branch before opening a PR and fix all findings. This is the primary quality gate:
+
+```bash
+/code-review high        # find issues
+/code-review high --fix  # auto-apply findings
+```
+
+### Pull request
+
+- Squash-merge workflow — one atomic commit per issue lands on `main`
+- Include `Closes #<issue-number>` in the PR body
+- Every PR must reference an issue — create one first if it doesn't exist
 
 ---
 
 ## Questions?
 
-If you have questions about the codebase or setup, feel free to open a GitHub Discussion or reach out by opening an issue labeled `question`. 
-
-Thank you again for your support!
+Open a GitHub Discussion or an issue labeled `question`.
