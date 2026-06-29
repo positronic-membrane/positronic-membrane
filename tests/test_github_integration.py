@@ -210,6 +210,70 @@ def test_rate_limit_counter_increments():
 
 def test_missing_token_raises(monkeypatch):
     monkeypatch.setattr("src.config.GITHUB_ACCESS_TOKEN", "")
+    monkeypatch.setattr("src.config.GITHUB_PM_TOKEN", "")
     gh = SafeGitHub(party_id="system")
     with pytest.raises(PermissionError, match="GITHUB_ACCESS_TOKEN"):
         gh.list_open_issues(REPO)
+
+
+# ---------------------------------------------------------------------------
+# Token routing
+# ---------------------------------------------------------------------------
+
+def test_pm_token_used_for_non_restricted_repo(monkeypatch):
+    monkeypatch.setattr("src.config.GITHUB_PM_TOKEN", "pm-token")
+    monkeypatch.setattr("src.config.GITHUB_READONLY_REPOS", [])
+    gh = SafeGitHub(party_id="system")
+    with patch("urllib.request.urlopen", return_value=_urlopen_ctx([])) as mock_open:
+        gh.list_open_issues("other/repo")
+    req = mock_open.call_args[0][0]
+    assert req.get_header("Authorization") == "Bearer pm-token"
+
+
+def test_access_token_used_for_restricted_repo(monkeypatch):
+    monkeypatch.setattr("src.config.GITHUB_PM_TOKEN", "pm-token")
+    monkeypatch.setattr("src.config.GITHUB_READONLY_REPOS", [REPO])
+    gh = SafeGitHub(party_id="system")
+    with patch("urllib.request.urlopen", return_value=_urlopen_ctx([])) as mock_open:
+        gh.list_open_issues(REPO)
+    req = mock_open.call_args[0][0]
+    assert req.get_header("Authorization") == "Bearer test-token"
+
+
+def test_access_token_used_when_pm_token_absent(monkeypatch):
+    monkeypatch.setattr("src.config.GITHUB_PM_TOKEN", "")
+    monkeypatch.setattr("src.config.GITHUB_READONLY_REPOS", [])
+    gh = SafeGitHub(party_id="system")
+    with patch("urllib.request.urlopen", return_value=_urlopen_ctx([])) as mock_open:
+        gh.list_open_issues(REPO)
+    req = mock_open.call_args[0][0]
+    assert req.get_header("Authorization") == "Bearer test-token"
+
+
+# ---------------------------------------------------------------------------
+# create_repo
+# ---------------------------------------------------------------------------
+
+def test_create_repo_posts_to_user_repos():
+    gh = SafeGitHub(party_id="system")
+    with patch("urllib.request.urlopen", return_value=_urlopen_ctx({"name": "new-repo", "full_name": "pm/new-repo"})) as mock_open:
+        result = gh.create_repo("new-repo", description="A test repo", private=False)
+    req = mock_open.call_args[0][0]
+    assert req.full_url == "https://api.github.com/user/repos"
+    assert req.method == "POST"
+    payload = json.loads(req.data)
+    assert payload["name"] == "new-repo"
+    assert payload["auto_init"] is True
+    assert result["full_name"] == "pm/new-repo"
+
+
+def test_create_repo_blocked_for_user_role():
+    conn = get_connection()
+    try:
+        conn.execute("INSERT OR REPLACE INTO parties (id, name, role) VALUES (?, ?, ?)", ("u_repo", "Test", "user"))
+        conn.commit()
+    finally:
+        conn.close()
+    gh = SafeGitHub(party_id="u_repo")
+    with pytest.raises(PermissionError, match="contributor"):
+        gh.create_repo("new-repo")
