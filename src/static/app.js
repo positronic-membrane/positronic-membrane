@@ -287,19 +287,25 @@ document.addEventListener("DOMContentLoaded", () => {
                             indicator.remove();
                             msgDiv = document.createElement("div");
                             msgDiv.classList.add("message", "persona");
+                            const content = document.createElement("div");
+                            content.className = "message-content";
+                            msgDiv.appendChild(content);
                             chatMessages.appendChild(msgDiv);
                         }
                         rawTokens += event.text;
-                        msgDiv.innerHTML = formatMessageText(rawTokens);
+                        msgDiv.querySelector(".message-content").innerHTML = formatMessageText(rawTokens);
                         scrollToBottom();
                     } else if (event.type === "status") {
                         if (!msgDiv) {
                             indicator.remove();
                             msgDiv = document.createElement("div");
                             msgDiv.classList.add("message", "persona");
+                            const content = document.createElement("div");
+                            content.className = "message-content";
+                            msgDiv.appendChild(content);
                             chatMessages.appendChild(msgDiv);
                         }
-                        msgDiv.innerHTML = formatMessageText(`_${event.text}_`);
+                        msgDiv.querySelector(".message-content").innerHTML = formatMessageText(`_${event.text}_`);
                         scrollToBottom();
                     } else if (event.type === "error") {
                         indicator.remove();
@@ -308,9 +314,11 @@ document.addEventListener("DOMContentLoaded", () => {
                     } else if (event.type === "done") {
                         if (!msgDiv) {
                             indicator.remove();
-                        }
-                        if (msgDiv && rawTokens) {
-                            msgDiv.innerHTML = formatMessageText(rawTokens);
+                        } else {
+                            if (rawTokens) {
+                                msgDiv.querySelector(".message-content").innerHTML = formatMessageText(rawTokens);
+                            }
+                            addCopyButton(msgDiv);
                         }
                         scrollToBottom();
                     }
@@ -323,12 +331,40 @@ document.addEventListener("DOMContentLoaded", () => {
         }
     }
 
+    function addCopyButton(msgDiv) {
+        const actions = document.createElement("div");
+        actions.className = "message-actions";
+        const btn = document.createElement("button");
+        btn.className = "copy-btn";
+        btn.textContent = "Copy";
+        btn.addEventListener("click", () => {
+            const contentEl = msgDiv.querySelector(".message-content");
+            const text = contentEl ? contentEl.innerText : msgDiv.innerText;
+            navigator.clipboard.writeText(text).then(() => {
+                btn.textContent = "Copied!";
+                setTimeout(() => { btn.textContent = "Copy"; }, 1500);
+            }).catch(() => {
+                btn.textContent = "Failed";
+                setTimeout(() => { btn.textContent = "Copy"; }, 1500);
+            });
+        });
+        actions.appendChild(btn);
+        msgDiv.appendChild(actions);
+    }
+
     function appendMessage(speaker, text) {
         const msgDiv = document.createElement("div");
         msgDiv.classList.add("message", speaker);
-        
-        // Simple markdown parsing helper
-        msgDiv.innerHTML = formatMessageText(text);
+
+        const content = document.createElement("div");
+        content.className = "message-content";
+        content.innerHTML = formatMessageText(text);
+        msgDiv.appendChild(content);
+
+        if (speaker === "user" || speaker === "persona") {
+            addCopyButton(msgDiv);
+        }
+
         chatMessages.appendChild(msgDiv);
     }
 
