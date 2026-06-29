@@ -1,7 +1,5 @@
-def run(action, repo=None, **kwargs):
-    import src.config
+def run(action, repo, **kwargs):
     gh = sdk["github"]
-    repo = repo or src.config.GITHUB_REPO
     if action == "list_open_issues":
         return gh.list_open_issues(repo, label=kwargs.get("label"))
     if action == "get_issue":
