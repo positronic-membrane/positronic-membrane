@@ -1465,7 +1465,6 @@ class SafeReplication:
         }
 
 class SafeGitHub:
-    """Authenticated GitHub REST API wrapper for dynamic skills."""
 
     def __init__(self, party_id: Optional[str] = None):
         self.party_id = party_id
@@ -1479,8 +1478,8 @@ class SafeGitHub:
         return token
 
     def _check_rate_limit(self) -> None:
-        """Enforce rolling hourly API call cap stored in system_config."""
         import time
+        now = time.time()
         conn = get_connection(read_only_constitution=True)
         try:
             ws = conn.execute(
@@ -1489,32 +1488,27 @@ class SafeGitHub:
             calls_row = conn.execute(
                 "SELECT config_value FROM system_config WHERE config_key='github.api_calls_this_hour'"
             ).fetchone()
-        finally:
-            conn.close()
-        now = time.time()
-        window_ts = float(ws[0]) if ws and ws[0] else 0.0
-        n_calls = int(calls_row[0]) if calls_row and calls_row[0] else 0
-        if now - window_ts > 3600:
-            self._set_rate_state(str(now), "1")
-            return
-        if n_calls >= 50:
-            raise RuntimeError(
-                f"GitHub API hourly rate limit reached ({n_calls} calls). Try again later."
-            )
-        self._set_rate_state(str(window_ts) if window_ts else str(now), str(n_calls + 1))
-
-    def _set_rate_state(self, window_start: str, calls: str) -> None:
-        conn = get_connection(read_only_constitution=True)
-        try:
+            window_ts = float(ws[0]) if ws and ws[0] else 0.0
+            n_calls = int(calls_row[0]) if calls_row and calls_row[0] else 0
+            if now - window_ts > 3600:
+                new_window, new_calls = str(now), "1"
+            else:
+                if n_calls >= 50:
+                    raise RuntimeError(
+                        f"GitHub API hourly rate limit reached ({n_calls} calls). Try again later."
+                    )
+                new_window, new_calls = str(window_ts), str(n_calls + 1)
             conn.execute(
-                "INSERT OR REPLACE INTO system_config (config_key, config_value, is_agent_modifiable) "
-                "VALUES ('github.rate_limit_window_start', ?, 0)",
-                (window_start,),
+                "INSERT OR REPLACE INTO system_config "
+                "(config_key, config_value, is_agent_modifiable, updated_at) "
+                "VALUES ('github.rate_limit_window_start', ?, 0, CURRENT_TIMESTAMP)",
+                (new_window,),
             )
             conn.execute(
-                "INSERT OR REPLACE INTO system_config (config_key, config_value, is_agent_modifiable) "
-                "VALUES ('github.api_calls_this_hour', ?, 0)",
-                (calls,),
+                "INSERT OR REPLACE INTO system_config "
+                "(config_key, config_value, is_agent_modifiable, updated_at) "
+                "VALUES ('github.api_calls_this_hour', ?, 0, CURRENT_TIMESTAMP)",
+                (new_calls,),
             )
             conn.commit()
         finally:
@@ -1522,9 +1516,11 @@ class SafeGitHub:
 
     def _api(self, method: str, path: str, body: Optional[dict] = None):
         import urllib.request
+        import urllib.error
+        token = self._token()
         self._check_rate_limit()
         headers = {
-            "Authorization": f"Bearer {self._token()}",
+            "Authorization": f"Bearer {token}",
             "Accept": "application/vnd.github+json",
             "X-GitHub-Api-Version": "2022-11-28",
             "Content-Type": "application/json",
@@ -1533,16 +1529,28 @@ class SafeGitHub:
         req = urllib.request.Request(
             f"{self._base}{path}", data=data, headers=headers, method=method
         )
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            return json.loads(resp.read().decode())
+        try:
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                raw = resp.read().decode()
+        except urllib.error.HTTPError as e:
+            raise RuntimeError(f"GitHub API error {e.code} for {method} {path}: {e.reason}") from e
+        except urllib.error.URLError as e:
+            raise RuntimeError(f"GitHub API unreachable: {e.reason}") from e
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError as e:
+            raise ValueError(f"GitHub returned non-JSON for {method} {path}: {raw[:200]}") from e
 
     def list_open_issues(self, repo: str, label: Optional[str] = None) -> list:
-        path = f"/repos/{repo}/issues?state=open"
+        import urllib.parse
+        validate_action(f"list GitHub issues from {repo}")
+        path = f"/repos/{repo}/issues?state=open&per_page=100"
         if label:
-            path += f"&labels={label}"
+            path += f"&labels={urllib.parse.quote(label, safe='')}"
         return self._api("GET", path)
 
     def get_issue(self, repo: str, number: int) -> dict:
+        validate_action(f"get GitHub issue {repo}#{number}")
         return self._api("GET", f"/repos/{repo}/issues/{number}")
 
     def create_issue(
@@ -1555,7 +1563,7 @@ class SafeGitHub:
         return self._api("POST", f"/repos/{repo}/issues", payload)
 
     def add_comment(self, repo: str, number: int, body: str) -> dict:
-        validate_action(f"add GitHub comment on {repo}#{number}: {body[:80]}")
+        validate_action(f"add GitHub comment on {repo}#{number}: {str(body)[:80]}")
         return self._api(
             "POST", f"/repos/{repo}/issues/{number}/comments", {"body": body}
         )

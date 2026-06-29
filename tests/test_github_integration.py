@@ -55,7 +55,7 @@ def test_list_open_issues_uses_get():
     with patch("urllib.request.urlopen", return_value=_urlopen_ctx([{"number": 1}])) as mock_open:
         result = gh.list_open_issues(REPO)
     req = mock_open.call_args[0][0]
-    assert f"/repos/{REPO}/issues?state=open" in req.full_url
+    assert f"/repos/{REPO}/issues?state=open&per_page=100" in req.full_url
     assert req.method == "GET"
     assert result == [{"number": 1}]
 
