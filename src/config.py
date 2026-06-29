@@ -70,7 +70,8 @@ NEO4J_DATABASE = os.getenv("NEO4J_DATABASE", "neo4j")
 
 # Skills Library (sibling repo for registry sync)
 SKILLS_LIBRARY_REPO   = os.getenv("SKILLS_LIBRARY_REPO",   "git@github.com:jmccauley75gh/janus-skills-library.git")
-SKILLS_LIBRARY_BRANCH = os.getenv("SKILLS_LIBRARY_BRANCH", "main")
+SKILLS_LIBRARY_REF    = os.getenv("SKILLS_LIBRARY_REF",    os.getenv("SKILLS_LIBRARY_BRANCH", "main"))
+SKILLS_LIBRARY_BRANCH = SKILLS_LIBRARY_REF  # backward-compat alias
 
 # OpenRouter Configuration
 OPENROUTER_BASE_URL = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")

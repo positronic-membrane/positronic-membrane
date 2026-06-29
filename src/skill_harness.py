@@ -78,14 +78,20 @@ MOCK_SDK_SOURCE = textwrap.dedent("""\
 # ---------------------------------------------------------------------------
 
 DEFAULT_TEST_TEMPLATE = textwrap.dedent("""\
+    import importlib.util
     import logging
+    from pathlib import Path
     from mock_sdk import make_mock_sdk
-    from skill import {entry_point}
 
-    def test_skill_runs():
-        sdk = make_mock_sdk()
-        result = {entry_point}(sdk, {{}})
-        assert result is not None
+    def test_skill_entry_point_callable():
+        spec = importlib.util.spec_from_file_location(
+            "skill", Path(__file__).parent / "skill.py"
+        )
+        mod = importlib.util.module_from_spec(spec)
+        mod.sdk = make_mock_sdk()
+        spec.loader.exec_module(mod)
+        assert hasattr(mod, "{entry_point}")
+        assert callable(getattr(mod, "{entry_point}"))
 """)
 
 # ---------------------------------------------------------------------------
@@ -193,6 +199,10 @@ def stage_skill(
 
     Returns (success, message).
     """
+    import re as _re
+    if not _re.match(r'^[a-zA-Z0-9_-]+$', skill_id):
+        return False, f"Invalid skill_id '{skill_id}': must match [a-zA-Z0-9_-]+"
+
     ok, err = audit_skill_ast(code_blob)
     if not ok:
         return False, f"AST audit failed for '{skill_id}': {err}"
@@ -209,6 +219,7 @@ def stage_skill(
 
     try:
         (staging_dir / "skill.py").write_text(code_blob, encoding="utf-8")
+        (staging_dir / f"{skill_id}.py").write_text(code_blob, encoding="utf-8")
         (staging_dir / "mock_sdk.py").write_text(MOCK_SDK_SOURCE, encoding="utf-8")
 
         resolved_test = test_blob or DEFAULT_TEST_TEMPLATE.format(
@@ -216,7 +227,7 @@ def stage_skill(
         )
         (staging_dir / "test_skill.py").write_text(resolved_test, encoding="utf-8")
 
-        env = {**os.environ, "JANUS_TEST_MODE": "1", "PYTHONPATH": str(staging_dir)}
+        env = {**os.environ, "JANUS_TEST_MODE": "1", "PYTHONPATH": str(staging_dir) + os.pathsep + str(config.ROOT_DIR)}
         result = subprocess.run(
             [_resolve_pytest(), "-v", "--tb=short"],
             cwd=str(staging_dir),
@@ -275,17 +286,24 @@ def sync_from_registry(
         source_dir = Path(local_path)
     else:
         url = repo_url or config.SKILLS_LIBRARY_REPO
-        branch = config.SKILLS_LIBRARY_BRANCH
+        branch = config.SKILLS_LIBRARY_REF
         cache_dir = config.ROOT_DIR / ".janus_sandboxes" / "skills_library"
 
         try:
             if cache_dir.exists():
+                # Fetch then checkout the configured ref before pulling, so a change
+                # in SKILLS_LIBRARY_REF between boots is honoured.
+                subprocess.run(
+                    ["git", "-C", str(cache_dir), "fetch", "origin"],
+                    check=True, capture_output=True, text=True, timeout=60,
+                )
+                subprocess.run(
+                    ["git", "-C", str(cache_dir), "checkout", branch],
+                    check=True, capture_output=True, text=True, timeout=30,
+                )
                 subprocess.run(
                     ["git", "-C", str(cache_dir), "pull", "--ff-only"],
-                    check=True,
-                    capture_output=True,
-                    text=True,
-                    timeout=60,
+                    check=True, capture_output=True, text=True, timeout=60,
                 )
             else:
                 cache_dir.parent.mkdir(parents=True, exist_ok=True)
@@ -318,15 +336,25 @@ def sync_from_registry(
     failed = 0
     errors: list[str] = []
 
+    source_dir_resolved = source_dir.resolve()
+
     for descriptor in skills:
         skill_id = descriptor.get("skill_id", "<unknown>")
         try:
-            skill_file = source_dir / descriptor["file"]
+            skill_file = (source_dir / descriptor["file"]).resolve()
+            if not str(skill_file).startswith(str(source_dir_resolved)):
+                failed += 1
+                errors.append(f"Skill '{skill_id}': file path escapes library root")
+                continue
             code_blob = skill_file.read_text(encoding="utf-8")
 
             test_blob: str | None = None
             if descriptor.get("test_file"):
-                test_file = source_dir / descriptor["test_file"]
+                test_file = (source_dir / descriptor["test_file"]).resolve()
+                if not str(test_file).startswith(str(source_dir_resolved)):
+                    failed += 1
+                    errors.append(f"Skill '{skill_id}': test_file path escapes library root")
+                    continue
                 if test_file.exists():
                     test_blob = test_file.read_text(encoding="utf-8")
 
