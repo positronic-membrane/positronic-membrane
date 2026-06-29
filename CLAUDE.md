@@ -131,7 +131,8 @@ prompt-injection resistance, not dead code to dedupe.
 party_id)` (`src/skills.py`) loads the row, checks `required_role` via `has_role()`, then `compile()`s+`exec()`s
 the blob into a namespace pre-populated with an `sdk` dict of `Safe*` wrapper instances (SafeDB, SafeFS,
 SafeMemory, SafeSwarm, SafeGoals, SafeDocuments, SafeSandbox, SafeSelfModel, SafeDrives,
-SafeAgentOrchestration, SafeReplication, SafeLayeredCognition, SafeExplorer, SafeCodebase) for convenience.
+SafeAgentOrchestration, SafeReplication, SafeLayeredCognition, SafeExplorer, SafeCodebase,
+SafeGitHub) for convenience.
 **This is not a security sandbox**: `__builtins__` in that namespace is the real `builtins` module, so
 `code_blob` can `import os`, `open()`, `eval()`, etc. without restriction (default skills like `check_presence`
 rely on this — they `import os`/`from pathlib import Path` directly). There is no AST audit here, unlike the

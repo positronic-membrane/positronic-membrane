@@ -1,13 +1,13 @@
 # Positronic Membrane
 
-Swarm AI experimentation and local autonomous agent daemon orchestration. Designed to run as an autonomous, self-modifying developer swarm. It is now fully cloud-ready with decoupled API, persistence, and execution sandboxing layers.
+Swarm AI experimentation and local autonomous agent daemon orchestration. Designed to run as an autonomous, self-modifying developer swarm. It is fully cloud-ready with decoupled API, persistence, and execution sandboxing layers.
 
 ---
 
 ## Current Architecture State
 
-*   **API & Web Server:** Upgraded from standard Python server to **FastAPI + Uvicorn**. Features bi-directional WebSockets for real-time chat (`/ws/chat`) and background agent deliberation streaming (`/ws/deliberations`).
-*   **Cryptographic Security:** Secured by **RS256 JWT Authentication** using automated local RSA 2048-bit key generation. Verifies role levels (`admin`, `user`, etc.) dynamically on REST and WebSocket layers.
+*   **API & Web Server:** FastAPI + Uvicorn. Real-time chat and background deliberation streaming via SSE.
+*   **Cryptographic Security:** RS256 JWT Authentication using automated local RSA 2048-bit key generation. Role levels (`admin`, `contributor`, `user`, `observer`) enforced on REST and WebSocket layers.
 *   **Pluggable Persistence Adapters:** Abstracts both relational and vector data structures behind a dialect-aware query wrapper. Dynamically routes to:
     *   **Local Mode:** SQLite3 file-backed database and filesystem-backed ChromaDB collections.
     *   **Cloud Mode:** PostgreSQL instance (with restricted schema role privileges) and **pgvector** collection tables.
@@ -16,11 +16,38 @@ Swarm AI experimentation and local autonomous agent daemon orchestration. Design
 
 ---
 
+## Skills Architecture
+
+Capabilities are implemented as **dynamic skills** — Python source stored as rows in the `agent_skills` database table. Skills are loaded from [janus-skills-library](https://github.com/jmccauley75gh/janus-skills-library) at boot via `sync_from_registry()` and can be reloaded on demand with the `sync_skill_library` skill.
+
+Each skill's `code_blob` is compiled and executed by `DynamicSkillExecutor` into a namespace pre-populated with an `sdk` dict of Safe\* wrapper instances:
+
+| Wrapper | Capability |
+|---|---|
+| `SafeDB` | Database queries (SQL-safety checked) |
+| `SafeFS` | Filesystem access (workspace-bounded) |
+| `SafeMemory` | Semantic memory (add/query) |
+| `SafeSwarm` | Inter-agent messaging |
+| `SafeGoals` | Goal CRUD and checkpoints |
+| `SafeDocuments` | Document store |
+| `SafeSandbox` | Ad-hoc code execution |
+| `SafeSelfModel` | Self-model trait reads/writes |
+| `SafeDrives` | Boredom/curiosity drives |
+| `SafeAgentOrchestration` | Task dispatch and sandbox sessions |
+| `SafeReplication` | Child instance spawning |
+| `SafeLayeredCognition` | Daemon cognitive layer access |
+| `SafeExplorer` | Web search / page fetch |
+| `SafeCodebase` | Codebase query/index |
+| `SafeGitHub` | GitHub REST API (issues, PRs, comments) |
+
+Two skills are hardcoded in `init_db()` rather than the library: `check_presence` (the daemon's heartbeat sensor, must exist before the library sync runs) and `sync_skill_library` (the bootstrap tool that performs the sync itself).
+
+---
+
 ## Documentation
 
 *   **[User Guide](docs/user_guide.md)**: Guide on how to run, configure, and align Positronic Membrane instances.
 *   **[Deployment Guide](docs/deployment_guide.md)**: Cloud provisioning, Docker builds, and Postgres schema setups.
-*   **[Future Roadmap](docs/archive/future_roadmap.md)**: Prerequisites and plans for GitHub integrations, parallel releases, and token cost caps.
 *   **[Ollama Setup & Model Guide](docs/ollama_setup.md)**: Steps to download, install, run, and integrate local LLMs.
 *   **[Gemini.md Specification](docs/gemini_md_specification.md)**: Core rules, schema specifications, and constraints for the Positronic Membrane system.
 
@@ -54,7 +81,6 @@ When running Positronic Membrane in CLI mode (`python -m src.main --cli`), the i
 
 *   `/exit`: Gracefully shuts down the active conversation console and cancels the background daemon loops.
 *   `/amend <rule_key> | <rule_text>`: Proposes a new rule or amendment to be sealed in the read-only core constitution table (requires interactive `y/n` confirmation).
-*   `/modify <relative_file_path> | <instructions>`: Synchronously drafts, audits, stages, and runs tests for a single file modification, prompting you to commit or reject it immediately.
 *   `/stage [limit]`: Automatically parses proposed codebase changes from the most recent message (or the last `limit` messages) in the conversation, presenting an interactive menu to confirm, remove, or edit changes before running a combined staging, auditing, and test validation transaction.
 *   `/sandbox start <name>`: Initializes an isolated sandbox workspace using Git Worktree on branch `evolution/sandbox-<name>` under `.janus_sandboxes/session_<name>`.
 *   `/sandbox status`: Displays the active sandbox path, branch, status, and modified files.
