@@ -1470,8 +1470,11 @@ class SafeGitHub:
         self.party_id = party_id
         self._base = "https://api.github.com"
 
-    def _token(self) -> str:
+    def _token(self, repo: str = "") -> str:
         import src.config
+        # Use the write-capable PM token unless the target repo is in the restricted list.
+        if src.config.GITHUB_PM_TOKEN and repo not in src.config.GITHUB_READONLY_REPOS:
+            return src.config.GITHUB_PM_TOKEN
         token = src.config.GITHUB_ACCESS_TOKEN
         if not token:
             raise PermissionError("GitHub integration disabled: GITHUB_ACCESS_TOKEN not configured.")
@@ -1514,10 +1517,10 @@ class SafeGitHub:
         finally:
             conn.close()
 
-    def _api(self, method: str, path: str, body: Optional[dict] = None):
+    def _api(self, method: str, path: str, body: Optional[dict] = None, repo: str = ""):
         import urllib.request
         import urllib.error
-        token = self._token()
+        token = self._token(repo=repo)
         self._check_rate_limit()
         headers = {
             "Authorization": f"Bearer {token}",
@@ -1547,11 +1550,11 @@ class SafeGitHub:
         path = f"/repos/{repo}/issues?state=open&per_page=100"
         if label:
             path += f"&labels={urllib.parse.quote(label, safe='')}"
-        return self._api("GET", path)
+        return self._api("GET", path, repo=repo)
 
     def get_issue(self, repo: str, number: int) -> dict:
         validate_action(f"get GitHub issue {repo}#{number}")
-        return self._api("GET", f"/repos/{repo}/issues/{number}")
+        return self._api("GET", f"/repos/{repo}/issues/{number}", repo=repo)
 
     def create_issue(
         self, repo: str, title: str, body: str = "", labels: Optional[list] = None
@@ -1560,19 +1563,19 @@ class SafeGitHub:
         payload: dict = {"title": title, "body": body}
         if labels:
             payload["labels"] = labels
-        return self._api("POST", f"/repos/{repo}/issues", payload)
+        return self._api("POST", f"/repos/{repo}/issues", payload, repo=repo)
 
     def add_comment(self, repo: str, number: int, body: str) -> dict:
         validate_action(f"add GitHub comment on {repo}#{number}: {str(body)[:80]}")
         return self._api(
-            "POST", f"/repos/{repo}/issues/{number}/comments", {"body": body}
+            "POST", f"/repos/{repo}/issues/{number}/comments", {"body": body}, repo=repo
         )
 
     def close_issue(self, repo: str, number: int) -> dict:
         validate_action(f"close GitHub issue {repo}#{number}")
         if not has_role(self.party_id, "contributor"):
             raise PermissionError("Closing issues requires contributor role.")
-        return self._api("PATCH", f"/repos/{repo}/issues/{number}", {"state": "closed"})
+        return self._api("PATCH", f"/repos/{repo}/issues/{number}", {"state": "closed"}, repo=repo)
 
     def create_pr(
         self, repo: str, title: str, body: str, head: str, base: str = "main"
@@ -1584,6 +1587,19 @@ class SafeGitHub:
             "POST",
             f"/repos/{repo}/pulls",
             {"title": title, "body": body, "head": head, "base": base},
+            repo=repo,
+        )
+
+    def create_repo(
+        self, name: str, description: str = "", private: bool = False
+    ) -> dict:
+        validate_action(f"create GitHub repository: {name}")
+        if not has_role(self.party_id, "contributor"):
+            raise PermissionError("Creating repositories requires contributor role.")
+        return self._api(
+            "POST",
+            "/user/repos",
+            {"name": name, "description": description, "private": private, "auto_init": True},
         )
 
 

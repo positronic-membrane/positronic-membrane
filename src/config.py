@@ -52,8 +52,12 @@ RATE_LIMIT_WINDOW = int(os.getenv("RATE_LIMIT_WINDOW", "60"))
 
 # GitHub Integration Settings
 GITHUB_ENABLED = os.getenv("GITHUB_ENABLED", "False").lower() in ("true", "1", "yes")
-GITHUB_ACCESS_TOKEN = os.getenv("GITHUB_ACCESS_TOKEN", "")
-GITHUB_REPO = os.getenv("GITHUB_REPO", "")  # e.g., "owner/repo"
+GITHUB_ACCESS_TOKEN = os.getenv("GITHUB_ACCESS_TOKEN", "")   # restricted token (read-mostly)
+GITHUB_PM_TOKEN = os.getenv("GITHUB_PM_TOKEN", "")           # PM's write-capable token
+GITHUB_REPO = os.getenv("GITHUB_REPO", "")                   # e.g., "owner/repo"
+# Repos that must use GITHUB_ACCESS_TOKEN even when GITHUB_PM_TOKEN is set.
+# Comma-separated "owner/repo" values, e.g. "jmccauley75gh/positronic-membrane"
+GITHUB_READONLY_REPOS: list = [r.strip() for r in os.getenv("GITHUB_READONLY_REPOS", "").split(",") if r.strip()]
 
 # Docker Sandbox Networking & Hardening
 DOCKER_NETWORK = os.getenv("DOCKER_NETWORK", "none")  # Default network isolation: none
