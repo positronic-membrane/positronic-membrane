@@ -1591,14 +1591,23 @@ class SafeGitHub:
         )
 
     def create_repo(
-        self, name: str, description: str = "", private: bool = False
+        self, name: str, description: str = "", private: bool = True,
+        org: Optional[str] = None,
     ) -> dict:
-        validate_action(f"create GitHub repository: {name}")
+        import src.config
+        # Default to the org that owns GITHUB_REPO — org-scoped PATs cannot use
+        # /user/repos. Pass org="" to force personal-account creation. The org
+        # knob is not exposed through the github_integration skill schema, so
+        # LLM-driven calls always target the configured org.
+        if org is None and "/" in src.config.GITHUB_REPO:
+            org = src.config.GITHUB_REPO.split("/", 1)[0]
+        validate_action(f"create GitHub repository: {org or 'personal account'}/{name}")
         if not has_role(self.party_id, "contributor"):
             raise PermissionError("Creating repositories requires contributor role.")
+        path = f"/orgs/{org}/repos" if org else "/user/repos"
         return self._api(
             "POST",
-            "/user/repos",
+            path,
             {"name": name, "description": description, "private": private, "auto_init": True},
         )
 
