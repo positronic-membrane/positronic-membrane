@@ -272,15 +272,47 @@ def stage_skill(
 # Sibling registry sync
 # ---------------------------------------------------------------------------
 
+def _sync_result(
+    synced: list[str] | None = None,
+    failed: list[dict] | None = None,
+    fatal_error: str | None = None,
+) -> dict:
+    return {
+        "synced": synced or [],
+        "failed": failed or [],
+        "fatal_error": fatal_error,
+    }
+
+
+def format_sync_summary(result: dict) -> str:
+    """Render a sync_from_registry() result as a human-readable summary."""
+    if result["fatal_error"]:
+        return f"Sync FAILED before any skill was processed: {result['fatal_error']}"
+    lines = [f"Synced: {len(result['synced'])}  Failed: {len(result['failed'])}"]
+    if result["synced"]:
+        lines.append("Imported: " + ", ".join(result["synced"]))
+    if result["failed"]:
+        lines.append("Skipped:")
+        lines.extend(f"  - {f['skill_id']}: {f['reason']}" for f in result["failed"])
+    return "\n".join(lines)
+
+
 def sync_from_registry(
     repo_url: str | None = None,
     local_path: str | None = None,
-) -> tuple[int, int, list[str]]:
+) -> dict:
     """Clone (or pull) janus-skills-library and compile verified skills into agent_skills.
 
     Pass local_path to skip the git clone step (useful in tests).
 
-    Returns (synced_count, failed_count, error_messages).
+    Returns a structured result:
+      {"synced": [skill_id, ...],
+       "failed": [{"skill_id": ..., "reason": ...}, ...],
+       "fatal_error": None | str}
+
+    fatal_error is set when the sync could not run at all (git failure, missing or
+    unparseable registry.json) — distinct from per-skill failures, so callers can
+    tell "nothing to sync" apart from "sync never happened".
     """
     if local_path is not None:
         source_dir = Path(local_path)
@@ -316,25 +348,24 @@ def sync_from_registry(
                 )
         except subprocess.CalledProcessError as e:
             err = e.stderr or str(e)
-            return 0, 0, [f"git operation failed: {err}"]
+            return _sync_result(fatal_error=f"git operation failed: {err}")
         except subprocess.TimeoutExpired:
-            return 0, 0, ["git operation timed out"]
+            return _sync_result(fatal_error="git operation timed out")
 
         source_dir = cache_dir
 
     registry_path = source_dir / "registry.json"
     if not registry_path.exists():
-        return 0, 0, [f"registry.json not found in {source_dir}"]
+        return _sync_result(fatal_error=f"registry.json not found in {source_dir}")
 
     try:
         registry = json.loads(registry_path.read_text(encoding="utf-8"))
     except Exception as e:
-        return 0, 0, [f"Failed to parse registry.json: {e}"]
+        return _sync_result(fatal_error=f"Failed to parse registry.json: {e}")
 
     skills = registry.get("skills", [])
-    synced = 0
-    failed = 0
-    errors: list[str] = []
+    synced: list[str] = []
+    failed: list[dict] = []
 
     source_dir_resolved = source_dir.resolve()
 
@@ -342,18 +373,16 @@ def sync_from_registry(
         skill_id = descriptor.get("skill_id", "<unknown>")
         try:
             skill_file = (source_dir / descriptor["file"]).resolve()
-            if not str(skill_file).startswith(str(source_dir_resolved)):
-                failed += 1
-                errors.append(f"Skill '{skill_id}': file path escapes library root")
+            if not skill_file.is_relative_to(source_dir_resolved):
+                failed.append({"skill_id": skill_id, "reason": "file path escapes library root"})
                 continue
             code_blob = skill_file.read_text(encoding="utf-8")
 
             test_blob: str | None = None
             if descriptor.get("test_file"):
                 test_file = (source_dir / descriptor["test_file"]).resolve()
-                if not str(test_file).startswith(str(source_dir_resolved)):
-                    failed += 1
-                    errors.append(f"Skill '{skill_id}': test_file path escapes library root")
+                if not test_file.is_relative_to(source_dir_resolved):
+                    failed.append({"skill_id": skill_id, "reason": "test_file path escapes library root"})
                     continue
                 if test_file.exists():
                     test_blob = test_file.read_text(encoding="utf-8")
@@ -371,12 +400,10 @@ def sync_from_registry(
                 trigger_config=descriptor.get("trigger_config", "{}"),
             )
             if ok:
-                synced += 1
+                synced.append(skill_id)
             else:
-                failed += 1
-                errors.append(msg)
+                failed.append({"skill_id": skill_id, "reason": msg})
         except Exception as e:
-            failed += 1
-            errors.append(f"Error processing skill '{skill_id}': {e}")
+            failed.append({"skill_id": skill_id, "reason": f"Error processing skill: {e}"})
 
-    return synced, failed, errors
+    return _sync_result(synced=synced, failed=failed)

@@ -830,13 +830,10 @@ def check_presence():
 
     # Ensure sync_skill_library skill exists and is up to date
     _sync_skill_library_code = """def run(repo_url=None):
-    from src.skill_harness import sync_from_registry
-    synced, failed, errors = sync_from_registry(repo_url=repo_url)
-    lines = [f"Synced: {synced}  Failed: {failed}"]
-    if errors:
-        lines.append("Errors:")
-        lines.extend(f"  - {e}" for e in errors)
-    return {"synced": synced, "failed": failed, "errors": errors, "summary": "\\n".join(lines)}
+    from src.skill_harness import format_sync_summary, sync_from_registry
+    result = sync_from_registry(repo_url=repo_url)
+    result["summary"] = format_sync_summary(result)
+    return result
 """
     cursor.execute("""
     INSERT OR REPLACE INTO agent_skills (
@@ -858,17 +855,26 @@ def check_presence():
     if os.environ.get("JANUS_TEST_MODE") != "1":
         try:
             from src.skill_harness import sync_from_registry as _sync_skills
-            _synced, _failed, _errors = _sync_skills()
-            if _errors:
-                for _err in _errors:
-                    logger.warning("init_db: skill library sync error: %s", _err)
-            logger.info(
-                "init_db: skill library boot sync complete — synced=%d failed=%d",
-                _synced, _failed,
-            )
+            _result = _sync_skills()
+            if _result["fatal_error"]:
+                logger.error(
+                    "init_db: skill library sync did not run — operating with bootstrap "
+                    "skills only: %s",
+                    _result["fatal_error"],
+                )
+            else:
+                for _f in _result["failed"]:
+                    logger.warning(
+                        "init_db: skill '%s' failed to sync: %s",
+                        _f["skill_id"], _f["reason"],
+                    )
+                logger.info(
+                    "init_db: skill library boot sync complete — synced=%d failed=%d",
+                    len(_result["synced"]), len(_result["failed"]),
+                )
         except Exception as _exc:
-            logger.warning(
-                "init_db: skill library boot sync failed — operating with bootstrap skills only: %s",
+            logger.error(
+                "init_db: skill library boot sync crashed — operating with bootstrap skills only: %s",
                 _exc,
             )
 

@@ -307,11 +307,11 @@ def test_sync_from_registry_local_path_happy_path(tmp_path):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     with patch("src.skill_harness.config.get_effective_workspace_root", return_value=workspace):
-        synced, failed, errors = sync_from_registry(local_path=str(lib_dir))
+        result = sync_from_registry(local_path=str(lib_dir))
 
-    assert synced == 1, f"Expected 1 synced, errors: {errors}"
-    assert failed == 0
-    assert errors == []
+    assert result["synced"] == ["echo_message"], f"Expected echo_message synced, got: {result}"
+    assert result["failed"] == []
+    assert result["fatal_error"] is None
 
     with get_connection() as conn:
         row = conn.execute(
@@ -360,19 +360,90 @@ def test_sync_from_registry_partial_failure(tmp_path):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     with patch("src.skill_harness.config.get_effective_workspace_root", return_value=workspace):
-        synced, failed, errors = sync_from_registry(local_path=str(lib_dir))
+        result = sync_from_registry(local_path=str(lib_dir))
 
-    assert synced == 1
-    assert failed == 1
-    assert len(errors) == 1
-    assert "subprocess" in errors[0]
+    assert result["synced"] == ["good_skill"]
+    assert len(result["failed"]) == 1
+    assert result["failed"][0]["skill_id"] == "bad_skill"
+    assert "subprocess" in result["failed"][0]["reason"]
+    assert result["fatal_error"] is None
 
 
 def test_sync_from_registry_missing_registry_json(tmp_path):
     lib_dir = tmp_path / "empty_lib"
     lib_dir.mkdir()
 
-    synced, failed, errors = sync_from_registry(local_path=str(lib_dir))
-    assert synced == 0
-    assert failed == 0
-    assert any("registry.json" in e for e in errors)
+    result = sync_from_registry(local_path=str(lib_dir))
+    assert result["synced"] == []
+    assert result["failed"] == []
+    assert "registry.json" in result["fatal_error"]
+
+
+def test_sync_from_registry_blocks_sibling_prefix_escape(tmp_path):
+    """A file path resolving to a sibling dir sharing the root's name prefix is rejected."""
+    lib_dir = tmp_path / "lib"
+    (lib_dir / "skills").mkdir(parents=True)
+    evil_dir = tmp_path / "lib_evil"
+    evil_dir.mkdir()
+    (evil_dir / "evil.py").write_text("def run(sdk, args):\n    return {}", encoding="utf-8")
+
+    _make_local_registry(lib_dir, [{
+        "skill_id": "evil_skill",
+        "name": "Evil",
+        "description": "",
+        "parameters_schema": "{}",
+        "entry_point_function": "run",
+        "required_role": "contributor",
+        "trigger_type": "manual",
+        "trigger_config": "{}",
+        "file": "../lib_evil/evil.py",
+    }])
+
+    result = sync_from_registry(local_path=str(lib_dir))
+    assert result["synced"] == []
+    assert result["failed"][0]["skill_id"] == "evil_skill"
+    assert "escapes library root" in result["failed"][0]["reason"]
+
+
+def test_format_sync_summary_fatal():
+    from src.skill_harness import format_sync_summary
+    summary = format_sync_summary(
+        {"synced": [], "failed": [], "fatal_error": "git operation failed: x"}
+    )
+    assert summary == "Sync FAILED before any skill was processed: git operation failed: x"
+
+
+def test_format_sync_summary_mixed():
+    from src.skill_harness import format_sync_summary
+    summary = format_sync_summary({
+        "synced": ["a", "b"],
+        "failed": [{"skill_id": "c", "reason": "tests failed"}],
+        "fatal_error": None,
+    })
+    assert summary.splitlines() == [
+        "Synced: 2  Failed: 1",
+        "Imported: a, b",
+        "Skipped:",
+        "  - c: tests failed",
+    ]
+
+
+def test_sync_from_registry_git_failure_is_fatal(tmp_path, monkeypatch):
+    """A failing git step must surface as fatal_error, not as an empty success."""
+    import subprocess as sp
+
+    import src.skill_harness as harness
+
+    monkeypatch.setattr(harness.config, "ROOT_DIR", tmp_path)
+
+    def _failing_git(cmd, **kwargs):
+        raise sp.CalledProcessError(
+            128, cmd, stderr="fatal: detected dubious ownership in repository"
+        )
+
+    monkeypatch.setattr(harness.subprocess, "run", _failing_git)
+
+    result = sync_from_registry()
+    assert result["synced"] == []
+    assert result["failed"] == []
+    assert "dubious ownership" in result["fatal_error"]
