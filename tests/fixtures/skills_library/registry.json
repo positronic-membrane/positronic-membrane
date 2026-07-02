@@ -280,8 +280,8 @@
     {
       "skill_id": "github_integration",
       "name": "GitHub Integration",
-      "description": "Interact with GitHub: list/read/create/comment on issues and open PRs.",
-      "parameters_schema": "{\"type\": \"object\", \"properties\": {\"action\": {\"type\": \"string\", \"enum\": [\"list_open_issues\", \"get_issue\", \"create_issue\", \"add_comment\", \"close_issue\", \"create_pr\"]}, \"repo\": {\"type\": \"string\", \"description\": \"GitHub repo in owner/name format\"}, \"number\": {\"type\": \"integer\"}, \"title\": {\"type\": \"string\"}, \"body\": {\"type\": \"string\"}, \"labels\": {\"type\": \"array\", \"items\": {\"type\": \"string\"}}, \"head\": {\"type\": \"string\"}, \"base\": {\"type\": \"string\"}, \"label\": {\"type\": \"string\"}}, \"required\": [\"action\", \"repo\"]}",
+      "description": "Interact with GitHub: list/read/create/comment on issues, open PRs, and create org repos.",
+      "parameters_schema": "{\"type\": \"object\", \"properties\": {\"action\": {\"type\": \"string\", \"enum\": [\"list_open_issues\", \"get_issue\", \"create_issue\", \"add_comment\", \"close_issue\", \"create_pr\", \"create_repo\"]}, \"repo\": {\"type\": \"string\", \"description\": \"GitHub repo in owner/name format (required for all actions except create_repo)\"}, \"number\": {\"type\": \"integer\"}, \"title\": {\"type\": \"string\"}, \"body\": {\"type\": \"string\"}, \"labels\": {\"type\": \"array\", \"items\": {\"type\": \"string\"}}, \"head\": {\"type\": \"string\"}, \"base\": {\"type\": \"string\"}, \"label\": {\"type\": \"string\"}, \"name\": {\"type\": \"string\", \"description\": \"Repo name (create_repo; created in the configured org)\"}, \"private\": {\"type\": \"boolean\", \"description\": \"Create repo as private (default true)\"}}, \"required\": [\"action\"]}",
       "entry_point_function": "run",
       "required_role": "user",
       "trigger_type": "manual",

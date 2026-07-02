@@ -16,6 +16,6 @@ def run(action, repo=None, **kwargs):
         )
     if action == "create_repo":
         return gh.create_repo(
-            kwargs["name"], kwargs.get("description", ""), kwargs.get("private", False)
+            kwargs["name"], kwargs.get("description", ""), kwargs.get("private", True)
         )
     return {"error": f"Unknown action: {action}"}

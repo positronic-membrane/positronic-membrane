@@ -254,17 +254,48 @@ def test_access_token_used_when_pm_token_absent(monkeypatch):
 # create_repo
 # ---------------------------------------------------------------------------
 
-def test_create_repo_posts_to_user_repos():
+def test_create_repo_defaults_to_org_from_config(monkeypatch):
+    monkeypatch.setattr("src.config.GITHUB_REPO", "some-org/some-repo")
     gh = SafeGitHub(party_id="system")
-    with patch("urllib.request.urlopen", return_value=_urlopen_ctx({"name": "new-repo", "full_name": "pm/new-repo"})) as mock_open:
-        result = gh.create_repo("new-repo", description="A test repo", private=False)
+    with patch("urllib.request.urlopen", return_value=_urlopen_ctx({"name": "new-repo", "full_name": "some-org/new-repo"})) as mock_open:
+        result = gh.create_repo("new-repo", description="A test repo")
     req = mock_open.call_args[0][0]
-    assert req.full_url == "https://api.github.com/user/repos"
+    assert req.full_url == "https://api.github.com/orgs/some-org/repos"
     assert req.method == "POST"
     payload = json.loads(req.data)
     assert payload["name"] == "new-repo"
+    assert payload["private"] is True
     assert payload["auto_init"] is True
-    assert result["full_name"] == "pm/new-repo"
+    assert result["full_name"] == "some-org/new-repo"
+
+
+def test_create_repo_explicit_org_overrides_config(monkeypatch):
+    monkeypatch.setattr("src.config.GITHUB_REPO", "some-org/some-repo")
+    gh = SafeGitHub(party_id="system")
+    with patch("urllib.request.urlopen", return_value=_urlopen_ctx({"full_name": "other-org/new-repo"})) as mock_open:
+        gh.create_repo("new-repo", org="other-org")
+    req = mock_open.call_args[0][0]
+    assert req.full_url == "https://api.github.com/orgs/other-org/repos"
+
+
+def test_create_repo_falls_back_to_user_repos_without_org(monkeypatch):
+    monkeypatch.setattr("src.config.GITHUB_REPO", "")
+    gh = SafeGitHub(party_id="system")
+    with patch("urllib.request.urlopen", return_value=_urlopen_ctx({"full_name": "pm/new-repo"})) as mock_open:
+        gh.create_repo("new-repo", private=False)
+    req = mock_open.call_args[0][0]
+    assert req.full_url == "https://api.github.com/user/repos"
+    payload = json.loads(req.data)
+    assert payload["private"] is False
+
+
+def test_create_repo_empty_org_forces_user_repos(monkeypatch):
+    monkeypatch.setattr("src.config.GITHUB_REPO", "some-org/some-repo")
+    gh = SafeGitHub(party_id="system")
+    with patch("urllib.request.urlopen", return_value=_urlopen_ctx({"full_name": "pm/new-repo"})) as mock_open:
+        gh.create_repo("new-repo", org="")
+    req = mock_open.call_args[0][0]
+    assert req.full_url == "https://api.github.com/user/repos"
 
 
 def test_create_repo_blocked_for_user_role():
