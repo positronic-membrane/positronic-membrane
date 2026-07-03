@@ -5,6 +5,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from src.database import get_connection
+from src.middleware import SafetyViolationError
 from src.skills import SafeGitHub
 
 REPO = "owner/repo"
@@ -113,6 +114,32 @@ def test_update_issue_requires_at_least_one_field():
     gh = SafeGitHub(party_id="system")
     with pytest.raises(ValueError, match="at least one"):
         gh.update_issue(REPO, 8)
+
+
+def test_update_issue_rejects_non_integer_number():
+    gh = SafeGitHub(party_id="system")
+    with pytest.raises(ValueError):
+        gh.update_issue(REPO, "8/lock", title="x")
+
+
+def test_update_issue_scans_new_content_for_banned_boundaries():
+    gh = SafeGitHub(party_id="system")
+    with pytest.raises(SafetyViolationError):
+        gh.update_issue(REPO, 8, body="check out https://tiktok.com/@x")
+
+
+def test_create_label_scans_description_for_banned_boundaries():
+    gh = SafeGitHub(party_id="system")
+    with pytest.raises(SafetyViolationError):
+        gh.create_label(REPO, "ok-name", description="see facebook.com/page")
+
+
+def test_create_label_none_color_falls_back_to_default():
+    gh = SafeGitHub(party_id="system")
+    with patch("urllib.request.urlopen", return_value=_urlopen_ctx({"name": "t"})) as mock_open:
+        gh.create_label(REPO, "t", color=None)
+    payload = json.loads(mock_open.call_args[0][0].data)
+    assert payload["color"] == "ededed"
 
 
 def test_create_label_posts_to_correct_endpoint():

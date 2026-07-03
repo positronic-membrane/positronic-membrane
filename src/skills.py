@@ -1587,8 +1587,12 @@ class SafeGitHub:
         labels: Optional[list] = None,
         state: Optional[str] = None,
     ) -> dict:
-        validate_action(f"update GitHub issue {repo}#{number}")
-        # Same gate as close_issue — state="closed" here is equivalent to closing.
+        number = int(number)
+        # Scan the full replacement content — an edit must not be able to publish
+        # text that create_issue/add_comment would have blocked at creation.
+        content = " ".join(str(v) for v in (title, body, labels) if v is not None)
+        validate_action(f"update GitHub issue {repo}#{number}: {content}")
+        # Contributor gate: state="closed" is equivalent to closing the issue.
         if not has_role(self.party_id, "contributor"):
             raise PermissionError("Updating issues requires contributor role.")
         payload: dict = {}
@@ -1609,17 +1613,15 @@ class SafeGitHub:
     def create_label(
         self, repo: str, name: str, color: str = "ededed", description: str = ""
     ) -> dict:
-        validate_action(f"create GitHub label on {repo}: {name}")
+        validate_action(f"create GitHub label on {repo}: {name} {description}")
         if not has_role(self.party_id, "contributor"):
             raise PermissionError("Creating labels requires contributor role.")
-        payload = {"name": name, "color": color.lstrip("#"), "description": description}
+        # `or` guard: skill kwargs come from LLM JSON, so color may arrive as None.
+        payload = {"name": name, "color": (color or "ededed").lstrip("#"), "description": description}
         return self._api("POST", f"/repos/{repo}/labels", payload, repo=repo)
 
     def close_issue(self, repo: str, number: int) -> dict:
-        validate_action(f"close GitHub issue {repo}#{number}")
-        if not has_role(self.party_id, "contributor"):
-            raise PermissionError("Closing issues requires contributor role.")
-        return self._api("PATCH", f"/repos/{repo}/issues/{number}", {"state": "closed"}, repo=repo)
+        return self.update_issue(repo, number, state="closed")
 
     def create_pr(
         self, repo: str, title: str, body: str, head: str, base: str = "main"
