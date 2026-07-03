@@ -1578,11 +1578,50 @@ class SafeGitHub:
             "POST", f"/repos/{repo}/issues/{number}/comments", {"body": body}, repo=repo
         )
 
-    def close_issue(self, repo: str, number: int) -> dict:
-        validate_action(f"close GitHub issue {repo}#{number}")
+    def update_issue(
+        self,
+        repo: str,
+        number: int,
+        title: Optional[str] = None,
+        body: Optional[str] = None,
+        labels: Optional[list] = None,
+        state: Optional[str] = None,
+    ) -> dict:
+        number = int(number)
+        # Scan the full replacement content — an edit must not be able to publish
+        # text that create_issue/add_comment would have blocked at creation.
+        content = " ".join(str(v) for v in (title, body, labels) if v is not None)
+        validate_action(f"update GitHub issue {repo}#{number}: {content}")
+        # Contributor gate: state="closed" is equivalent to closing the issue.
         if not has_role(self.party_id, "contributor"):
-            raise PermissionError("Closing issues requires contributor role.")
-        return self._api("PATCH", f"/repos/{repo}/issues/{number}", {"state": "closed"}, repo=repo)
+            raise PermissionError("Updating issues requires contributor role.")
+        payload: dict = {}
+        if title is not None:
+            payload["title"] = title
+        if body is not None:
+            payload["body"] = body
+        if labels is not None:
+            payload["labels"] = labels
+        if state is not None:
+            if state not in ("open", "closed"):
+                raise ValueError(f"Invalid issue state '{state}': must be 'open' or 'closed'.")
+            payload["state"] = state
+        if not payload:
+            raise ValueError("update_issue requires at least one of: title, body, labels, state.")
+        return self._api("PATCH", f"/repos/{repo}/issues/{number}", payload, repo=repo)
+
+    def create_label(
+        self, repo: str, name: str, color: str = "ededed", description: str = ""
+    ) -> dict:
+        validate_action(f"create GitHub label on {repo}: {name} {description}")
+        if not has_role(self.party_id, "contributor"):
+            raise PermissionError("Creating labels requires contributor role.")
+        # `or` guard: skill kwargs come from LLM JSON, so color may arrive as None.
+        payload = {"name": name, "color": (color or "ededed").lstrip("#"), "description": description}
+        return self._api("POST", f"/repos/{repo}/labels", payload, repo=repo)
+
+    def close_issue(self, repo: str, number: int) -> dict:
+        return self.update_issue(repo, number, state="closed")
 
     def create_pr(
         self, repo: str, title: str, body: str, head: str, base: str = "main"
