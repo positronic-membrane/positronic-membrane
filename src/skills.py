@@ -1536,7 +1536,14 @@ class SafeGitHub:
             with urllib.request.urlopen(req, timeout=15) as resp:
                 raw = resp.read().decode()
         except urllib.error.HTTPError as e:
-            raise RuntimeError(f"GitHub API error {e.code} for {method} {path}: {e.reason}") from e
+            try:
+                detail = e.read(500).decode(errors="replace")
+            except Exception:
+                detail = ""
+            msg = f"GitHub API error {e.code} for {method} {path}: {e.reason}"
+            if detail:
+                msg += f" — {detail}"
+            raise RuntimeError(msg) from e
         except urllib.error.URLError as e:
             raise RuntimeError(f"GitHub API unreachable: {e.reason}") from e
         try:

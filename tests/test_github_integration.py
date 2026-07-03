@@ -217,6 +217,45 @@ def test_missing_token_raises(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# HTTP error surfacing
+# ---------------------------------------------------------------------------
+
+def _http_error(code, reason, body):
+    import io
+    import urllib.error
+    return urllib.error.HTTPError(
+        url="https://api.github.com/x", code=code, msg=reason, hdrs=None,
+        fp=io.BytesIO(body),
+    )
+
+
+def test_http_error_includes_response_body():
+    gh = SafeGitHub(party_id="system")
+    err = _http_error(403, "Forbidden", b'{"message": "Resource not accessible by personal access token"}')
+    with patch("urllib.request.urlopen", side_effect=err):
+        with pytest.raises(RuntimeError, match="Resource not accessible"):
+            gh.create_issue(REPO, "New bug")
+
+
+def test_http_error_body_truncated_to_500_chars():
+    gh = SafeGitHub(party_id="system")
+    err = _http_error(422, "Unprocessable Entity", b"x" * 2000)
+    with patch("urllib.request.urlopen", side_effect=err):
+        with pytest.raises(RuntimeError) as exc_info:
+            gh.get_issue(REPO, 1)
+    assert "x" * 500 in str(exc_info.value)
+    assert "x" * 501 not in str(exc_info.value)
+
+
+def test_http_error_without_body_still_raises():
+    gh = SafeGitHub(party_id="system")
+    err = _http_error(404, "Not Found", b"")
+    with patch("urllib.request.urlopen", side_effect=err):
+        with pytest.raises(RuntimeError, match="GitHub API error 404 .* Not Found$"):
+            gh.get_issue(REPO, 1)
+
+
+# ---------------------------------------------------------------------------
 # Token routing
 # ---------------------------------------------------------------------------
 
