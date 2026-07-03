@@ -83,6 +83,50 @@ def test_create_pr_posts_to_correct_endpoint():
     assert result["number"] == 10
 
 
+def test_update_issue_patches_only_provided_fields():
+    gh = SafeGitHub(party_id="system")
+    with patch("urllib.request.urlopen", return_value=_urlopen_ctx({"number": 8})) as mock_open:
+        result = gh.update_issue(REPO, 8, title="New title", labels=["bug"])
+    req = mock_open.call_args[0][0]
+    assert req.full_url == f"https://api.github.com/repos/{REPO}/issues/8"
+    assert req.method == "PATCH"
+    payload = json.loads(req.data)
+    assert payload == {"title": "New title", "labels": ["bug"]}
+    assert result["number"] == 8
+
+
+def test_update_issue_accepts_state_change():
+    gh = SafeGitHub(party_id="system")
+    with patch("urllib.request.urlopen", return_value=_urlopen_ctx({"state": "closed"})) as mock_open:
+        gh.update_issue(REPO, 8, state="closed")
+    payload = json.loads(mock_open.call_args[0][0].data)
+    assert payload == {"state": "closed"}
+
+
+def test_update_issue_rejects_invalid_state():
+    gh = SafeGitHub(party_id="system")
+    with pytest.raises(ValueError, match="open"):
+        gh.update_issue(REPO, 8, state="reopened")
+
+
+def test_update_issue_requires_at_least_one_field():
+    gh = SafeGitHub(party_id="system")
+    with pytest.raises(ValueError, match="at least one"):
+        gh.update_issue(REPO, 8)
+
+
+def test_create_label_posts_to_correct_endpoint():
+    gh = SafeGitHub(party_id="system")
+    with patch("urllib.request.urlopen", return_value=_urlopen_ctx({"name": "triage"})) as mock_open:
+        result = gh.create_label(REPO, "triage", color="#ff0000", description="Needs triage")
+    req = mock_open.call_args[0][0]
+    assert req.full_url == f"https://api.github.com/repos/{REPO}/labels"
+    assert req.method == "POST"
+    payload = json.loads(req.data)
+    assert payload == {"name": "triage", "color": "ff0000", "description": "Needs triage"}
+    assert result["name"] == "triage"
+
+
 # ---------------------------------------------------------------------------
 # Role enforcement
 # ---------------------------------------------------------------------------
@@ -117,6 +161,30 @@ def test_create_pr_blocked_for_user_role():
     gh = SafeGitHub(party_id="u_pr")
     with pytest.raises(PermissionError, match="contributor"):
         gh.create_pr(REPO, "My PR", "body", "feature-branch")
+
+
+def test_update_issue_blocked_for_user_role():
+    conn = get_connection()
+    try:
+        _insert_party(conn, "u_update", "user")
+    finally:
+        conn.close()
+
+    gh = SafeGitHub(party_id="u_update")
+    with pytest.raises(PermissionError, match="contributor"):
+        gh.update_issue(REPO, 8, title="hijacked")
+
+
+def test_create_label_blocked_for_user_role():
+    conn = get_connection()
+    try:
+        _insert_party(conn, "u_label", "user")
+    finally:
+        conn.close()
+
+    gh = SafeGitHub(party_id="u_label")
+    with pytest.raises(PermissionError, match="contributor"):
+        gh.create_label(REPO, "triage")
 
 
 def test_close_issue_allowed_for_contributor():
