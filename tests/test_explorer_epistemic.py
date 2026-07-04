@@ -2,6 +2,8 @@
 
 All LLM and pipeline calls are mocked at the call site
 (src.explorer.query_agent / src.explorer.run_epistemic_pipeline), per GEMINI.md.
+The conftest _no_live_neo4j fixture blanks NEO4J_URI globally; tests that
+exercise ingestion re-enable it via the neo4j_configured fixture here.
 """
 import json
 from unittest.mock import MagicMock, patch
@@ -9,7 +11,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 import src.config
-from src.database import get_connection
+from src.database import get_connection, set_system_config_value
 from src.explorer import (
     extract_candidate_facts,
     get_max_facts_per_cycle,
@@ -18,11 +20,15 @@ from src.explorer import (
 from src.skills import SafeExplorer
 
 
-def _set_cap(value: str):
+def _set_cap(key: str, value: str):
+    set_system_config_value(key, value, is_agent=False)
+
+
+def _stage_fact(fact_text: str, source: str = "web_search"):
     with get_connection() as conn:
         conn.execute(
-            "UPDATE system_config SET config_value = ? WHERE config_key = 'epistemic.max_facts_per_cycle';",
-            (value,),
+            "INSERT INTO janus_sandbox_facts (fact_text, source, status) VALUES (?, ?, 'pending');",
+            (fact_text, source),
         )
         conn.commit()
 
@@ -30,11 +36,7 @@ def _set_cap(value: str):
 @pytest.fixture
 def neo4j_configured(monkeypatch):
     monkeypatch.setattr(src.config, "NEO4J_URI", "bolt://localhost:7687")
-
-
-@pytest.fixture
-def neo4j_unconfigured(monkeypatch):
-    monkeypatch.setattr(src.config, "NEO4J_URI", "")
+    monkeypatch.setattr("src.explorer.neo4j_available", lambda: True)
 
 
 # ---------------------------------------------------------------------------
@@ -50,6 +52,13 @@ def test_extract_parses_json_array():
 
 def test_extract_tolerates_code_fences():
     raw = '```json\n["Fact one."]\n```'
+    with patch("src.explorer.query_agent", return_value=raw):
+        facts = extract_candidate_facts("content", max_facts=3)
+    assert facts == ["Fact one."]
+
+
+def test_extract_tolerates_bracketed_prose_around_array():
+    raw = 'Here are the facts [as requested]: ["Fact one."] Hope that helps [ok].'
     with patch("src.explorer.query_agent", return_value=raw):
         facts = extract_candidate_facts("content", max_facts=3)
     assert facts == ["Fact one."]
@@ -80,23 +89,25 @@ def test_extract_empty_content_skips_llm_call():
 
 
 # ---------------------------------------------------------------------------
-# Volume / budget guard
+# Volume / budget guards
 # ---------------------------------------------------------------------------
 
-def test_default_cap_seeded_and_not_agent_modifiable():
+def test_default_caps_seeded_and_not_agent_modifiable():
     with get_connection() as conn:
-        row = conn.execute(
-            "SELECT config_value, is_agent_modifiable FROM system_config "
-            "WHERE config_key = 'epistemic.max_facts_per_cycle';"
-        ).fetchone()
-    assert row is not None
-    assert row[0] == "3"
-    assert row[1] == 0
+        rows = conn.execute(
+            "SELECT config_key, config_value, is_agent_modifiable FROM system_config "
+            "WHERE config_key IN ('epistemic.max_facts_per_cycle', 'epistemic.max_facts_per_day') "
+            "ORDER BY config_key;"
+        ).fetchall()
+    assert [(r[0], r[1], r[2]) for r in rows] == [
+        ("epistemic.max_facts_per_cycle", "3", 0),
+        ("epistemic.max_facts_per_day", "25", 0),
+    ]
     assert get_max_facts_per_cycle() == 3
 
 
-def test_cap_limits_pipeline_calls(neo4j_configured):
-    _set_cap("1")
+def test_cycle_cap_limits_pipeline_calls(neo4j_configured):
+    _set_cap("epistemic.max_facts_per_cycle", "1")
     raw = json.dumps(["Fact 1.", "Fact 2.", "Fact 3."])
     with patch("src.explorer.query_agent", return_value=raw), \
          patch("src.explorer.run_epistemic_pipeline",
@@ -107,22 +118,55 @@ def test_cap_limits_pipeline_calls(neo4j_configured):
 
 
 def test_cap_zero_disables_ingestion(neo4j_configured):
-    _set_cap("0")
+    _set_cap("epistemic.max_facts_per_cycle", "0")
     with patch("src.explorer.query_agent") as mock_qa:
         summary = ingest_discoveries("content", source="web_search")
     mock_qa.assert_not_called()
     assert summary["skipped"] == "ingestion_disabled"
 
 
+def test_daily_cap_skips_ingestion_before_llm_call(neo4j_configured):
+    _set_cap("epistemic.max_facts_per_day", "2")
+    _stage_fact("Old fact 1.")
+    _stage_fact("Old fact 2.")
+    with patch("src.explorer.query_agent") as mock_qa:
+        summary = ingest_discoveries("content", source="web_search")
+    mock_qa.assert_not_called()
+    assert summary["skipped"] == "daily_cap_reached"
+
+
+def test_daily_headroom_shrinks_cycle_cap(neo4j_configured):
+    _set_cap("epistemic.max_facts_per_day", "2")
+    _stage_fact("Old fact 1.")
+    raw = json.dumps(["Fact A.", "Fact B.", "Fact C."])
+    with patch("src.explorer.query_agent", return_value=raw), \
+         patch("src.explorer.run_epistemic_pipeline",
+               return_value={"row_id": 1, "outcome": "assimilated"}) as mock_pipe:
+        summary = ingest_discoveries("content", source="web_search")
+    # Only 1 slot of daily headroom left despite per-cycle cap of 3
+    assert mock_pipe.call_count == 1
+    assert summary["extracted"] == 1
+
+
 # ---------------------------------------------------------------------------
-# Ingestion wiring
+# Ingestion wiring, failure isolation, dedupe, middleware
 # ---------------------------------------------------------------------------
 
-def test_ingest_skipped_when_neo4j_not_configured(neo4j_unconfigured):
+def test_ingest_skipped_when_neo4j_not_configured():
+    # conftest blanks NEO4J_URI globally
     with patch("src.explorer.query_agent") as mock_qa:
         summary = ingest_discoveries("content", source="web_search")
     mock_qa.assert_not_called()
     assert summary["skipped"] == "neo4j_not_configured"
+
+
+def test_ingest_skipped_when_neo4j_unreachable(monkeypatch):
+    monkeypatch.setattr(src.config, "NEO4J_URI", "bolt://localhost:7687")
+    monkeypatch.setattr("src.explorer.neo4j_available", lambda: False)
+    with patch("src.explorer.query_agent") as mock_qa:
+        summary = ingest_discoveries("content", source="web_search")
+    mock_qa.assert_not_called()
+    assert summary["skipped"] == "neo4j_unreachable"
 
 
 def test_ingest_runs_pipeline_per_fact_with_source_context(neo4j_configured):
@@ -142,9 +186,9 @@ def test_ingest_runs_pipeline_per_fact_with_source_context(neo4j_configured):
         assert call.kwargs["source"] == "web_fetch"
         assert call.kwargs["source_url"] == "https://example.com/page"
         assert call.kwargs["raw_metadata"] == {"query": "test"}
-    assert summary == {
-        "extracted": 2, "assimilated": 2, "rejected": 0, "failed": 0, "row_ids": [7, 7],
-    }
+    assert summary["extracted"] == 2
+    assert summary["assimilated"] == 2
+    assert summary["row_ids"] == [7, 7]
 
 
 def test_ingest_counts_rejected_outcomes(neo4j_configured):
@@ -157,11 +201,42 @@ def test_ingest_counts_rejected_outcomes(neo4j_configured):
     assert summary["assimilated"] == 0
 
 
+def test_ingest_dedupes_already_staged_facts(neo4j_configured):
+    _stage_fact("Fact A.")
+    raw = json.dumps(["Fact A.", "Fact B."])
+    with patch("src.explorer.query_agent", return_value=raw), \
+         patch("src.explorer.run_epistemic_pipeline",
+               return_value={"row_id": 9, "outcome": "assimilated"}) as mock_pipe:
+        summary = ingest_discoveries("content", source="web_search")
+    assert mock_pipe.call_count == 1
+    assert mock_pipe.call_args.args[0] == "Fact B."
+    assert summary["duplicates"] == 1
+    assert summary["assimilated"] == 1
+
+
+def test_ingest_blocks_banned_content_via_middleware(neo4j_configured):
+    raw = json.dumps(["Legit fact.", "Blocked fact."])
+
+    def fake_validate(text):
+        if "Blocked" in text:
+            raise ValueError("banned boundary")
+
+    with patch("src.explorer.query_agent", return_value=raw), \
+         patch("src.explorer.validate_action", side_effect=fake_validate), \
+         patch("src.explorer.run_epistemic_pipeline",
+               return_value={"row_id": 4, "outcome": "assimilated"}) as mock_pipe:
+        summary = ingest_discoveries("content", source="web_search")
+
+    assert mock_pipe.call_count == 1
+    assert mock_pipe.call_args.args[0] == "Legit fact."
+    assert summary["blocked"] == 1
+
+
 def test_pipeline_failure_does_not_abort_remaining_facts(neo4j_configured):
     raw = json.dumps(["Fact A.", "Fact B."])
     with patch("src.explorer.query_agent", return_value=raw), \
          patch("src.explorer.run_epistemic_pipeline",
-               side_effect=RuntimeError("Neo4j unreachable")) as mock_pipe:
+               side_effect=RuntimeError("Neo4j dropped mid-pipeline")) as mock_pipe:
         summary = ingest_discoveries("content", source="web_search")
 
     # Both facts attempted, neither raised out of ingest_discoveries
@@ -172,8 +247,9 @@ def test_pipeline_failure_does_not_abort_remaining_facts(neo4j_configured):
 def test_extraction_failure_is_isolated(neo4j_configured):
     with patch("src.explorer.query_agent", side_effect=RuntimeError("LLM down")):
         summary = ingest_discoveries("content", source="web_search")
-    assert summary["failed"] == 1
+    assert "error" in summary
     assert summary["extracted"] == 0
+    assert summary["failed"] == 0
 
 
 # ---------------------------------------------------------------------------
@@ -186,10 +262,10 @@ _SEARCH_RESULTS = [
 ]
 
 
-def test_safe_explorer_search_ingests_results():
+def test_safe_explorer_search_ingests_for_system_party():
     with patch("src.skills.search_web", return_value=_SEARCH_RESULTS), \
          patch("src.skills.ingest_discoveries") as mock_ingest:
-        results = SafeExplorer().search("test query")
+        results = SafeExplorer(party_id="system").search("test query")
 
     assert results == _SEARCH_RESULTS
     mock_ingest.assert_called_once()
@@ -200,17 +276,27 @@ def test_safe_explorer_search_ingests_results():
     assert call.kwargs["raw_metadata"]["result_urls"] == ["https://a.example", "https://b.example"]
 
 
+def test_safe_explorer_skips_ingestion_for_chat_parties():
+    with patch("src.skills.search_web", return_value=_SEARCH_RESULTS), \
+         patch("src.skills.fetch_webpage", return_value="page text"), \
+         patch("src.skills.ingest_discoveries") as mock_ingest:
+        assert SafeExplorer(party_id="local_user").search("q") == _SEARCH_RESULTS
+        assert SafeExplorer(party_id="local_user").fetch("https://x.example") == "page text"
+        assert SafeExplorer().search("q") == _SEARCH_RESULTS
+    mock_ingest.assert_not_called()
+
+
 def test_safe_explorer_search_no_results_skips_ingestion():
     with patch("src.skills.search_web", return_value=[]), \
          patch("src.skills.ingest_discoveries") as mock_ingest:
-        assert SafeExplorer().search("test query") == []
+        assert SafeExplorer(party_id="system").search("test query") == []
     mock_ingest.assert_not_called()
 
 
 def test_safe_explorer_fetch_ingests_page():
     with patch("src.skills.fetch_webpage", return_value="page text"), \
          patch("src.skills.ingest_discoveries") as mock_ingest:
-        content = SafeExplorer().fetch("https://example.com/doc")
+        content = SafeExplorer(party_id="system").fetch("https://example.com/doc")
 
     assert content == "page text"
     mock_ingest.assert_called_once()
@@ -218,13 +304,6 @@ def test_safe_explorer_fetch_ingests_page():
     assert call.args[0] == "page text"
     assert call.kwargs["source"] == "web_fetch"
     assert call.kwargs["source_url"] == "https://example.com/doc"
-
-
-def test_safe_explorer_ingestion_failure_does_not_break_exploration():
-    with patch("src.skills.search_web", return_value=_SEARCH_RESULTS), \
-         patch("src.skills.ingest_discoveries", side_effect=RuntimeError("boom")):
-        results = SafeExplorer().search("test query")
-    assert results == _SEARCH_RESULTS
 
 
 # ---------------------------------------------------------------------------

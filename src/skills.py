@@ -43,12 +43,21 @@ from src.llm import query_agent
 logger = logging.getLogger("JanusSkills")
 
 class SafeExplorer:
-    """Safe search and URL fetching wrapper for dynamic skills."""
+    """Safe search and URL fetching wrapper for dynamic skills.
+
+    Discoveries made by the autonomous swarm (party 'system': reflection cycle,
+    interval skills) are routed into the epistemic pipeline; skill calls on
+    behalf of chat parties skip ingestion so interactive turns don't block on
+    the extra LLM calls or spend their budget. ingest_discoveries never raises.
+    """
+    def __init__(self, party_id: Optional[str] = None):
+        self.party_id = party_id
+
     def search(self, query: str) -> list:
         results = search_web(query)
-        if results:
+        if results and self.party_id == "system":
             content = "\n".join(f"{r['title']}: {r['snippet']}" for r in results)
-            self._ingest(
+            ingest_discoveries(
                 content,
                 source="web_search",
                 raw_metadata={"query": query, "result_urls": [r["url"] for r in results]},
@@ -57,15 +66,9 @@ class SafeExplorer:
 
     def fetch(self, url: str) -> str:
         content = fetch_webpage(url)
-        self._ingest(content, source="web_fetch", source_url=url)
+        if self.party_id == "system":
+            ingest_discoveries(content, source="web_fetch", source_url=url)
         return content
-
-    def _ingest(self, content: str, source: str, source_url: str = None, raw_metadata: dict = None):
-        """Route discoveries into the epistemic pipeline; never let it break exploration."""
-        try:
-            ingest_discoveries(content, source=source, source_url=source_url, raw_metadata=raw_metadata)
-        except Exception as e:
-            logger.error(f"Epistemic ingestion hook failed (source={source}): {e}")
 
 class SafeCodebase:
     """Safe codebase query and indexing wrapper for dynamic skills."""
@@ -1739,7 +1742,7 @@ class DynamicSkillExecutor:
             "layered_cognition": SafeLayeredCognition(),
             "agent_orchestration": SafeAgentOrchestration(),
             "replication": SafeReplication(),
-            "explorer": SafeExplorer(),
+            "explorer": SafeExplorer(party_id),
             "codebase": SafeCodebase(),
             "sandbox": SafeSandbox(),
             "github": SafeGitHub(party_id),

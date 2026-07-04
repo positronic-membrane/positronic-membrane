@@ -63,6 +63,18 @@ def close_driver():
         _driver = None
 
 
+def neo4j_available() -> bool:
+    """Cheap reachability probe — lets callers skip LLM spend when the graph
+    store is down (e.g. a paused Aura Free instance) instead of staging facts
+    that can only fail at Phase 2."""
+    try:
+        _get_driver().verify_connectivity()
+        return True
+    except Exception as e:
+        logger.warning(f"Neo4j unreachable: {e}")
+        return False
+
+
 # ---------------------------------------------------------------------------
 # Neo4jKnowledgeStore
 # ---------------------------------------------------------------------------
