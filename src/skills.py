@@ -18,7 +18,7 @@ from src.sandbox_session import (
 from openai import OpenAI
 
 # Decoupled SDK backend library dependencies
-from src.explorer import search_web, fetch_webpage
+from src.explorer import search_web, fetch_webpage, ingest_discoveries
 from src.notifications import send_webhook_notification
 from src.codebase import query_codebase_context, index_codebase
 from src.sandbox import execute_code_safely
@@ -43,12 +43,32 @@ from src.llm import query_agent
 logger = logging.getLogger("JanusSkills")
 
 class SafeExplorer:
-    """Safe search and URL fetching wrapper for dynamic skills."""
+    """Safe search and URL fetching wrapper for dynamic skills.
+
+    Discoveries made by the autonomous swarm (party 'system': reflection cycle,
+    interval skills) are routed into the epistemic pipeline; skill calls on
+    behalf of chat parties skip ingestion so interactive turns don't block on
+    the extra LLM calls or spend their budget. ingest_discoveries never raises.
+    """
+    def __init__(self, party_id: Optional[str] = None):
+        self.party_id = party_id
+
     def search(self, query: str) -> list:
-        return search_web(query)
+        results = search_web(query)
+        if results and self.party_id == "system":
+            content = "\n".join(f"{r['title']}: {r['snippet']}" for r in results)
+            ingest_discoveries(
+                content,
+                source="web_search",
+                raw_metadata={"query": query, "result_urls": [r["url"] for r in results]},
+            )
+        return results
 
     def fetch(self, url: str) -> str:
-        return fetch_webpage(url)
+        content = fetch_webpage(url)
+        if self.party_id == "system":
+            ingest_discoveries(content, source="web_fetch", source_url=url)
+        return content
 
 class SafeCodebase:
     """Safe codebase query and indexing wrapper for dynamic skills."""
@@ -1722,7 +1742,7 @@ class DynamicSkillExecutor:
             "layered_cognition": SafeLayeredCognition(),
             "agent_orchestration": SafeAgentOrchestration(),
             "replication": SafeReplication(),
-            "explorer": SafeExplorer(),
+            "explorer": SafeExplorer(party_id),
             "codebase": SafeCodebase(),
             "sandbox": SafeSandbox(),
             "github": SafeGitHub(party_id),

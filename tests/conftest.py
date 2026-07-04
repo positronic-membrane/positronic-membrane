@@ -69,6 +69,15 @@ def setup_test_db(tmp_path):
 
 
 @pytest.fixture(autouse=True)
+def _no_live_neo4j(monkeypatch):
+    """Blank NEO4J_URI for every test so the suite never reaches a live Neo4j
+    instance (or spends LLM budget) through the epistemic ingestion hooks —
+    the developer's .env may configure a real Aura endpoint. Tests exercising
+    ingestion re-set src.config.NEO4J_URI themselves and mock the pipeline."""
+    monkeypatch.setattr(src.config, "NEO4J_URI", "")
+
+
+@pytest.fixture(autouse=True)
 def _seed_test_skills(setup_test_db):
     """Seed library skills into the test DB after the schema is initialised.
 

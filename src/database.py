@@ -725,6 +725,12 @@ def init_db():
         ("dispute_paused", "false", 0),
         ("github.rate_limit_window_start", "", 0),
         ("github.api_calls_this_hour", "0", 0),
+        # Budget guards for autonomous epistemic ingestion (issue #74): phases 2-3
+        # cost an LLM call per fact. Per-cycle caps one exploration action; per-day
+        # is a rolling 24h cap across all actions. Not agent-modifiable so the
+        # swarm cannot raise its own spending cap. 0 disables ingestion.
+        ("epistemic.max_facts_per_cycle", "3", 0),
+        ("epistemic.max_facts_per_day", "25", 0),
     ]
     for key, value, modifiable in default_configs:
         cursor.execute("""
