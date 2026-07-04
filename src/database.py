@@ -731,6 +731,11 @@ def init_db():
         # swarm cannot raise its own spending cap. 0 disables ingestion.
         ("epistemic.max_facts_per_cycle", "3", 0),
         ("epistemic.max_facts_per_day", "25", 0),
+        # Budget guard for subconscious goal proposal generation (issue #75): the
+        # propose_goals skill skips generation while this many proposals are pending
+        # human review. Not agent-modifiable so the swarm cannot widen its own
+        # proposal queue. 0 disables generation.
+        ("goal_proposal.max_open_proposals", "3", 0),
     ]
     for key, value, modifiable in default_configs:
         cursor.execute("""

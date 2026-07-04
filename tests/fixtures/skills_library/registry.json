@@ -146,6 +146,18 @@
       "test_file": "skills/test_evaluate_goals.py"
     },
     {
+      "skill_id": "propose_goals",
+      "name": "Propose Goals",
+      "description": "Generates subconscious goal proposals from active curiosity context when the boredom threshold fires; proposals await human ratification via /goal approve|reject.",
+      "parameters_schema": "{\"type\": \"object\", \"properties\": {}}",
+      "entry_point_function": "propose_goals",
+      "required_role": "contributor",
+      "trigger_type": "manual",
+      "trigger_config": "{}",
+      "file": "skills/propose_goals.py",
+      "test_file": "skills/test_propose_goals.py"
+    },
+    {
       "skill_id": "execute_code",
       "name": "Execute Code",
       "description": "Compiles and executes Python code inside an isolated, AST-audited sandbox subprocess.",
