@@ -18,7 +18,7 @@ from src.sandbox_session import (
 from openai import OpenAI
 
 # Decoupled SDK backend library dependencies
-from src.explorer import search_web, fetch_webpage
+from src.explorer import search_web, fetch_webpage, ingest_discoveries
 from src.notifications import send_webhook_notification
 from src.codebase import query_codebase_context, index_codebase
 from src.sandbox import execute_code_safely
@@ -45,10 +45,27 @@ logger = logging.getLogger("JanusSkills")
 class SafeExplorer:
     """Safe search and URL fetching wrapper for dynamic skills."""
     def search(self, query: str) -> list:
-        return search_web(query)
+        results = search_web(query)
+        if results:
+            content = "\n".join(f"{r['title']}: {r['snippet']}" for r in results)
+            self._ingest(
+                content,
+                source="web_search",
+                raw_metadata={"query": query, "result_urls": [r["url"] for r in results]},
+            )
+        return results
 
     def fetch(self, url: str) -> str:
-        return fetch_webpage(url)
+        content = fetch_webpage(url)
+        self._ingest(content, source="web_fetch", source_url=url)
+        return content
+
+    def _ingest(self, content: str, source: str, source_url: str = None, raw_metadata: dict = None):
+        """Route discoveries into the epistemic pipeline; never let it break exploration."""
+        try:
+            ingest_discoveries(content, source=source, source_url=source_url, raw_metadata=raw_metadata)
+        except Exception as e:
+            logger.error(f"Epistemic ingestion hook failed (source={source}): {e}")
 
 class SafeCodebase:
     """Safe codebase query and indexing wrapper for dynamic skills."""
