@@ -1,3 +1,4 @@
+import json
 from unittest.mock import patch
 
 import pytest
@@ -351,15 +352,12 @@ def test_goal_proposals_slash_commands():
     res_bad = handle_goal_command("/goal approve not-a-number")
     assert "[Error] Proposal ID must be an integer." in res_bad
 
-def test_reflection_cycle_generates_goal_proposal():
-    sg = SafeGoals()
-
+def _reflection_side_effect(proposal_response):
+    """query_agent side effect driving a full reflection cycle; proposal_response
+    is returned for the propose_goals candidate-goal prompt."""
     def side_effect(agent_id, prompt, system_override=None, **kwargs):
-        if "goal_proposal" in prompt.lower():
-            return (
-                "GOAL_PROPOSAL: short|Audit sandbox network egress rules|0.8|Repeated boundary_encounter events\n"
-                "GOAL_PROPOSAL: NONE"
-            )
+        if "candidate goals" in prompt.lower():
+            return proposal_response
         if agent_id == "proposer":
             return "PROPOSED_ACTION: Review recent episodic logs"
         elif agent_id == "critic":
@@ -369,12 +367,26 @@ def test_reflection_cycle_generates_goal_proposal():
                 return "CURIOSITY_TOPICS: sandbox egress, network policy"
             return "Execution summary nugget."
         return ""
+    return side_effect
 
-    with patch("src.skills.query_agent", side_effect=side_effect), \
+def test_reflection_cycle_generates_goal_proposal():
+    sg = SafeGoals()
+
+    proposal_json = json.dumps([
+        {
+            "type": "short",
+            "description": "Audit sandbox network egress rules",
+            "confidence": 0.8,
+            "source_reason": "Repeated boundary_encounter events",
+        }
+    ])
+
+    with patch("src.skills.query_agent", side_effect=_reflection_side_effect(proposal_json)), \
          patch("src.memory.query_memories", return_value=[]), \
          patch("src.memory.add_memory", return_value=None), \
          patch("src.skills.get_active_curiosity_topics", return_value=[]), \
-         patch("src.skills.update_curiosity_topics", return_value=None):
+         patch("src.skills.update_curiosity_topics", return_value=None), \
+         patch("src.skills.send_webhook_notification") as mock_webhook:
         res = DynamicSkillExecutor.execute("run_reflection_cycle", {}, party_id="system")
 
     assert res["success"] is True
@@ -384,6 +396,83 @@ def test_reflection_cycle_generates_goal_proposal():
     assert proposals[0]["description"] == "Audit sandbox network egress rules"
     assert proposals[0]["type"] == "short"
     assert proposals[0]["confidence_score"] == 0.8
+    assert proposals[0]["status"] == "proposed"
+
+    # V2-T9 goal_proposal webhook fires on autonomous generation
+    webhook_events = [call.args[0] for call in mock_webhook.call_args_list]
+    assert "goal_proposal" in webhook_events
+
+def test_reflection_cycle_proposal_generation_capped():
+    sg = SafeGoals()
+    for i in range(3):
+        sg.propose_goal("short", f"Pending proposal {i}", 0.5, "seed")
+
+    proposal_prompts = []
+
+    def side_effect(agent_id, prompt, system_override=None, **kwargs):
+        if "candidate goals" in prompt.lower():
+            proposal_prompts.append(prompt)
+            return '[{"type": "short", "description": "Must not be inserted", "confidence": 0.9, "source_reason": "x"}]'
+        return _reflection_side_effect("")(agent_id, prompt, system_override, **kwargs)
+
+    with patch("src.skills.query_agent", side_effect=side_effect), \
+         patch("src.memory.query_memories", return_value=[]), \
+         patch("src.memory.add_memory", return_value=None), \
+         patch("src.skills.get_active_curiosity_topics", return_value=[]), \
+         patch("src.skills.update_curiosity_topics", return_value=None):
+        res = DynamicSkillExecutor.execute("run_reflection_cycle", {}, party_id="system")
+
+    assert res["success"] is True
+    # Cap short-circuits before the proposal LLM call; no new rows appear
+    assert proposal_prompts == []
+    assert len(sg.get_proposals(status="proposed")) == 3
+
+def test_reflection_cycle_tolerates_unparseable_proposal_response():
+    sg = SafeGoals()
+
+    with patch("src.skills.query_agent",
+               side_effect=_reflection_side_effect("We should definitely explore many things.")), \
+         patch("src.memory.query_memories", return_value=[]), \
+         patch("src.memory.add_memory", return_value=None), \
+         patch("src.skills.get_active_curiosity_topics", return_value=[]), \
+         patch("src.skills.update_curiosity_topics", return_value=None):
+        res = DynamicSkillExecutor.execute("run_reflection_cycle", {}, party_id="system")
+
+    assert res["success"] is True
+    assert sg.get_proposals() == []
+
+def test_propose_goals_skill_direct_invocation():
+    """The propose_goals skill can also be run standalone (e.g. via /runskill)."""
+    sg = SafeGoals()
+    proposal_json = json.dumps([
+        {"type": "stretch", "description": "Prototype curiosity-driven crawl planner",
+         "confidence": 1.7, "source_reason": ""}
+    ])
+
+    with patch("src.skills.query_agent", return_value=proposal_json), \
+         patch("src.skills.get_active_curiosity_topics", return_value=["crawl planning"]):
+        res = DynamicSkillExecutor.execute("propose_goals", {}, party_id="system")
+
+    assert res["success"] is True
+    proposals = sg.get_proposals(status="proposed")
+    assert len(proposals) == 1
+    assert proposals[0]["type"] == "stretch"
+    # Confidence is clamped into [0, 1] and empty source_reason gets a default
+    assert proposals[0]["confidence_score"] == 1.0
+    assert proposals[0]["source_reason"] == "Subconscious proposal from idle reflection."
+
+def test_goal_proposal_cap_config_seeded():
+    conn = get_connection()
+    try:
+        row = conn.execute(
+            "SELECT config_value, is_agent_modifiable FROM system_config "
+            "WHERE config_key = 'goal_proposal.max_open_proposals';"
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row is not None
+    assert row[0] == "3"
+    assert row[1] == 0
 
 def test_api_get_goal_proposals():
     sg = SafeGoals()

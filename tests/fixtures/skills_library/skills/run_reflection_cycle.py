@@ -282,41 +282,15 @@ def run_reflection_cycle():
             sdk['logger'].info(f"Updated curiosity vector to: {new_topics}")
         else:
             sdk['logger'].warning(f"Failed to parse curiosity topics from response: '{curiosity_resp}'")
-            new_topics = curiosity
 
+        # V2-T1b (#75): subconscious goal proposal generation, grounded in the
+        # curiosity vector updated above. The propose_goals skill enforces its
+        # own open-proposal cap, so this is a no-op while proposals from earlier
+        # cycles are still awaiting human ratification.
         try:
-            goal_proposal_prompt = f"""
-            You are the Proposer. Based on our updated curiosity vector and current active goals, decide
-            whether a new GOAL (not an action) is worth proposing to the user for ratification.
-
-            UPDATED CURIOSITY TOPICS:
-            {new_topics}
-
-            ACTIVE GOALS & CHECKPOINTS:
-            {goals_block}
-
-            If one or more new goals are warranted, output one line per goal in exactly this format:
-            GOAL_PROPOSAL: <type>|<description>|<confidence_score>|<source_reason>
-            Where <type> is one of: short, long, stretch, aspirational, and <confidence_score> is a number
-            between 0.0 and 1.0. If no new goal is warranted, output exactly:
-            GOAL_PROPOSAL: NONE
-            """
-
-            goal_proposal_resp = sdk['swarm'].query_agent("proposer", goal_proposal_prompt)
-            for line in re.findall(r"goal_proposal:\s*(.+)", goal_proposal_resp, re.IGNORECASE):
-                line = line.strip()
-                if not line or line.upper() == "NONE":
-                    continue
-                fields = [f.strip() for f in line.split("|")]
-                if len(fields) != 4:
-                    sdk['logger'].warning(f"Skipping malformed goal proposal line: '{line}'")
-                    continue
-                p_type, p_desc, p_conf, p_reason = fields
-                try:
-                    proposal_id = sdk['goals'].propose_goal(p_type.lower(), p_desc, float(p_conf), p_reason)
-                    sdk['logger'].info(f"Queued goal proposal [{proposal_id}]: '{p_desc}'")
-                except Exception as pe:
-                    sdk['logger'].warning(f"Failed to queue goal proposal from line '{line}': {pe}")
+            gp_res = sdk['swarm'].execute_skill("propose_goals", {}, party_id="system")
+            gp_outcome = gp_res.get("result") if gp_res.get("success") else gp_res.get("error")
+            sdk['logger'].info(f"Goal proposal step: {gp_outcome}")
         except Exception as gpe:
             sdk['logger'].error(f"Goal proposal generation step failed: {gpe}")
 
