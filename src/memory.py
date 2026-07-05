@@ -259,6 +259,38 @@ def get_collection(name: str = "janus_long_term"):
             _collections[name] = ChromaCollectionWrapper(client.get_or_create_collection(name=name))
     return _collections[name]
 
+def check_vector_connection() -> bool:
+    """
+    Liveness check for the vector store (ChromaDB or pgvector, per DB_TYPE).
+    Used by health-check endpoints.
+    """
+    db_type = getattr(src.config, "DB_TYPE", "sqlite").lower()
+    if db_type == "postgres":
+        # Query janus_embeddings directly rather than delegating to the primary
+        # DB's check_connection() — a healthy Postgres connection doesn't imply
+        # the pgvector extension/table is actually present and queryable.
+        from src.database import get_connection
+        conn = None
+        try:
+            conn = get_connection(read_only_constitution=True)
+            conn.execute("SELECT 1 FROM janus_embeddings LIMIT 1")
+            return True
+        except Exception as e:
+            logger.error(f"Vector DB (pgvector) connectivity check failed: {e}")
+            return False
+        finally:
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+    try:
+        get_chroma_client().heartbeat()
+        return True
+    except Exception as e:
+        logger.error(f"Vector DB (Chroma) connectivity check failed: {e}")
+        return False
+
 def get_embeddings(texts: list) -> list:
     """
     Queries the OpenAI-compatible endpoint to generate vectors for the input texts.

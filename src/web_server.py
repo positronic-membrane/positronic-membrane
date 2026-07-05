@@ -84,7 +84,7 @@ async def rate_limit_middleware(request: Request, call_next):
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 # Import routers
-from src.routers import auth, chat, sandbox, constitution, goals
+from src.routers import auth, chat, sandbox, constitution, goals, health
 
 # Register routers
 app.include_router(auth.router)
@@ -92,6 +92,7 @@ app.include_router(chat.router)
 app.include_router(sandbox.router)
 app.include_router(constitution.router)
 app.include_router(goals.router)
+app.include_router(health.router)
 
 # --- Static Files / Single-Page-App Fallback ---
 

@@ -1,5 +1,7 @@
 import os
+import time
 from pathlib import Path
+
 from dotenv import load_dotenv
 
 # Load env variables from .env if present
@@ -7,6 +9,10 @@ load_dotenv()
 
 # Root directory of the project
 ROOT_DIR = Path(__file__).resolve().parent.parent
+
+# Process start time (monotonic clock, immune to wall-clock adjustments — used
+# for /health uptime_seconds) — captured once at import time
+PROCESS_START_TIME = time.monotonic()
 
 # Database configuration
 DB_PATH = os.getenv("DB_PATH", str(ROOT_DIR / "janus.db"))
