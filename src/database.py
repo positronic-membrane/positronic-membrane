@@ -337,6 +337,27 @@ def get_connection(read_only_constitution=True):
             conn.set_authorizer(constitution_authorizer)
         return JanusConnectionWrapper(conn, db_type="sqlite", read_only_constitution=read_only_constitution)
 
+def check_connection() -> bool:
+    """
+    Liveness check for the primary database. Opens a fresh connection and runs
+    a trivial query. Used by health-check endpoints, not a normal application
+    code path, so exceptions are caught broadly rather than propagated.
+    """
+    conn = None
+    try:
+        conn = get_connection(read_only_constitution=True)
+        conn.execute("SELECT 1")
+        return True
+    except Exception as e:
+        logger.error(f"Database connectivity check failed: {e}")
+        return False
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
 def init_db():
     """
     Creates tables if they do not exist and populates default system configurations.
