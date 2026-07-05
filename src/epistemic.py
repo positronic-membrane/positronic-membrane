@@ -38,9 +38,15 @@ def _get_driver():
             raise RuntimeError(
                 "NEO4J_URI is not configured. Set it in .env or environment."
             )
+        # Explicit timeouts: callers (daemon interval skills, explorer ingest)
+        # run synchronously on the heartbeat event loop, so an unreachable or
+        # paused Aura instance must fail fast instead of blocking the loop for
+        # the driver defaults (~30s connect / 60s pool acquisition).
         _driver = GraphDatabase.driver(
             config.NEO4J_URI,
             auth=(config.NEO4J_USERNAME, config.NEO4J_PASSWORD),
+            connection_timeout=10.0,
+            connection_acquisition_timeout=30.0,
         )
     return _driver
 
