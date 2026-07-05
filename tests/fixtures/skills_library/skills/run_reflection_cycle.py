@@ -266,14 +266,32 @@ def run_reflection_cycle():
         DELIBERATION OUTCOME: {critic_justification}
         PROPOSED ACTION: {proposed_action}
         
-        Respond strictly in this format:
-        CURIOSITY_TOPICS: [topic1], [topic2], [topic3]
+        Respond ONLY with a JSON array of 1-3 short topic strings, no prose before or after, in this format:
+        ["topic1", "topic2", "topic3"]
         """
 
         curiosity_resp = sdk['swarm'].query_agent("archivist", curiosity_prompt)
-        topics_match = re.search(r"curiosity_topics:\s*(.*)", curiosity_resp, re.IGNORECASE)
-        if topics_match:
-            new_topics = [t.strip() for t in topics_match.group(1).split(",") if t.strip()]
+        topics_match = re.search(r"\[.*\]", curiosity_resp or "", re.DOTALL)
+        new_topics = []
+        parse_failure_reason = None
+        if not topics_match:
+            parse_failure_reason = f"No JSON array found in curiosity response: '{curiosity_resp}'"
+        else:
+            try:
+                raw_topics = json.loads(topics_match.group(0))
+            except (json.JSONDecodeError, ValueError) as e:
+                parse_failure_reason = f"Failed to parse curiosity JSON: {e}. Response: '{curiosity_resp}'"
+                raw_topics = []
+            seen = set()
+            for t in raw_topics:
+                if not isinstance(t, str):
+                    continue
+                t = re.sub(r"[\[\]]", "", t).strip()
+                if t and t.lower() not in seen:
+                    seen.add(t.lower())
+                    new_topics.append(t[:200])
+
+        if new_topics:
             try:
                 sdk['memory'].update_curiosity_topics(new_topics)
             except Exception as e:
@@ -281,7 +299,9 @@ def run_reflection_cycle():
             sdk['drives'].update_curiosity_vector(new_topics)
             sdk['logger'].info(f"Updated curiosity vector to: {new_topics}")
         else:
-            sdk['logger'].warning(f"Failed to parse curiosity topics from response: '{curiosity_resp}'")
+            sdk['logger'].warning(
+                parse_failure_reason or f"No valid curiosity topics parsed from response: '{curiosity_resp}'"
+            )
 
         # V2-T1b (#75): subconscious goal proposal generation, grounded in the
         # curiosity vector updated above. The propose_goals skill enforces its

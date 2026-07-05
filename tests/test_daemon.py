@@ -72,7 +72,7 @@ async def test_heartbeat_loop_execution(mock_query, mock_query_memories, mock_ad
             return "Decision: 1\nJustification: Action is safe and complies with all rules."
         elif agent_id == "archivist":
             if "curiosity" in prompt.lower() or "curiosity_topics" in prompt.lower():
-                return "CURIOSITY_TOPICS: git hooks, sqlite locks"
+                return 'CURIOSITY_TOPICS: ["git hooks", "sqlite locks"]'
             return "Janus execution summary nugget logged."
         return ""
     mock_query.side_effect = side_effect
