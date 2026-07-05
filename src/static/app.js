@@ -219,18 +219,38 @@ document.addEventListener("DOMContentLoaded", () => {
     async function loadChatHistory() {
         try {
             const res = await fetch("/api/history");
-            const history = await res.json();
-            
-            if (history && history.length > 0) {
-                chatMessages.innerHTML = "";
-                history.forEach(msg => {
-                    appendMessage(msg.speaker, msg.message);
-                });
-                scrollToBottom();
+            let history = null;
+            try {
+                history = await res.json();
+            } catch (_) {
+                history = null;
+            }
+
+            if (res.ok && Array.isArray(history)) {
+                if (history.length > 0) {
+                    chatMessages.innerHTML = "";
+                    history.forEach(msg => appendMessage(msg.speaker, msg.message));
+                    scrollToBottom();
+                } else {
+                    showSystemMessage("No recent messages — say hello!");
+                }
+            } else {
+                showSystemMessage("Couldn't load chat history. Try refreshing.");
             }
         } catch (err) {
             console.error("Failed to load chat history:", err);
+            showSystemMessage("Couldn't load chat history. Try refreshing.");
         }
+    }
+
+    function showSystemMessage(text) {
+        chatMessages.innerHTML = "";
+        const msgDiv = document.createElement("div");
+        msgDiv.className = "message system-message";
+        const p = document.createElement("p");
+        p.textContent = text;
+        msgDiv.appendChild(p);
+        chatMessages.appendChild(msgDiv);
     }
 
     async function handleChatSubmit(e) {
