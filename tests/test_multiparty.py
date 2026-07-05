@@ -277,6 +277,29 @@ class TestMemoryOrchestrator:
         assert result[0]['message_content'] in ('Second', 'First')
         assert result[0]['speaker'] in ('assistant', 'user')
 
+    def test_get_episodic_memories_context_type_filter(self, memory_orch, db_conn, sample_party, sample_session):
+        """Test filtering episodic memories by context_type (issue #54)."""
+        memory_orch.log_episodic_memory(
+            party_id=sample_party, session_id=sample_session,
+            message_content='Visible', speaker='user', context_type='user_visible'
+        )
+        memory_orch.log_episodic_memory(
+            party_id=sample_party, session_id=sample_session,
+            message_content='Thought', speaker='persona', context_type='background_thought'
+        )
+
+        visible = memory_orch.get_episodic_memories(sample_party, limit=10, context_type='user_visible')
+        assert len(visible) == 1
+        assert visible[0]['message_content'] == 'Visible'
+        assert visible[0]['context_type'] == 'user_visible'
+
+        background = memory_orch.get_episodic_memories(sample_party, limit=10, context_type='background_thought')
+        assert len(background) == 1
+        assert background[0]['message_content'] == 'Thought'
+
+        unfiltered = memory_orch.get_episodic_memories(sample_party, limit=10)
+        assert len(unfiltered) == 2
+
     def test_episodic_memory_auto_increment(self, memory_orch, db_conn, sample_party):
         """Test that episodic memory IDs are auto-incremented integers."""
         id1 = memory_orch.log_episodic_memory(
