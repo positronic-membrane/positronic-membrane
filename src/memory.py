@@ -2,6 +2,8 @@ import time
 import logging
 import uuid
 import json
+from datetime import datetime, timedelta
+from typing import Optional
 import chromadb
 from openai import OpenAI
 import src.config
@@ -628,83 +630,188 @@ def index_skills_to_vector_db():
         logger.error(f"Failed to semantically index dynamic skills: {e}", exc_info=True)
 
 
-def compress_episodic_memory(limit: int = 50, keep_recent: int = 10):
-    """
-    Checks the total row count of episodic_memory table. If it exceeds limit,
-    summarizes the oldest (count - keep_recent) memories into a Primary Concept,
-    stores it in vector DB collection 'janus_long_term', and deletes those old entries from SQLite/Postgres.
-    """
-    from src.database import get_connection
-    logger.info("Checking episodic memory for compression...")
-    
-    conn = get_connection(read_only_constitution=True)
-    cursor = conn.cursor()
-    try:
-        cursor.execute("SELECT COUNT(*) FROM episodic_memory;")
-        count = cursor.fetchone()[0]
-    except Exception as e:
-        logger.error(f"Failed to query episodic memory count: {e}")
-        conn.close()
-        return
-        
-    if count <= limit:
-        logger.info(f"Episodic memory count ({count}) does not exceed limit ({limit}). No compression needed.")
-        conn.close()
-        return
-        
-    num_to_compress = count - keep_recent
-    logger.info(f"Episodic memory count ({count}) exceeds limit ({limit}). Compressing oldest {num_to_compress} records...")
-    
-    try:
-        # Fetch the oldest records to compress
-        cursor.execute("""
-            SELECT id, speaker, message_content, timestamp, context_type
-            FROM episodic_memory
-            ORDER BY id ASC
-            LIMIT ?;
-        """, (num_to_compress,))
-        rows = cursor.fetchall()
-    except Exception as e:
-        logger.error(f"Failed to fetch episodic memories for compression: {e}")
-        conn.close()
-        return
-        
+def _summarize_and_delete(conn, cursor, rows, batch_label: str):
+    """Shared Archivist-summarize-then-delete step for one context_type batch."""
     if not rows:
         conn.close()
         return
-        
-    # Format memories into a trace string
+
     memories_summary = "\n".join([f"[{row[3]}] {row[1]}: {row[2]}" for row in rows])
-    
+
     archivist_prompt = f"""
-    You are the Archivist. Synthesize the following sequence of user interaction and background agent logs into a single, cohesive, high-level Primary Concept summary (under 2 sentences).
-    
+    You are the Archivist. Synthesize the following sequence of {batch_label} log entries into a single, cohesive, high-level Primary Concept summary (under 2 sentences).
+
     EPISODIC LOG ENTRIES:
     {memories_summary}
-    
+
     Respond with the synthesized Primary Concept directly. Do not include agent names, prefixes, quotes, or JSON.
     """
-    
+
     try:
         primary_concept = query_agent("archivist", archivist_prompt).strip()
-        
+
         # Save Primary Concept to janus_long_term
         concept_id = f"episodic_{uuid.uuid4()}"
         concept_metadata = {
             "type": "episodic_summary",
+            "context_type": batch_label,
             "timestamp": time.time(),
             "start_time": str(rows[0][3]),
             "end_time": str(rows[-1][3])
         }
         add_memory(primary_concept, concept_metadata, concept_id, "janus_long_term")
-        
+
         # Delete summarized rows
         ids_to_delete = [row[0] for row in rows]
         placeholders = ",".join(["?"] * len(ids_to_delete))
         cursor.execute(f"DELETE FROM episodic_memory WHERE id IN ({placeholders});", ids_to_delete)
         conn.commit()
-        logger.info(f"Successfully compressed {len(ids_to_delete)} episodic memories into Primary Concept: '{primary_concept}'")
+        logger.info(f"Successfully compressed {len(ids_to_delete)} '{batch_label}' episodic memories into Primary Concept: '{primary_concept}'")
     except Exception as e:
-        logger.error(f"Error during episodic memory compression: {e}", exc_info=True)
+        logger.error(f"Error during {batch_label} episodic memory compression: {e}", exc_info=True)
     finally:
         conn.close()
+
+
+def _compress_background_thoughts(limit: int = 50, keep_recent: int = 10):
+    """
+    Checks the row count of 'background_thought' episodic_memory rows. If it
+    exceeds limit, summarizes the oldest (count - keep_recent) rows into a
+    Primary Concept and deletes them.
+    """
+    from src.database import get_connection
+    logger.info("Checking background_thought episodic memory for compression...")
+
+    conn = get_connection(read_only_constitution=True)
+    cursor = conn.cursor()
+    try:
+        cursor.execute("SELECT COUNT(*) FROM episodic_memory WHERE context_type = 'background_thought';")
+        count = cursor.fetchone()[0]
+    except Exception as e:
+        logger.error(f"Failed to query background_thought count: {e}")
+        conn.close()
+        return
+
+    if count <= limit:
+        logger.info(f"background_thought count ({count}) does not exceed limit ({limit}). No compression needed.")
+        conn.close()
+        return
+
+    num_to_compress = count - keep_recent
+    logger.info(f"background_thought count ({count}) exceeds limit ({limit}). Compressing oldest {num_to_compress} records...")
+
+    try:
+        cursor.execute("""
+            SELECT id, speaker, message_content, timestamp, context_type
+            FROM episodic_memory
+            WHERE context_type = 'background_thought'
+            ORDER BY id ASC
+            LIMIT ?;
+        """, (num_to_compress,))
+        rows = cursor.fetchall()
+    except Exception as e:
+        logger.error(f"Failed to fetch background_thought memories for compression: {e}")
+        conn.close()
+        return
+
+    _summarize_and_delete(conn, cursor, rows, batch_label="background_thought")
+
+
+def _compress_user_visible_chat(min_rows: Optional[int] = None, min_age_days: Optional[int] = None):
+    """
+    Compresses 'user_visible' episodic_memory rows using a row-count AND
+    age-based threshold (issue #54) — a row is only eligible for compression
+    if it is BOTH beyond the row-count keep-window AND older than
+    min_age_days, so recent chat is never touched purely due to volume.
+    """
+    from src.database import get_connection
+    logger.info("Checking user_visible episodic memory for compression...")
+
+    conn = get_connection(read_only_constitution=True)
+    cursor = conn.cursor()
+
+    if min_rows is None or min_age_days is None:
+        try:
+            cursor.execute(
+                "SELECT config_key, config_value FROM system_config "
+                "WHERE config_key IN ('memory.chat_history_min_rows', 'memory.chat_history_min_age_days');"
+            )
+            config_rows = dict(cursor.fetchall())
+        except Exception as e:
+            logger.error(f"Failed to read chat history compression config, using defaults: {e}")
+            config_rows = {}
+        if min_rows is None:
+            try:
+                min_rows = int(config_rows.get("memory.chat_history_min_rows", 500))
+            except (TypeError, ValueError) as e:
+                logger.error(f"Invalid memory.chat_history_min_rows value {config_rows.get('memory.chat_history_min_rows')!r}, using default 500: {e}")
+                min_rows = 500
+        if min_age_days is None:
+            try:
+                min_age_days = int(config_rows.get("memory.chat_history_min_age_days", 30))
+            except (TypeError, ValueError) as e:
+                logger.error(f"Invalid memory.chat_history_min_age_days value {config_rows.get('memory.chat_history_min_age_days')!r}, using default 30: {e}")
+                min_age_days = 30
+
+    try:
+        cursor.execute("SELECT COUNT(*) FROM episodic_memory WHERE context_type = 'user_visible';")
+        count = cursor.fetchone()[0]
+    except Exception as e:
+        logger.error(f"Failed to query user_visible count: {e}")
+        conn.close()
+        return
+
+    if count <= min_rows:
+        logger.info(f"user_visible count ({count}) does not exceed min_rows ({min_rows}). No compression needed.")
+        conn.close()
+        return
+
+    num_beyond_window = count - min_rows
+    cutoff_str = (datetime.utcnow() - timedelta(days=min_age_days)).strftime('%Y-%m-%d %H:%M:%S')
+
+    try:
+        # Bounding by id ASC + LIMIT num_beyond_window restricts the candidate
+        # set to the oldest rows beyond the row-count keep-window; the
+        # timestamp < cutoff_str predicate additionally requires them to be
+        # older than min_age_days. id and timestamp both increase
+        # monotonically on insert, so this single query correctly implements
+        # the AND of both thresholds.
+        cursor.execute("""
+            SELECT id, speaker, message_content, timestamp, context_type
+            FROM episodic_memory
+            WHERE context_type = 'user_visible' AND timestamp < ?
+            ORDER BY id ASC
+            LIMIT ?;
+        """, (cutoff_str, num_beyond_window))
+        rows = cursor.fetchall()
+    except Exception as e:
+        logger.error(f"Failed to fetch user_visible memories for compression: {e}")
+        conn.close()
+        return
+
+    if not rows:
+        logger.info(f"user_visible rows beyond the row window are not older than {min_age_days} days. No compression needed.")
+        conn.close()
+        return
+
+    _summarize_and_delete(conn, cursor, rows, batch_label="user_visible")
+
+
+def compress_episodic_memory(
+    limit: int = 50,
+    keep_recent: int = 10,
+    chat_min_rows: Optional[int] = None,
+    chat_min_age_days: Optional[int] = None,
+):
+    """
+    Compresses old episodic_memory rows into vector-store Primary Concepts,
+    running two independent passes so the daemon's background_thought volume
+    never causes user-visible chat history to be summarized/deleted (issue #54):
+
+    - background_thought: simple count-based threshold (limit/keep_recent).
+    - user_visible: row-count AND age-based threshold, driven by
+      system_config keys memory.chat_history_min_rows /
+      memory.chat_history_min_age_days.
+    """
+    _compress_background_thoughts(limit=limit, keep_recent=keep_recent)
+    _compress_user_visible_chat(min_rows=chat_min_rows, min_age_days=chat_min_age_days)

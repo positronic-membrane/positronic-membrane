@@ -737,6 +737,8 @@ def init_db():
         ("user_presence_status", "idle", 1),
         ("governor.stagnant_threshold", "3", 1),
         ("memory.retention_days", "30", 1),
+        ("memory.chat_history_min_rows", "500", 1),
+        ("memory.chat_history_min_age_days", "30", 1),
         ("memory.last_cleanup_time", "", 1),
         ("llm_cache.ttl_days", "7", 1),
         ("llm_cache.last_cleanup_time", "", 1),

@@ -127,48 +127,153 @@ def test_docker_sandbox_executor_image_missing():
 
 @patch("src.memory.query_agent")
 @patch("src.memory.add_memory")
-def test_compress_episodic_memory_trigger(mock_add_memory, mock_query_agent):
-    """Verify compress_episodic_memory triggers, processes LLM summary, and deletes rows."""
+def test_compress_episodic_memory_background_thought_only(mock_add_memory, mock_query_agent):
+    """Verify compress_episodic_memory compresses only background_thought rows,
+    leaving user_visible rows untouched (issue #54: per-context_type thresholds)."""
     mock_query_agent.return_value = "Synthesized primary concept summary."
 
-    # 1. Seed 15 episodic memories
-    for i in range(15):
+    # 12 background_thought rows + 5 user_visible rows
+    for i in range(12):
         log_episodic_memory(
-            speaker="persona" if i % 2 == 0 else "user",
-            message_content=f"Dummy message content {i}",
-            context_type="background_thought" if i % 3 == 0 else "user_visible"
+            speaker="persona",
+            message_content=f"Thought {i}",
+            context_type="background_thought"
+        )
+    for i in range(5):
+        log_episodic_memory(
+            speaker="user",
+            message_content=f"Chat {i}",
+            context_type="user_visible"
         )
 
-    # Verify we seeded 15 items
+    # Trigger with limit=10/keep_recent=3 for background_thought (compresses 12-3=9),
+    # and thresholds high enough that the user_visible pass is a no-op.
+    compress_episodic_memory(limit=10, keep_recent=3, chat_min_rows=1000, chat_min_age_days=9999)
+
     from src.database import get_connection
     conn = get_connection()
-    count = conn.execute("SELECT COUNT(*) FROM episodic_memory;").fetchone()[0]
-    assert count == 15
+    bg_count = conn.execute(
+        "SELECT COUNT(*) FROM episodic_memory WHERE context_type = 'background_thought';"
+    ).fetchone()[0]
+    visible_count = conn.execute(
+        "SELECT COUNT(*) FROM episodic_memory WHERE context_type = 'user_visible';"
+    ).fetchone()[0]
     conn.close()
 
-    # 2. Trigger compression with limit 10 and keeping recent 3.
-    # This should compress 15 - 3 = 12 items.
-    compress_episodic_memory(limit=10, keep_recent=3)
+    assert bg_count == 3
+    assert visible_count == 5
 
-    # 3. Verify database count is now 3
-    conn = get_connection()
-    new_count = conn.execute("SELECT COUNT(*) FROM episodic_memory;").fetchone()[0]
-    assert new_count == 3
-    conn.close()
-
-    # 4. Verify vector DB add_memory was called to store synthesized concept
     mock_add_memory.assert_called_once()
-    stored_concept = mock_add_memory.call_args[0][0]
-    assert stored_concept == "Synthesized primary concept summary."
-
-    # 5. Verify query_agent was called for the archivist role
     mock_query_agent.assert_called_once()
     assert mock_query_agent.call_args[0][0] == "archivist"
     prompt_sent = mock_query_agent.call_args[0][1]
-    assert "Dummy message content 0" in prompt_sent
-    assert "Dummy message content 11" in prompt_sent
-    # Message 12, 13, 14 should not be in the prompt because they are the 3 kept recent ones
-    assert "Dummy message content 12" not in prompt_sent
+    assert "Thought 0" in prompt_sent
+    assert "Thought 8" in prompt_sent
+    assert "Thought 9" not in prompt_sent  # kept recent
+    assert "Chat 0" not in prompt_sent  # user_visible must never be in the same batch
+
+
+def _insert_backdated_episodic_row(speaker: str, message: str, context_type: str, days_ago: int):
+    from datetime import datetime, timedelta
+
+    from src.database import get_connection
+    ts = (datetime.utcnow() - timedelta(days=days_ago)).strftime('%Y-%m-%d %H:%M:%S')
+    conn = get_connection()
+    conn.execute(
+        "INSERT INTO episodic_memory (speaker, message_content, context_type, timestamp) VALUES (?, ?, ?, ?);",
+        (speaker, message, context_type, ts)
+    )
+    conn.commit()
+    conn.close()
+
+
+@patch("src.memory.query_agent")
+@patch("src.memory.add_memory")
+def test_compress_episodic_memory_user_visible_row_and_age_threshold(mock_add_memory, mock_query_agent):
+    """user_visible rows are only compressed if BOTH beyond the row-count
+    keep-window AND older than min_age_days (issue #54)."""
+    mock_query_agent.return_value = "Synthesized primary concept summary."
+
+    for i in range(7):
+        _insert_backdated_episodic_row("user", f"Old chat {i}", "user_visible", days_ago=35)
+    for i in range(8):
+        _insert_backdated_episodic_row("user", f"Recent chat {i}", "user_visible", days_ago=5)
+
+    compress_episodic_memory(limit=50, keep_recent=10, chat_min_rows=8, chat_min_age_days=30)
+
+    from src.database import get_connection
+    conn = get_connection()
+    remaining = conn.execute("SELECT COUNT(*) FROM episodic_memory WHERE context_type = 'user_visible';").fetchone()[0]
+    conn.close()
+
+    assert remaining == 8
+
+    mock_add_memory.assert_called_once()
+    prompt_sent = mock_query_agent.call_args[0][1]
+    for i in range(7):
+        assert f"Old chat {i}" in prompt_sent
+    for i in range(8):
+        assert f"Recent chat {i}" not in prompt_sent
+
+
+@patch("src.memory.query_agent")
+@patch("src.memory.add_memory")
+def test_compress_episodic_memory_both_passes_trigger_together(mock_add_memory, mock_query_agent):
+    """When both background_thought and user_visible thresholds are exceeded
+    in the same compress_episodic_memory() call, each runs its own independent
+    Archivist summarization pass (issue #54: passes must never be merged)."""
+    mock_query_agent.return_value = "Synthesized primary concept summary."
+
+    for i in range(12):
+        log_episodic_memory(speaker="persona", message_content=f"Thought {i}", context_type="background_thought")
+    for i in range(7):
+        _insert_backdated_episodic_row("user", f"Old chat {i}", "user_visible", days_ago=35)
+
+    compress_episodic_memory(limit=10, keep_recent=3, chat_min_rows=0, chat_min_age_days=30)
+
+    from src.database import get_connection
+    conn = get_connection()
+    bg_count = conn.execute(
+        "SELECT COUNT(*) FROM episodic_memory WHERE context_type = 'background_thought';"
+    ).fetchone()[0]
+    visible_count = conn.execute(
+        "SELECT COUNT(*) FROM episodic_memory WHERE context_type = 'user_visible';"
+    ).fetchone()[0]
+    conn.close()
+
+    assert bg_count == 3
+    assert visible_count == 0
+
+    assert mock_query_agent.call_count == 2
+    assert mock_add_memory.call_count == 2
+    prompts_sent = [call.args[1] for call in mock_query_agent.call_args_list]
+    assert any("Thought 0" in p for p in prompts_sent)
+    assert any("Old chat 0" in p for p in prompts_sent)
+    # Each Archivist call summarizes exactly one batch — never both types mixed together.
+    for p in prompts_sent:
+        assert not ("Thought 0" in p and "Old chat 0" in p)
+
+
+@patch("src.memory.query_agent")
+@patch("src.memory.add_memory")
+def test_compress_episodic_memory_user_visible_age_guard(mock_add_memory, mock_query_agent):
+    """A large volume of recent user_visible rows must never be compressed
+    purely due to row count if none are older than min_age_days (issue #54)."""
+    mock_query_agent.return_value = "Synthesized primary concept summary."
+
+    for i in range(15):
+        log_episodic_memory(speaker="user", message_content=f"Chat {i}", context_type="user_visible")
+
+    compress_episodic_memory(limit=50, keep_recent=10, chat_min_rows=8, chat_min_age_days=30)
+
+    from src.database import get_connection
+    conn = get_connection()
+    remaining = conn.execute("SELECT COUNT(*) FROM episodic_memory WHERE context_type = 'user_visible';").fetchone()[0]
+    conn.close()
+
+    assert remaining == 15
+    mock_add_memory.assert_not_called()
+    mock_query_agent.assert_not_called()
 
 def test_apply_staged_change_raises_permission_error(tmp_path):
     """Verify that apply_staged_change raises PermissionError (V3-T3: direct modification disabled)."""

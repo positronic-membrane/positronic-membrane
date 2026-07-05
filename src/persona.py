@@ -861,6 +861,13 @@ def handle_docs_command(command_str: str) -> str:
         )
 
 
+_CONVERSATION_MEMORY_LIMIT = 10   # primary user-visible dialogue window
+# Each ReAct tool-use turn logs exactly 2 background_thought rows (the
+# persona's own response + a sandbox/skill execution summary). 6 keeps up to
+# 3 full turns visible, so the persona can still see turn N-1's action+result
+# pair after logging turn N's — a limit of 3 would evict it after one turn.
+_DELIBERATION_MEMORY_LIMIT = 6    # secondary background-thought window
+
 def _build_persona_prompt(user_query: str, party_id=None) -> tuple:
     """
     Assembles the full prompt and system_override for the Persona agent.
@@ -931,13 +938,28 @@ def _build_persona_prompt(user_query: str, party_id=None) -> tuple:
     else:
         self_traits_str += "None defined."
 
-    # 2. Fetch episodic memories (last 15)
-    memories = get_recent_episodic_memories(limit=15, party_id=party_id)
+    # 2. Fetch episodic memories — split into primary (user-visible) and secondary
+    # (background-thought) streams so the daemon's internal deliberations never
+    # drown out actual conversation (issue #54), while still remaining visible
+    # to the persona as a small, clearly-delimited secondary stream (needed so
+    # the ReAct loop can see the outcome of skills/sandbox calls it just made).
+    memories = get_recent_episodic_memories(limit=_CONVERSATION_MEMORY_LIMIT, party_id=party_id, context_type="user_visible")
     chat_history = []
     for speaker, msg, _ in reversed(memories):
         if speaker in ("user", "persona", "system", "sandbox_automation"):
             chat_history.append(f"{speaker.upper()}: {msg}")
     history_summary = "\n".join(chat_history) if chat_history else "No previous conversation."
+
+    deliberations = get_recent_episodic_memories(limit=_DELIBERATION_MEMORY_LIMIT, party_id=party_id, context_type="background_thought")
+    deliberation_lines = []
+    for speaker, msg, _ in reversed(deliberations):
+        # Same provenance gate as the conversation stream above, minus "user"
+        # (background_thought rows are never user-authored): excludes e.g. raw
+        # swarm-bus sender content (src/daemon.py logs those with speaker=sender)
+        # that must not reach the model unfiltered.
+        if speaker in ("persona", "system", "sandbox_automation"):
+            deliberation_lines.append(f"{speaker.upper()}: {msg}")
+    deliberation_summary = "\n".join(deliberation_lines) if deliberation_lines else "No recent internal deliberations."
 
     # 3. Assemble semantic/knowledge context (web search, codebase, active sandbox, ChromaDB)
     semantic_context = ""
@@ -1015,6 +1037,7 @@ def _build_persona_prompt(user_query: str, party_id=None) -> tuple:
     xml_block = (
         f"<self_traits>\n{self_traits_str}\n</self_traits>\n"
         f"<episodic_memory>\n{history_summary}\n</episodic_memory>\n"
+        f"<recent_deliberations>\n{deliberation_summary}\n</recent_deliberations>\n"
         f"<semantic_knowledge>\n{semantic_str}\n</semantic_knowledge>"
     )
 

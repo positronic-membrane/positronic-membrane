@@ -140,7 +140,13 @@ class MemoryOrchestrator:
         Uses real schema columns: message_content, speaker, timestamp, context_type.
         Returns the auto-generated record ID (INTEGER PRIMARY KEY).
         """
-        now = datetime.utcnow().isoformat()
+        # Space-separated, no microseconds — matches the format SQLite's
+        # CURRENT_TIMESTAMP default produces for rows written via
+        # src.database.log_episodic_memory. episodic_memory.timestamp is a
+        # plain TEXT column read back with lexicographic comparisons (e.g.
+        # src.memory's age-based compression cutoff), so a differently
+        # formatted timestamp in the same column would sort incorrectly.
+        now = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
 
         conn = self._get_connection()
         try:
@@ -155,16 +161,25 @@ class MemoryOrchestrator:
             conn.close()
 
     def get_episodic_memories(self, party_id: str,
-                              limit: int = 50) -> List[Dict[str, Any]]:
-        """Retrieve recent episodic memories for a party."""
+                              limit: int = 50,
+                              context_type: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Retrieve recent episodic memories for a party, optionally filtered by context_type."""
         conn = self._get_connection()
         try:
-            rows = conn.execute(
-                'SELECT id, message_content, speaker, timestamp, session_id '
-                'FROM episodic_memory WHERE party_id = ? '
-                'ORDER BY timestamp DESC LIMIT ?',
-                (party_id, limit)
-            ).fetchall()
+            if context_type:
+                rows = conn.execute(
+                    'SELECT id, message_content, speaker, timestamp, session_id, context_type '
+                    'FROM episodic_memory WHERE party_id = ? AND context_type = ? '
+                    'ORDER BY timestamp DESC LIMIT ?',
+                    (party_id, context_type, limit)
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    'SELECT id, message_content, speaker, timestamp, session_id, context_type '
+                    'FROM episodic_memory WHERE party_id = ? '
+                    'ORDER BY timestamp DESC LIMIT ?',
+                    (party_id, limit)
+                ).fetchall()
             return [dict(row) for row in rows]
         finally:
             conn.close()

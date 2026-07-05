@@ -6,6 +6,7 @@ import src.config
 from src.database import get_connection, init_db, log_deliberation, log_episodic_memory
 from src.memory_hydration import hydrate_context
 from src.persona import (
+    _build_persona_prompt,
     detect_metacognitive_intent,
     generate_metacognitive_narrative,
     generate_persona_response,
@@ -221,7 +222,7 @@ def test_context_hydration_tagging():
     conn.close()
 
     # Hydrate context
-    hydrated = hydrate_context("user-123", limit_memories=5)
+    hydrated = hydrate_context("user-123", limit_conversation=5)
 
     # Check XML tags are present
     assert "<self_traits>" in hydrated
@@ -232,11 +233,32 @@ def test_context_hydration_tagging():
     assert "user: Hello Janus" in hydrated
     assert "</episodic_memory>" in hydrated
 
+    assert "<recent_deliberations>" in hydrated
+    assert "</recent_deliberations>" in hydrated
+
     assert "<semantic_knowledge>" in hydrated
 
     # Check Anchor directive
     assert "Your objective reality is defined strictly by the data provided" in hydrated
     assert "You are strictly forbidden from substituting pre-trained assumptions." in hydrated
+
+
+def test_build_persona_prompt_separates_context_types():
+    """Regression test for issue #54: user_visible and background_thought rows
+    must land in distinct, clearly-delimited sections of the persona prompt."""
+    log_episodic_memory("user", "What's the weather?", "user_visible", party_id="p1")
+    log_episodic_memory("persona", "Let me check.", "background_thought", party_id="p1")
+
+    prompt, _ = _build_persona_prompt("follow up", party_id="p1")
+
+    assert "<episodic_memory>" in prompt and "What's the weather?" in prompt
+    assert "<recent_deliberations>" in prompt and "Let me check." in prompt
+
+    episodic_block = prompt.split("<episodic_memory>")[1].split("</episodic_memory>")[0]
+    assert "Let me check." not in episodic_block
+
+    deliberation_block = prompt.split("<recent_deliberations>")[1].split("</recent_deliberations>")[0]
+    assert "What's the weather?" not in deliberation_block
 
 # --- V2-T10: Dispute Resolution Protocol ---
 
