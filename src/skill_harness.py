@@ -6,10 +6,13 @@ import shutil
 import subprocess
 import sys
 import textwrap
+from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Optional
 
 import src.config as config
 from src.database import get_connection
+from src.explorer import _get_config_int
 
 logger = logging.getLogger(__name__)
 
@@ -407,3 +410,164 @@ def sync_from_registry(
             failed.append({"skill_id": skill_id, "reason": f"Error processing skill: {e}"})
 
     return _sync_result(synced=synced, failed=failed)
+
+
+# ---------------------------------------------------------------------------
+# Circuit breaker (issue #59) — trips a skill after repeated execution
+# failures, auto-resetting after a cooldown period elapses.
+# ---------------------------------------------------------------------------
+
+DEFAULT_MAX_FAILURES = 5
+DEFAULT_COOLDOWN_MINUTES = 15
+
+# check_presence is the sole mechanism (src/daemon.py) that resets the Loop
+# Safety Valve / Smart Governor via human-presence detection. Tripping its
+# breaker would silently disable a more fundamental safety mechanism than the
+# one this breaker protects, so it is exempt from enforcement (failures are
+# still recorded and visible via /circuit status, just never enforced).
+_BREAKER_EXEMPT_SKILLS = frozenset({"check_presence"})
+
+
+def check_circuit(skill_id: str, tripped_at: Optional[str] = None) -> bool:
+    """Returns False if skill_id's circuit breaker is tripped and still within
+    its cooldown window; True otherwise. A skill whose cooldown has elapsed is
+    auto-reset as a side effect of this check.
+
+    Pass `tripped_at` when the caller has already fetched it alongside other
+    skill data (e.g. a joined query) to avoid a redundant lookup; otherwise it
+    is fetched here.
+    """
+    if skill_id in _BREAKER_EXEMPT_SKILLS:
+        return True
+
+    if tripped_at is None:
+        conn = get_connection()
+        try:
+            row = conn.execute(
+                "SELECT tripped_at FROM circuit_breaker_state WHERE skill_id = ?;",
+                (skill_id,),
+            ).fetchone()
+        finally:
+            conn.close()
+        tripped_at = row[0] if row else None
+
+    if not tripped_at:
+        return True
+
+    cooldown_minutes = _get_config_int("circuit_breaker.cooldown_minutes", DEFAULT_COOLDOWN_MINUTES)
+    cutoff_str = (datetime.utcnow() - timedelta(minutes=cooldown_minutes)).strftime("%Y-%m-%d %H:%M:%S")
+    if str(tripped_at) >= cutoff_str:
+        return False
+
+    conn = get_connection()
+    try:
+        conn.execute(
+            "UPDATE circuit_breaker_state SET consecutive_failures = 0, tripped_at = NULL WHERE skill_id = ?;",
+            (skill_id,),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    logger.info(f"Circuit breaker for '{skill_id}' auto-reset after {cooldown_minutes}m cooldown.")
+    return True
+
+
+def record_skill_failure(skill_id: str) -> None:
+    """Increments the consecutive-failure count for skill_id, tripping the
+    breaker once the configured threshold is exceeded.
+
+    The increment and the trip decision are applied in a single UPDATE so that
+    concurrent failures of the same skill_id can't both independently observe
+    an untripped breaker and both announce a trip (SQLite serializes writers,
+    so a second writer only proceeds after seeing the first's committed
+    tripped_at)."""
+    max_failures = _get_config_int("circuit_breaker.max_failures", DEFAULT_MAX_FAILURES)
+    now_str = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+    conn = get_connection()
+    try:
+        conn.execute(
+            "INSERT OR IGNORE INTO circuit_breaker_state (skill_id) VALUES (?);",
+            (skill_id,),
+        )
+        conn.execute(
+            """
+            UPDATE circuit_breaker_state
+            SET consecutive_failures = consecutive_failures + 1,
+                last_failure_at = ?,
+                tripped_at = CASE
+                    WHEN tripped_at IS NULL AND consecutive_failures + 1 >= ? THEN ?
+                    ELSE tripped_at
+                END
+            WHERE skill_id = ?;
+            """,
+            (now_str, max_failures, now_str, skill_id),
+        )
+        row = conn.execute(
+            "SELECT consecutive_failures, tripped_at, last_failure_at FROM circuit_breaker_state WHERE skill_id = ?;",
+            (skill_id,),
+        ).fetchone()
+        conn.commit()
+    finally:
+        conn.close()
+
+    # tripped_at == last_failure_at (both just written to now_str) iff the
+    # CASE branch fired on this call, i.e. this call is the one that tripped it.
+    if row and row[1] is not None and row[1] == row[2] and row[0] >= max_failures:
+        announce_trip(skill_id, row[0])
+
+
+def record_skill_success(skill_id: str) -> None:
+    """Resets the consecutive-failure count for skill_id after a successful run.
+
+    Only applies when the breaker isn't currently tripped, so a success from a
+    long-running execution that started before a concurrent failure tripped
+    the breaker doesn't mask that trip."""
+    conn = get_connection()
+    try:
+        conn.execute(
+            "UPDATE circuit_breaker_state SET consecutive_failures = 0 WHERE skill_id = ? AND tripped_at IS NULL;",
+            (skill_id,),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def announce_trip(skill_id: str, failure_count: int) -> None:
+    """Logs and notifies that skill_id's breaker was just tripped. The
+    tripped_at write itself happens atomically inside record_skill_failure()."""
+    from src.database import log_episodic_memory
+    from src.notifications import send_webhook_notification
+
+    cooldown_minutes = _get_config_int("circuit_breaker.cooldown_minutes", DEFAULT_COOLDOWN_MINUTES)
+    message = (
+        f"Circuit breaker tripped for skill '{skill_id}' after {failure_count} "
+        f"consecutive failures. It will be skipped for {cooldown_minutes} minute(s) "
+        f"or until '/circuit reset {skill_id}' is run."
+    )
+    logger.warning(message)
+    log_episodic_memory(speaker="system", message_content=message, context_type="background_thought")
+    send_webhook_notification("circuit_breaker_tripped", message)
+
+
+def reset_breaker(skill_id: str) -> bool:
+    """Manually clears breaker state for skill_id. Returns True if a row existed."""
+    conn = get_connection()
+    try:
+        cursor = conn.execute(
+            "UPDATE circuit_breaker_state SET consecutive_failures = 0, tripped_at = NULL WHERE skill_id = ?;",
+            (skill_id,),
+        )
+        existed = cursor.rowcount > 0
+        conn.commit()
+    finally:
+        conn.close()
+
+    if existed:
+        from src.database import log_episodic_memory
+        log_episodic_memory(
+            speaker="system",
+            message_content=f"Circuit breaker for skill '{skill_id}' manually reset.",
+            context_type="background_thought",
+        )
+    return existed
