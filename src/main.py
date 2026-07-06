@@ -4,6 +4,7 @@ import asyncio
 import logging
 import threading
 import webbrowser
+from src.config import run_config_check
 from src.database import init_db, is_setup_complete
 from src.setup_wizard import run_socratic_wizard
 from src.daemon import run_heartbeat_loop
@@ -35,7 +36,19 @@ def main():
     Performs initial migrations, checks configuration, and launches setup or daemon.
     """
     logger.info("Initializing Project Janus State...")
-    
+
+    try:
+        config_check_exit_code = run_config_check()
+    except Exception as e:
+        logger.critical(f"Configuration validation crashed: {e}", exc_info=True)
+        sys.exit(1)
+
+    if "--check-config" in sys.argv:
+        sys.exit(config_check_exit_code)
+
+    if config_check_exit_code != 0:
+        sys.exit(1)
+
     # Initialize DB (WAL, Tables, default system configuration)
     try:
         init_db()

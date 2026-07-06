@@ -1,5 +1,7 @@
+import logging
 import os
 import time
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -118,3 +120,128 @@ def get_effective_workspace_root() -> Path:
         pass
 
     return ROOT_DIR
+
+
+_config_logger = logging.getLogger("JanusConfig")
+
+
+def _nearest_existing_ancestor(path: Path) -> Path:
+    current = path
+    while not current.exists():
+        if current.parent == current:
+            return current
+        current = current.parent
+    return current
+
+
+def _is_writable_dir(path: Path) -> bool:
+    """Probes an actual write instead of trusting os.access(): os.access()
+    reports a directory as writable for uid 0 even on a read-only mount,
+    which would silently defeat this check for a root-run daemon."""
+    probe = path / f".janus_config_check_{os.getpid()}"
+    try:
+        with open(probe, "w"):
+            pass
+        probe.unlink()
+        return True
+    except OSError:
+        return False
+
+
+@dataclass
+class ConfigValidationResult:
+    errors: list = field(default_factory=list)
+    warnings: list = field(default_factory=list)
+
+    @property
+    def ok(self) -> bool:
+        return not self.errors
+
+
+def validate_config() -> ConfigValidationResult:
+    """
+    Checks the current module-level config for boot-blocking problems
+    (errors) and degraded-functionality problems (warnings). Reads live
+    src.config.* values so tests can monkeypatch attributes directly.
+    """
+    errors = []
+    warnings = []
+
+    # Database — .lower() matches src.database.get_connection()'s own comparison
+    db_type = (DB_TYPE or "").lower()
+    if db_type == "postgres" and not DATABASE_URL:
+        errors.append("DB_TYPE=postgres but DATABASE_URL is empty")
+    if db_type != "postgres":
+        parent = Path(DB_PATH).parent
+        if not _is_writable_dir(_nearest_existing_ancestor(parent)):
+            errors.append(
+                f"DB_PATH parent directory '{parent}' is not writable "
+                f"(resolved from DB_PATH={DB_PATH})"
+            )
+
+    # Auth: keys_available() is the same predicate src.auth._load_keys() uses
+    # to decide whether it needs to auto-generate — kept as a lazy import (not
+    # module-level) since src.auth imports ROOT_DIR from this module.
+    if REQUIRE_AUTH:
+        from src.auth import KEYS_DIR, keys_available
+        if not keys_available() and not _is_writable_dir(_nearest_existing_ancestor(KEYS_DIR)):
+            errors.append(
+                "REQUIRE_AUTH=True but no JWT key pair is available via "
+                "env and '.keys/' is not writable for auto-generation"
+            )
+
+    # GitHub
+    if GITHUB_ENABLED and not (GITHUB_ACCESS_TOKEN or GITHUB_PM_TOKEN):
+        warnings.append(
+            "GITHUB_ENABLED=True but neither GITHUB_ACCESS_TOKEN nor "
+            "GITHUB_PM_TOKEN is set — GitHub integration will fail at call time"
+        )
+
+    # OpenRouter routing (mirrors the routing condition in src/llm.py)
+    if "/" in (LLM_MODEL or "") and not OPENROUTER_API_KEY:
+        warnings.append(
+            f"LLM_MODEL='{LLM_MODEL}' looks like an OpenRouter model but "
+            "OPENROUTER_API_KEY is empty"
+        )
+
+    # Sandbox / spawn provider enums
+    if SANDBOX_PROVIDER not in ("local", "docker", "e2b"):
+        warnings.append(f"SANDBOX_PROVIDER='{SANDBOX_PROVIDER}' is not one of local/docker/e2b")
+    elif SANDBOX_PROVIDER == "e2b" and not E2B_API_KEY:
+        warnings.append("SANDBOX_PROVIDER=e2b but E2B_API_KEY is empty")
+    elif SANDBOX_PROVIDER == "local" and not ALLOW_LOCAL_SANDBOX_EXEC:
+        warnings.append(
+            "SANDBOX_PROVIDER=local but ALLOW_LOCAL_SANDBOX_EXEC is not set — "
+            "local sandbox calls will be refused"
+        )
+
+    if SPAWN_PROVIDER not in ("local", "docker", "ecs"):
+        warnings.append(f"SPAWN_PROVIDER='{SPAWN_PROVIDER}' is not one of local/docker/ecs")
+
+    # Neo4j partial config
+    if NEO4J_URI and not (NEO4J_USERNAME and NEO4J_PASSWORD):
+        warnings.append("NEO4J_URI is set but NEO4J_USERNAME/NEO4J_PASSWORD are incomplete")
+
+    return ConfigValidationResult(errors=errors, warnings=warnings)
+
+
+def run_config_check() -> int:
+    """
+    Runs validate_config(), logs the results, and returns a process exit
+    code (0 = ok, possibly with warnings; 1 = critical errors present).
+    Safe to call before init_db() — does not touch the database.
+    """
+    result = validate_config()
+    for w in result.warnings:
+        _config_logger.warning(f"[config] {w}")
+    if not result.ok:
+        _config_logger.critical(
+            "Startup configuration validation failed with %d error(s):\n  - %s",
+            len(result.errors), "\n  - ".join(result.errors),
+        )
+        return 1
+    _config_logger.info(
+        "Configuration validation passed"
+        + (f" with {len(result.warnings)} warning(s)." if result.warnings else ".")
+    )
+    return 0

@@ -118,6 +118,13 @@ def serve_static(path: str):
 
 def run_server(port=5005):
     """Starts the Uvicorn ASGI server. Blocks until process is interrupted."""
+    from src.config import run_config_check
+    if run_config_check() != 0:
+        # os._exit (not sys.exit/raise SystemExit) because main.py may run this
+        # in a background thread, where SystemExit only kills that thread and
+        # is silently swallowed — the whole process must come down here.
+        logger.critical("Aborting web server startup due to configuration errors.")
+        os._exit(1)
     import uvicorn
     os.makedirs(STATIC_DIR, exist_ok=True)
     logger.info(f"Starting Positronic Membrane FastAPI Web Server on port {port} via Uvicorn...")

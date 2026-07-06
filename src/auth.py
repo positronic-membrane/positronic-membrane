@@ -48,6 +48,14 @@ def _generate_key_pair():
         
     logger.info(f"Keys successfully saved in {KEYS_DIR}")
 
+def keys_available() -> bool:
+    """True if _load_keys() would succeed without needing to auto-generate —
+    i.e. either the env var pair or both local PEM files are already present."""
+    if os.getenv("JWT_PRIVATE_KEY") and os.getenv("JWT_PUBLIC_KEY"):
+        return True
+    return PRIVATE_KEY_PATH.exists() and PUBLIC_KEY_PATH.exists()
+
+
 def _load_keys():
     """Loads RSA private/public keys from environment or local files."""
     global _private_key_pem, _public_key_pem
