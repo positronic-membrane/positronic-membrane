@@ -983,6 +983,168 @@ def handle_handoff_command(command_str: str) -> str:
     return bundle + f"\n\n---\n[✔] Draft saved to docs/drafts/issue_{issue_number}_handoff.md"
 
 
+def handle_review_command(command_str: str) -> str:
+    """
+    Handles /review slash commands: evaluates a PR's diff against its originating
+    issue's acceptance criteria and posts a structured review comment.
+
+    Usage:
+      /review <pr_number> [issue_number] [--repo owner/repo]
+
+    If issue_number is omitted, it is inferred from a "Closes/Fixes/Resolves #N"
+    reference in the PR body.
+    """
+    usage = "[Error] Usage: /review <pr_number> [issue_number] [--repo owner/repo]"
+    parts = command_str.strip().split(None, 1)
+    if len(parts) < 2:
+        return usage
+
+    tokens = parts[1].strip().split()
+    try:
+        pr_number = int(tokens[0])
+    except (IndexError, ValueError):
+        return usage
+
+    repo = None
+    issue_number = None
+    i = 1
+    while i < len(tokens):
+        if tokens[i] == "--repo" and i + 1 < len(tokens):
+            repo = tokens[i + 1]
+            i += 2
+        else:
+            if issue_number is None:
+                try:
+                    issue_number = int(tokens[i])
+                except ValueError:
+                    return usage
+            i += 1
+
+    party_id = get_session_party_id()
+
+    from src.skills import has_role, SafeGitHub
+
+    if not has_role(party_id, "contributor"):
+        return "[Error] /review requires the 'contributor' role."
+
+    from src.pr_review import infer_linked_issue, review_pr
+
+    target_repo = repo or src.config.GITHUB_REPO
+
+    try:
+        pr = None
+        if issue_number is None:
+            gh = SafeGitHub(party_id=party_id)
+            pr = gh.get_pr(target_repo, pr_number)
+            issue_number = infer_linked_issue(pr.get("body") or "")
+            if issue_number is None:
+                return (
+                    "[Error] Could not infer a linked issue from the PR body. "
+                    f"Specify explicitly: /review {pr_number} <issue_number>"
+                )
+        # Pass the already-fetched pr through (when we fetched it above to infer
+        # issue_number) so review_pr() doesn't issue a redundant GitHub API call.
+        verdict = review_pr(pr_number, issue_number, repo=repo, party_id=party_id, pr=pr)
+    except (PermissionError, RuntimeError, ValueError) as err:
+        return f"[Error] {err}"
+    except Exception as err:
+        return f"[Error] Failed to review PR: {err}"
+
+    status = "APPROVED" if verdict["overall_met"] else "CHANGES REQUESTED"
+    return (
+        f"[✔] Review posted on PR #{pr_number} — {status}.\n"
+        f"Recommendation: {verdict['recommendation']}\n"
+        f"Run `/merge {pr_number}` to merge, or `/merge {pr_number} --force` to override unmet criteria."
+    )
+
+
+def handle_merge_command(command_str: str) -> str:
+    """
+    Handles /merge slash commands: merges a PR (squash) only if its stored /review
+    verdict shows all acceptance criteria met, unless --force is given.
+
+    Usage:
+      /merge <pr_number> [--force] [--repo owner/repo]
+    """
+    usage = "[Error] Usage: /merge <pr_number> [--force] [--repo owner/repo]"
+    parts = command_str.strip().split(None, 1)
+    if len(parts) < 2:
+        return usage
+
+    tokens = parts[1].strip().split()
+    try:
+        pr_number = int(tokens[0])
+    except (IndexError, ValueError):
+        return usage
+
+    force = "--force" in tokens
+    repo = None
+    if "--repo" in tokens:
+        idx = tokens.index("--repo")
+        if idx + 1 < len(tokens):
+            repo = tokens[idx + 1]
+
+    party_id = get_session_party_id()
+
+    from src.skills import has_role, SafeGitHub
+
+    if not has_role(party_id, "admin"):
+        return "[Error] /merge requires the 'admin' role."
+
+    from src.pr_review import clear_stored_verdict, get_stored_verdict
+
+    target_repo = repo or src.config.GITHUB_REPO
+    if not target_repo:
+        return "[Error] No repo configured: set GITHUB_REPO or pass --repo."
+
+    verdict = get_stored_verdict(target_repo, pr_number)
+    if verdict is None and not force:
+        return (
+            f"[Error] No /review verdict found for PR #{pr_number}. "
+            f"Run `/review {pr_number} <issue_number>` first, or use `/merge {pr_number} --force` "
+            "to merge without a review."
+        )
+    if verdict is not None and not verdict.get("overall_met") and not force:
+        unmet = [c["text"] for c in verdict.get("criteria", []) if not c.get("met")]
+        return (
+            f"[Error] PR #{pr_number} has unmet acceptance criteria: {', '.join(unmet) or '(none parsed)'}. "
+            f"Use `/merge {pr_number} --force` to override and merge anyway."
+        )
+
+    gh = SafeGitHub(party_id=party_id)
+
+    # A verdict is only trustworthy against the commits it was computed from —
+    # if the PR has moved on since /review ran, don't let a stale "met" silently
+    # authorize merging code nobody reviewed.
+    if verdict is not None and verdict.get("head_sha") and not force:
+        try:
+            current_pr = gh.get_pr(target_repo, pr_number)
+        except (PermissionError, RuntimeError) as err:
+            return f"[Error] {err}"
+        current_sha = (current_pr.get("head") or {}).get("sha")
+        if current_sha and current_sha != verdict["head_sha"]:
+            return (
+                f"[Error] PR #{pr_number} has new commits since it was last reviewed "
+                f"(reviewed {verdict['head_sha'][:7]}, now at {current_sha[:7]}). "
+                f"Run `/review {pr_number} {verdict.get('issue_number', '<issue_number>')}` again, "
+                f"or use `/merge {pr_number} --force` to override."
+            )
+
+    try:
+        gh.merge_pr(target_repo, pr_number, merge_method="squash")
+    except (PermissionError, RuntimeError, ValueError) as err:
+        return f"[Error] {err}"
+    except Exception as err:
+        return f"[Error] Failed to merge PR: {err}"
+
+    clear_stored_verdict(target_repo, pr_number)
+    override_note = " (forced override — criteria unmet or unreviewed)" if force else ""
+    log_episodic_memory(
+        "system", f"PR #{pr_number} on {target_repo} merged (squash){override_note}.", "user_visible"
+    )
+    return f"[✔] PR #{pr_number} merged (squash){override_note}."
+
+
 _CONVERSATION_MEMORY_LIMIT = 10   # primary user-visible dialogue window
 # Each ReAct tool-use turn logs exactly 2 background_thought rows (the
 # persona's own response + a sandbox/skill execution summary). 6 keeps up to
@@ -2031,6 +2193,16 @@ async def run_persona_chat():
                 print(f"\n{res}\n")
                 continue
 
+            if user_msg_lower == "/review" or user_msg_lower.startswith("/review "):
+                res = handle_review_command(user_msg)
+                print(f"\n{res}\n")
+                continue
+
+            if user_msg_lower == "/merge" or user_msg_lower.startswith("/merge "):
+                res = handle_merge_command(user_msg)
+                print(f"\n{res}\n")
+                continue
+
             # Log user prompt to SQLite
             log_episodic_memory("user", user_msg, "user_visible")
 
@@ -2301,6 +2473,12 @@ async def handle_web_slash_command(user_msg: str) -> str:
 
     elif user_msg.strip().lower() == "/handoff" or user_msg.strip().lower().startswith("/handoff "):
         return handle_handoff_command(user_msg)
+
+    elif user_msg.strip().lower() == "/review" or user_msg.strip().lower().startswith("/review "):
+        return handle_review_command(user_msg)
+
+    elif user_msg.strip().lower() == "/merge" or user_msg.strip().lower().startswith("/merge "):
+        return handle_merge_command(user_msg)
 
     return "[Error] Unknown slash command."
 
