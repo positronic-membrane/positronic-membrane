@@ -50,6 +50,18 @@ Run `/code-review high` on your branch before opening a PR and fix all findings.
 /code-review high --fix  # auto-apply findings
 ```
 
+### Testing
+
+Run the test suite before opening a PR:
+
+```bash
+JANUS_TEST_MODE=1 pytest
+```
+
+- New modules get a matching `tests/test_<module>.py`.
+- Mock external calls (`urllib.request.urlopen` for GitHub, `get_effective_workspace_root` for filesystem-boundary tests) — never hit real network/services in tests.
+- See `tests/test_github_integration.py` and `tests/test_document_memory.py` for the established mocking patterns.
+
 ### Pull request
 
 - Squash-merge workflow — one atomic commit per issue lands on `main`
