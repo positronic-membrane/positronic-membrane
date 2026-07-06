@@ -402,3 +402,356 @@ def test_smart_governor_progress_reset(mock_run):
     stagnant, desc = check_smart_governor_stagnation()
     assert stagnant is False
     assert src.daemon._consecutive_stagnant_cycles == 0
+
+# --- Issue #65: Smart Loop Governor persisted state, cooldown, and resume paths ---
+
+@pytest.mark.asyncio
+@patch("src.daemon.send_webhook_notification")
+@patch("src.daemon.run_interval_skills")
+@patch("src.codebase.add_memory")
+@patch("src.memory.add_memory")
+@patch("src.memory.query_memories")
+@patch("src.skills.query_agent")
+async def test_governor_pause_persists_state_flag(
+    mock_query, mock_query_memories, mock_add_memory, mock_codebase_add_memory,
+    mock_interval_skills, mock_webhook,
+    tmp_path, monkeypatch
+):
+    """A Smart Governor halt must persist governor.state='paused' and a non-empty
+    governor.paused_at, so pause is inspectable independent of the blocked coroutine."""
+    mock_query_memories.return_value = []
+    mock_add_memory.return_value = None
+    mock_codebase_add_memory.return_value = None
+    mock_query.return_value = ""
+
+    monkeypatch.setenv("JANUS_TEST_MODE", "1")
+    monkeypatch.setattr(src.config, "N_LOOP_LIMIT", 1)
+    monkeypatch.setattr(src.config, "ROOT_DIR", tmp_path)
+
+    daemon_task = asyncio.create_task(run_heartbeat_loop())
+    await asyncio.sleep(4.0)
+    daemon_task.cancel()
+    try:
+        await daemon_task
+    except asyncio.CancelledError:
+        pass
+
+    conn = get_connection()
+    state_row = conn.execute("SELECT config_value FROM system_config WHERE config_key = 'governor.state';").fetchone()
+    paused_at_row = conn.execute(
+        "SELECT config_value FROM system_config WHERE config_key = 'governor.paused_at';"
+    ).fetchone()
+    conn.close()
+
+    assert state_row[0] == "paused"
+    assert paused_at_row[0]
+
+@pytest.mark.asyncio
+@patch("src.daemon.send_webhook_notification")
+@patch("src.daemon.run_interval_skills")
+@patch("src.codebase.add_memory")
+@patch("src.memory.add_memory")
+@patch("src.memory.query_memories")
+@patch("src.skills.query_agent")
+async def test_governor_resume_on_cooldown_expiry(
+    mock_query, mock_query_memories, mock_add_memory, mock_codebase_add_memory,
+    mock_interval_skills, mock_webhook,
+    tmp_path, monkeypatch
+):
+    """Once paused, the governor must auto-resume once governor.cooldown_minutes
+    elapses, even though user_presence_status never becomes 'active'."""
+    import src.daemon
+
+    mock_query_memories.return_value = []
+    mock_add_memory.return_value = None
+    mock_codebase_add_memory.return_value = None
+    mock_query.return_value = ""
+
+    monkeypatch.setenv("JANUS_TEST_MODE", "1")
+    monkeypatch.setattr(src.config, "N_LOOP_LIMIT", 1)
+    monkeypatch.setattr(src.config, "ROOT_DIR", tmp_path)
+
+    conn = get_connection()
+    conn.execute("UPDATE system_config SET config_value = '1' WHERE config_key = 'governor.cooldown_minutes';")
+    conn.commit()
+    conn.close()
+
+    # Simulate an hour of elapsed wall-clock time on the very first re-check inside
+    # pause_until_user_active(), so the cooldown fires without a real 60s wait.
+    # Patches daemon's own _governor_monotonic() indirection rather than the real
+    # time.monotonic(), since asyncio's own scheduling also depends on that clock.
+    calls = {"n": 0}
+    def fake_monotonic():
+        calls["n"] += 1
+        return 0.0 if calls["n"] == 1 else 3600.0
+    monkeypatch.setattr(src.daemon, "_governor_monotonic", fake_monotonic)
+
+    daemon_task = asyncio.create_task(run_heartbeat_loop())
+    await asyncio.sleep(4.0)
+    daemon_task.cancel()
+    try:
+        await daemon_task
+    except asyncio.CancelledError:
+        pass
+
+    resume_calls = [c for c in mock_webhook.call_args_list if c[0][0] == "governor_resume"]
+    assert resume_calls, "expected a governor_resume webhook notification"
+    assert "cooldown_expiry" in resume_calls[0][0][1]
+
+    conn = get_connection()
+    state_row = conn.execute("SELECT config_value FROM system_config WHERE config_key = 'governor.state';").fetchone()
+    conn.close()
+    assert state_row[0] == "running"
+
+@pytest.mark.asyncio
+@patch("src.daemon.send_webhook_notification")
+@patch("src.daemon.run_interval_skills")
+@patch("src.codebase.add_memory")
+@patch("src.memory.add_memory")
+@patch("src.memory.query_memories")
+@patch("src.skills.query_agent")
+async def test_governor_resume_on_user_activity(
+    mock_query, mock_query_memories, mock_add_memory, mock_codebase_add_memory,
+    mock_interval_skills, mock_webhook,
+    tmp_path, monkeypatch
+):
+    """Detected user presence must flip governor.state back to 'running', not just
+    reset the in-memory counters."""
+    mock_query_memories.return_value = []
+    mock_add_memory.return_value = None
+    mock_codebase_add_memory.return_value = None
+    mock_query.return_value = ""
+
+    monkeypatch.setenv("JANUS_TEST_MODE", "1")
+    monkeypatch.setattr(src.config, "N_LOOP_LIMIT", 1)
+    monkeypatch.setattr(src.config, "ROOT_DIR", tmp_path)
+
+    # The real check_presence skill re-scans ROOT_DIR on every mid-tick and would
+    # overwrite our manual 'active' write below with 'idle' (tmp_path has no fresh
+    # non-DB files) — no-op it here so the manual write is what the loop observes.
+    real_execute = DynamicSkillExecutor.execute
+    def guarded_execute(skill_id, arguments, party_id=None):
+        if skill_id == "check_presence":
+            return {"success": True, "result": "skipped in test"}
+        return real_execute(skill_id, arguments, party_id=party_id)
+
+    with patch.object(DynamicSkillExecutor, "execute", side_effect=guarded_execute):
+        daemon_task = asyncio.create_task(run_heartbeat_loop())
+        await asyncio.sleep(2.5)
+
+        conn = get_connection()
+        state_row = conn.execute(
+            "SELECT config_value FROM system_config WHERE config_key = 'governor.state';"
+        ).fetchone()
+        assert state_row[0] == "paused"
+        conn.execute("UPDATE system_config SET config_value = 'active' WHERE config_key = 'user_presence_status';")
+        conn.commit()
+        conn.close()
+
+        await asyncio.sleep(2.5)
+        daemon_task.cancel()
+        try:
+            await daemon_task
+        except asyncio.CancelledError:
+            pass
+
+    conn = get_connection()
+    state_row = conn.execute("SELECT config_value FROM system_config WHERE config_key = 'governor.state';").fetchone()
+    paused_at_row = conn.execute(
+        "SELECT config_value FROM system_config WHERE config_key = 'governor.paused_at';"
+    ).fetchone()
+    conn.close()
+    assert state_row[0] == "running"
+    assert paused_at_row[0] == ""
+
+@pytest.mark.asyncio
+@patch("src.daemon.send_webhook_notification")
+@patch("src.daemon.run_interval_skills")
+@patch("src.codebase.add_memory")
+@patch("src.memory.add_memory")
+@patch("src.memory.query_memories")
+@patch("src.skills.query_agent")
+async def test_governor_resume_on_chat_activity(
+    mock_query, mock_query_memories, mock_add_memory, mock_codebase_add_memory,
+    mock_interval_skills, mock_webhook,
+    tmp_path, monkeypatch
+):
+    """reset_governor_state('user_chat'), the shared helper called from every chat
+    entry point, must resolve an active pause exactly like presence detection does."""
+    import src.daemon
+
+    mock_query_memories.return_value = []
+    mock_add_memory.return_value = None
+    mock_codebase_add_memory.return_value = None
+    mock_query.return_value = ""
+
+    monkeypatch.setenv("JANUS_TEST_MODE", "1")
+    monkeypatch.setattr(src.config, "N_LOOP_LIMIT", 1)
+    monkeypatch.setattr(src.config, "ROOT_DIR", tmp_path)
+
+    daemon_task = asyncio.create_task(run_heartbeat_loop())
+    await asyncio.sleep(2.5)
+
+    assert src.daemon.get_governor_state() == "paused"
+    src.daemon.reset_governor_state("user_chat")
+    assert src.daemon.get_governor_state() == "running"
+
+    await asyncio.sleep(1.5)
+    daemon_task.cancel()
+    try:
+        await daemon_task
+    except asyncio.CancelledError:
+        pass
+
+    resume_calls = [c for c in mock_webhook.call_args_list if c[0][0] == "governor_resume"]
+    assert resume_calls
+    assert "user_chat" in resume_calls[0][0][1]
+
+def test_governor_chat_trigger_is_noop_when_not_paused():
+    """reset_governor_state('user_chat') must NOT reset the stagnation/hard-cap
+    counters while the governor is running — otherwise routine chat traffic would
+    perpetually suppress the safety valve from ever accumulating enough consecutive
+    unproductive cycles to trip. Only 'user_presence' resets unconditionally,
+    matching its pre-existing per-tick behavior."""
+    import src.daemon
+    from src.database import get_connection, increment_consecutive_background_loops
+
+    assert src.daemon.get_governor_state() == "running"
+    src.daemon._consecutive_stagnant_cycles = 5
+    increment_consecutive_background_loops()
+
+    src.daemon.reset_governor_state("user_chat")
+
+    assert src.daemon._consecutive_stagnant_cycles == 5
+    conn = get_connection(read_only_constitution=True)
+    loop_count = conn.execute(
+        "SELECT config_value FROM system_config WHERE config_key = 'consecutive_background_loops';"
+    ).fetchone()
+    conn.close()
+    assert loop_count[0] == "1"
+
+    # user_presence still resets unconditionally even when not paused (pre-existing behavior).
+    src.daemon.reset_governor_state("user_presence")
+    assert src.daemon._consecutive_stagnant_cycles == 0
+
+@pytest.mark.asyncio
+async def test_reflex_queue_worker_skips_dispatch_while_paused(tmp_path, monkeypatch):
+    """File-change-triggered reflex actions must not fire while the Smart Loop
+    Governor is paused — otherwise background automation continues through this
+    channel even though the mid/high loops correctly stop dispatching."""
+    import src.daemon
+    from src.daemon import reflex_queue_worker
+
+    conn = get_connection()
+    conn.execute("UPDATE system_config SET config_value = 'paused' WHERE config_key = 'governor.state';")
+    conn.commit()
+    conn.close()
+
+    src.daemon._reflex_queue = asyncio.PriorityQueue()
+    src.daemon._reflex_queue.put_nowait((-5, "evaluate_goals"))
+
+    with patch.object(DynamicSkillExecutor, "execute", wraps=DynamicSkillExecutor.execute) as mock_execute:
+        worker_task = asyncio.create_task(reflex_queue_worker())
+        await asyncio.sleep(0.2)
+        worker_task.cancel()
+        try:
+            await worker_task
+        except asyncio.CancelledError:
+            pass
+
+        assert not mock_execute.called
+
+@pytest.mark.asyncio
+@patch("src.memory.add_memory")
+@patch("src.memory.query_memories")
+@patch("src.skills.query_agent")
+async def test_high_layer_loop_skips_dispatch_while_paused(
+    mock_query, mock_query_memories, mock_add_memory, tmp_path, monkeypatch
+):
+    """While governor.state='paused', the high-level loop must skip all four of its
+    tasks but still keep the heartbeat timestamp fresh. Exercises run_high_layer_loop()
+    directly (not the full run_heartbeat_loop, which resets governor.state='running'
+    on startup and would immediately clobber a pre-set 'paused' state)."""
+    from src.daemon import run_high_layer_loop
+
+    mock_query_memories.return_value = []
+    mock_add_memory.return_value = None
+    mock_query.return_value = ""
+
+    monkeypatch.setenv("JANUS_TEST_MODE", "1")
+    monkeypatch.setattr(src.config, "ROOT_DIR", tmp_path)
+
+    conn = get_connection()
+    conn.execute("UPDATE system_config SET config_value = 'paused' WHERE config_key = 'governor.state';")
+    conn.commit()
+    conn.close()
+
+    with patch.object(DynamicSkillExecutor, "execute", wraps=DynamicSkillExecutor.execute) as mock_execute:
+        loop_task = asyncio.create_task(run_high_layer_loop())
+        await asyncio.sleep(2.5)
+        loop_task.cancel()
+        try:
+            await loop_task
+        except asyncio.CancelledError:
+            pass
+
+        high_skill_ids = {"decay_self_model", "consolidate_memories", "evaluate_goals", "cleanup_episodic_memory"}
+        called_ids = {c[0][0] for c in mock_execute.call_args_list}
+        assert not (high_skill_ids & called_ids)
+
+    conn = get_connection(read_only_constitution=True)
+    last_run = conn.execute("SELECT last_run_at FROM cognitive_layers WHERE layer_name = 'high';").fetchone()
+    conn.close()
+    assert last_run[0] is not None
+
+@pytest.mark.asyncio
+@patch("src.daemon.run_interval_skills")
+@patch("src.memory.add_memory")
+@patch("src.memory.query_memories")
+@patch("src.skills.query_agent")
+async def test_mid_layer_loop_explicit_pause_guard_skips_dispatch(
+    mock_query, mock_query_memories, mock_add_memory, mock_interval_skills,
+    tmp_path, monkeypatch
+):
+    """While governor.state='paused' (set directly, independent of the stagnation
+    path), the mid-level loop must skip interval skills and reflection-trigger
+    dispatch, proving the guard is explicit rather than an accidental side effect
+    of the blocking pause_until_user_active() await. Exercises run_mid_layer_loop()
+    directly for the same startup-reset reason as the high-layer test above."""
+    import src.daemon
+    from src.daemon import run_mid_layer_loop
+
+    mock_query_memories.return_value = []
+    mock_add_memory.return_value = None
+    mock_query.return_value = ""
+
+    monkeypatch.setenv("JANUS_TEST_MODE", "1")
+    monkeypatch.setattr(src.config, "ROOT_DIR", tmp_path)
+
+    conn = get_connection()
+    conn.execute("UPDATE system_config SET config_value = 'paused' WHERE config_key = 'governor.state';")
+    conn.commit()
+    conn.close()
+
+    src.daemon._pending_swarm_triggers.clear()
+    src.daemon._pending_swarm_triggers.append("reflection")
+
+    with patch.object(DynamicSkillExecutor, "execute", wraps=DynamicSkillExecutor.execute) as mock_execute:
+        loop_task = asyncio.create_task(run_mid_layer_loop())
+        await asyncio.sleep(2.5)
+        loop_task.cancel()
+        try:
+            await loop_task
+        except asyncio.CancelledError:
+            pass
+
+        assert not mock_interval_skills.called
+        reflection_calls = [c for c in mock_execute.call_args_list if c[0][0] == "run_reflection_cycle"]
+        assert reflection_calls == []
+
+    assert "reflection" in src.daemon._pending_swarm_triggers
+
+    conn = get_connection(read_only_constitution=True)
+    last_run = conn.execute("SELECT last_run_at FROM cognitive_layers WHERE layer_name = 'mid';").fetchone()
+    conn.close()
+    assert last_run[0] is not None

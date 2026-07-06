@@ -113,6 +113,30 @@ def handle_circuit_command(command_str: str) -> str:
     else:
         return "[Error] Usage: /circuit [status] | /circuit reset <skill_id>"
 
+def handle_governor_command(command_str: str) -> str:
+    from src.daemon import get_governor_status_dict
+
+    parts = command_str.strip().split(None, 1)
+    subcommand = ""
+    if len(parts) > 1:
+        subcommand = parts[1].strip().split(None, 1)[0].lower()
+
+    if subcommand and subcommand != "status":
+        return "[Error] Usage: /governor status"
+
+    status = get_governor_status_dict()
+    paused_at = status["paused_at"] if status["paused_at"] else "-"
+
+    output = ["### Smart Loop Governor Status\n"]
+    output.append("| Field | Value |")
+    output.append("| --- | --- |")
+    output.append(f"| State | `{status['state']}` |")
+    output.append(f"| Paused At | {paused_at} |")
+    output.append(f"| Consecutive Stagnant Cycles | {status['consecutive_stagnant_cycles']}/{status['stagnant_threshold']} |")
+    output.append(f"| Background Loop Count | {status['background_loop_count']}/{status['loop_hard_cap']} |")
+    output.append(f"| Cooldown (minutes) | {status['cooldown_minutes']} |")
+    return "\n".join(output)
+
 def handle_runskill_command(command_str: str) -> str:
     import json
     import re
@@ -1719,6 +1743,9 @@ async def run_persona_chat():
             if not user_msg:
                 continue
 
+            from src.daemon import reset_governor_state
+            reset_governor_state("user_chat")
+
             if user_msg.lower().startswith("/sandbox"):
                 parts = user_msg.split()
                 if len(parts) < 2:
@@ -2183,6 +2210,11 @@ async def run_persona_chat():
                 print(f"\n{res}\n")
                 continue
 
+            if user_msg_lower == "/governor" or user_msg_lower.startswith("/governor "):
+                res = handle_governor_command(user_msg)
+                print(f"\n{res}\n")
+                continue
+
             if user_msg_lower == "/docs" or user_msg_lower.startswith("/docs "):
                 res = handle_docs_command(user_msg)
                 print(f"\n{res}\n")
@@ -2467,6 +2499,9 @@ async def handle_web_slash_command(user_msg: str) -> str:
 
     elif user_msg.strip().lower() == "/circuit" or user_msg.strip().lower().startswith("/circuit "):
         return handle_circuit_command(user_msg)
+
+    elif user_msg.strip().lower() == "/governor" or user_msg.strip().lower().startswith("/governor "):
+        return handle_governor_command(user_msg)
 
     elif user_msg.strip().lower() == "/docs" or user_msg.strip().lower().startswith("/docs "):
         return handle_docs_command(user_msg)

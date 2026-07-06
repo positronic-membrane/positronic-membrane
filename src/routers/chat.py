@@ -17,6 +17,7 @@ from src.routers.dependencies import (
     process_sandbox_updates
 )
 from src.database import log_episodic_memory, get_recent_episodic_memories
+from src.daemon import reset_governor_state
 import src.persona
 
 
@@ -91,6 +92,7 @@ def post_chat(data: ChatRequest, current_party = Depends(require_role('user'))):
 
         party_id = current_party["party_id"]
         log_episodic_memory("user", user_msg, "user_visible", party_id=party_id)
+        reset_governor_state("user_chat")
 
         if user_msg.startswith("/"):
             response = asyncio.run(src.persona.handle_web_slash_command(user_msg))
@@ -141,6 +143,7 @@ async def post_chat_stream(data: ChatRequest, current_party=Depends(require_role
 
     party_id = current_party["party_id"]
     log_episodic_memory("user", user_msg, "user_visible", party_id=party_id)
+    reset_governor_state("user_chat")
 
     async def _generate():
         collected = []
@@ -304,7 +307,8 @@ async def websocket_chat(websocket: WebSocket, token: Optional[str] = Query(None
                 
             party_id = current_party["party_id"]
             log_episodic_memory("user", user_msg, "user_visible", party_id=party_id)
-            
+            reset_governor_state("user_chat")
+
             # Send 'thinking' state back to client
             await websocket.send_json({"event": "thinking"})
             
