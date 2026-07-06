@@ -916,6 +916,73 @@ def handle_docs_command(command_str: str) -> str:
         )
 
 
+def handle_handoff_command(command_str: str) -> str:
+    """
+    Handles /handoff slash commands to generate an Agent Handoff Protocol bundle.
+
+    Usage:
+      /handoff <issue_number> [--template claude_code|codex|generic] [--repo owner/repo] [--commit-db]
+    """
+    usage = (
+        "[Error] Usage: /handoff <issue_number> "
+        "[--template claude_code|codex|generic] [--repo owner/repo] [--commit-db]"
+    )
+    parts = command_str.strip().split(None, 1)
+    if len(parts) < 2:
+        return usage
+
+    tokens = parts[1].strip().split()
+    try:
+        issue_number = int(tokens[0])
+    except (IndexError, ValueError):
+        return usage
+
+    repo = None
+    agent_template = None
+    commit_db = False
+    i = 1
+    while i < len(tokens):
+        token = tokens[i]
+        if token == "--template" and i + 1 < len(tokens):
+            agent_template = tokens[i + 1]
+            i += 2
+        elif token == "--repo" and i + 1 < len(tokens):
+            repo = tokens[i + 1]
+            i += 2
+        elif token == "--commit-db":
+            commit_db = True
+            i += 1
+        else:
+            i += 1
+
+    party_id = get_session_party_id()
+
+    from src.skills import has_role
+
+    if not has_role(party_id, "contributor"):
+        return (
+            "[Error] /handoff requires the 'contributor' role "
+            "(writes a draft file, and optionally a document record)."
+        )
+
+    from src.agent_handoff import generate_handoff
+
+    try:
+        bundle = generate_handoff(
+            issue_number,
+            repo=repo,
+            agent_template=agent_template,
+            party_id=party_id,
+            commit_db=commit_db,
+        )
+    except (PermissionError, RuntimeError, ValueError) as err:
+        return f"[Error] {err}"
+    except Exception as err:
+        return f"[Error] Failed to generate handoff bundle: {err}"
+
+    return bundle + f"\n\n---\n[✔] Draft saved to docs/drafts/issue_{issue_number}_handoff.md"
+
+
 _CONVERSATION_MEMORY_LIMIT = 10   # primary user-visible dialogue window
 # Each ReAct tool-use turn logs exactly 2 background_thought rows (the
 # persona's own response + a sandbox/skill execution summary). 6 keeps up to
@@ -1959,6 +2026,11 @@ async def run_persona_chat():
                 print(f"\n{res}\n")
                 continue
 
+            if user_msg_lower == "/handoff" or user_msg_lower.startswith("/handoff "):
+                res = handle_handoff_command(user_msg)
+                print(f"\n{res}\n")
+                continue
+
             # Log user prompt to SQLite
             log_episodic_memory("user", user_msg, "user_visible")
 
@@ -2226,7 +2298,10 @@ async def handle_web_slash_command(user_msg: str) -> str:
 
     elif user_msg.strip().lower() == "/docs" or user_msg.strip().lower().startswith("/docs "):
         return handle_docs_command(user_msg)
-            
+
+    elif user_msg.strip().lower() == "/handoff" or user_msg.strip().lower().startswith("/handoff "):
+        return handle_handoff_command(user_msg)
+
     return "[Error] Unknown slash command."
 
 

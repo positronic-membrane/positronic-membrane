@@ -1584,6 +1584,10 @@ class SafeGitHub:
         validate_action(f"get GitHub issue {repo}#{number}")
         return self._api("GET", f"/repos/{repo}/issues/{number}", repo=repo)
 
+    def list_issue_comments(self, repo: str, number: int) -> list:
+        validate_action(f"list comments for GitHub issue {repo}#{number}")
+        return self._api("GET", f"/repos/{repo}/issues/{number}/comments?per_page=100", repo=repo)
+
     def create_issue(
         self, repo: str, title: str, body: str = "", labels: Optional[list] = None
     ) -> dict:

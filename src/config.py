@@ -65,6 +65,9 @@ GITHUB_REPO = os.getenv("GITHUB_REPO", "")                   # e.g., "owner/repo
 # Comma-separated "owner/repo" values, e.g. "jmccauley75gh/positronic-membrane"
 GITHUB_READONLY_REPOS: list = [r.strip() for r in os.getenv("GITHUB_READONLY_REPOS", "").split(",") if r.strip()]
 
+# Agent Handoff Protocol (see src/agent_handoff.py)
+AGENT_HANDOFF_TEMPLATE = os.getenv("AGENT_HANDOFF_TEMPLATE", "generic")  # "claude_code", "codex", or "generic"
+
 # Docker Sandbox Networking & Hardening
 DOCKER_NETWORK = os.getenv("DOCKER_NETWORK", "none")  # Default network isolation: none
 JANUS_DOCKER_IMAGE = os.getenv("JANUS_DOCKER_IMAGE", "janus:latest")

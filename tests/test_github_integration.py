@@ -71,6 +71,16 @@ def test_get_issue_uses_get():
     assert result["number"] == 5
 
 
+def test_list_issue_comments_uses_get():
+    gh = SafeGitHub(party_id="system")
+    with patch("urllib.request.urlopen", return_value=_urlopen_ctx([{"id": 1}])) as mock_open:
+        result = gh.list_issue_comments(REPO, 5)
+    req = mock_open.call_args[0][0]
+    assert req.full_url == f"https://api.github.com/repos/{REPO}/issues/5/comments?per_page=100"
+    assert req.method == "GET"
+    assert result == [{"id": 1}]
+
+
 def test_create_pr_posts_to_correct_endpoint():
     gh = SafeGitHub(party_id="system")
     with patch("urllib.request.urlopen", return_value=_urlopen_ctx({"number": 10})) as mock_open:
