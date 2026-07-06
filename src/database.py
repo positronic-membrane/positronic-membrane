@@ -745,7 +745,21 @@ def init_db():
         ("n_loop_limit", "20", 0),
         ("consecutive_background_loops", "0", 0),
         ("user_presence_status", "idle", 1),
-        ("governor.stagnant_threshold", "3", 1),
+        # Smart Loop Governor (issue #65): pauses background automations after
+        # `stagnant_threshold` consecutive unproductive cycles. Not agent-modifiable
+        # so the swarm cannot loosen the one setting that caps its own unsupervised
+        # operation. `cooldown_minutes` is a fallback auto-resume if no user activity
+        # is detected; 0 disables the fallback (resume then requires presence/chat).
+        # `state`/`paused_at` persist governor pause status so it's inspectable
+        # independent of which coroutine is currently blocked.
+        ("governor.stagnant_threshold", "3", 0),
+        ("governor.cooldown_minutes", "30", 0),
+        ("governor.state", "running", 0),
+        ("governor.paused_at", "", 0),
+        # DB-backed mirror of daemon.py's in-process _consecutive_stagnant_cycles
+        # global, so status reads/resets are correct even when the API/CLI runs in
+        # a different OS process than the daemon (Docker deployment mode).
+        ("governor.consecutive_stagnant_cycles", "0", 0),
         ("memory.retention_days", "30", 1),
         ("memory.chat_history_min_rows", "500", 1),
         ("memory.chat_history_min_age_days", "30", 1),
@@ -780,6 +794,14 @@ def init_db():
         INSERT OR IGNORE INTO system_config (config_key, config_value, is_agent_modifiable)
         VALUES (?, ?, ?);
         """, (key, value, modifiable))
+
+    # governor.stagnant_threshold predates this hardening (issue #65) and existed as
+    # an agent-modifiable row on any database initialized before it, so the seed
+    # value above is a no-op there via INSERT OR IGNORE — fix up the flag directly
+    # on upgrade so the swarm can't loosen its own containment cap on old DBs either.
+    cursor.execute(
+        "UPDATE system_config SET is_agent_modifiable = 0 WHERE config_key = 'governor.stagnant_threshold' AND is_agent_modifiable != 0;"
+    )
 
     import os
     # Populate default agent registry if empty
@@ -1645,6 +1667,29 @@ def reset_consecutive_background_loops():
     SET config_value = '0', updated_at = CURRENT_TIMESTAMP
     WHERE config_key = 'consecutive_background_loops';
     """)
+    conn.commit()
+    conn.close()
+
+def get_consecutive_stagnant_cycles() -> int:
+    """Retrieves the DB-backed mirror of daemon.py's _consecutive_stagnant_cycles
+    global, so cross-process readers (e.g. web_server in Docker deployment mode)
+    see the real daemon process's count rather than their own unrelated copy."""
+    conn = get_connection(read_only_constitution=True)
+    cursor = conn.cursor()
+    cursor.execute("SELECT config_value FROM system_config WHERE config_key = 'governor.consecutive_stagnant_cycles';")
+    row = cursor.fetchone()
+    conn.close()
+    return int(row[0]) if row else 0
+
+def set_consecutive_stagnant_cycles(value: int) -> None:
+    """Writes through the DB-backed mirror of _consecutive_stagnant_cycles."""
+    conn = get_connection(read_only_constitution=True)
+    cursor = conn.cursor()
+    cursor.execute("""
+    UPDATE system_config
+    SET config_value = ?, updated_at = CURRENT_TIMESTAMP
+    WHERE config_key = 'governor.consecutive_stagnant_cycles';
+    """, (str(value),))
     conn.commit()
     conn.close()
 

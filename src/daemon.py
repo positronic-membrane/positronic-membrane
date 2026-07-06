@@ -23,7 +23,10 @@ from src.database import (
     update_curiosity_vector,
     get_consecutive_background_loops,
     increment_consecutive_background_loops,
-    reset_consecutive_background_loops
+    reset_consecutive_background_loops,
+    get_consecutive_stagnant_cycles,
+    set_consecutive_stagnant_cycles,
+    set_system_config_value,
 )
 
 # Priority queue and loop references for low-level reflexes
@@ -38,11 +41,15 @@ _last_completed_checkpoints = None
 
 def check_smart_governor_stagnation() -> tuple[bool, str]:
     """
-    Checks if there is any progress in the current cycle across three metrics:
-    1. Code changes (git diff hash)
-    2. Database writes (episodic_memory + internal_deliberations row count)
-    3. Checkpoint completions (completed checkpoints count)
-    
+    Checks if there is any progress in the current cycle across three metrics, each
+    standing in for one of the "productive cycle" criteria from issue #65:
+    1. Code changes (git diff hash) — a state-modifying skill or self-modification ran.
+    2. Database writes (episodic_memory + internal_deliberations row count) — an
+       episodic memory was written, or a reflection cycle produced output (reflection
+       results are logged as episodic memories/deliberations, so no separate signal
+       is tracked for them).
+    3. Checkpoint completions (completed checkpoints count) — a goal was updated.
+
     Returns (is_stagnant, justification_string)
     """
     global _consecutive_stagnant_cycles, _last_git_diff_hash, _last_db_write_count, _last_completed_checkpoints
@@ -106,6 +113,7 @@ def check_smart_governor_stagnation() -> tuple[bool, str]:
 
     if not (git_changed or db_changed or checkpoints_changed):
         _consecutive_stagnant_cycles += 1
+        set_consecutive_stagnant_cycles(_consecutive_stagnant_cycles)
         justification = (
             f"Stagnation detected (Consecutive Stagnant Cycles: {_consecutive_stagnant_cycles}). "
             f"Metrics: git_changed={git_changed}, db_changed={db_changed}, checkpoints_changed={checkpoints_changed}."
@@ -113,17 +121,129 @@ def check_smart_governor_stagnation() -> tuple[bool, str]:
         return True, justification
     else:
         _consecutive_stagnant_cycles = 0
+        set_consecutive_stagnant_cycles(0)
         justification = (
             f"Progress registered. "
             f"Metrics: git_changed={git_changed}, db_changed={db_changed}, checkpoints_changed={checkpoints_changed}."
         )
         return False, justification
 
+def _governor_monotonic() -> float:
+    """Indirection around time.monotonic() so tests can fake elapsed time for the
+    cooldown fallback without patching the real time module (which asyncio's own
+    scheduling also depends on)."""
+    return time.monotonic()
+
+def get_governor_state() -> str:
+    """Reads governor.state from system_config; defaults to 'running' if missing/invalid."""
+    from src.database import get_connection
+    conn = get_connection(read_only_constitution=True)
+    try:
+        row = conn.execute(
+            "SELECT config_value FROM system_config WHERE config_key = 'governor.state';"
+        ).fetchone()
+        if row and row[0]:
+            return row[0]
+    except Exception:
+        pass
+    finally:
+        conn.close()
+    return "running"
+
+def is_governor_paused() -> bool:
+    """Returns True if the Smart Loop Governor is currently paused."""
+    return get_governor_state() == "paused"
+
+def get_governor_status_dict() -> dict:
+    """Assembles the full Smart Loop Governor status. Shared by /api/governor/status
+    and /governor status so the two surfaces can't drift, and reads
+    consecutive_stagnant_cycles from its DB-backed mirror (not the in-process
+    _consecutive_stagnant_cycles global) so this is correct even when called from a
+    different OS process than the one running the daemon loop (Docker deployment)."""
+    from src.database import get_connection, get_consecutive_stagnant_cycles, get_consecutive_background_loops
+    from src.explorer import _get_config_int
+
+    conn = get_connection(read_only_constitution=True)
+    try:
+        row = conn.execute(
+            "SELECT config_value FROM system_config WHERE config_key = 'governor.paused_at';"
+        ).fetchone()
+    finally:
+        conn.close()
+    paused_at = row[0] if row and row[0] else None
+
+    return {
+        "state": get_governor_state(),
+        "paused_at": paused_at,
+        "consecutive_stagnant_cycles": get_consecutive_stagnant_cycles(),
+        "stagnant_threshold": _get_config_int("governor.stagnant_threshold", 3),
+        "background_loop_count": get_consecutive_background_loops(),
+        "loop_hard_cap": getattr(src.config, "N_LOOP_LIMIT", 20),
+        "cooldown_minutes": _get_config_int("governor.cooldown_minutes", 30),
+    }
+
+def _enter_governor_pause() -> None:
+    """Persists governor.state='paused' and governor.paused_at=<now> so pause is
+    inspectable via /api/governor/status and /governor status independent of
+    which coroutine is currently blocked inside pause_until_user_active()."""
+    from datetime import datetime, timezone
+    try:
+        now = datetime.now(timezone.utc).isoformat()
+        set_system_config_value("governor.state", "paused", is_agent=False)
+        set_system_config_value("governor.paused_at", now, is_agent=False)
+    except Exception as e:
+        logger.error(f"Failed to persist governor pause state: {e}")
+
+def reset_governor_state(trigger: str) -> None:
+    """Shared resume helper. `trigger == 'user_presence'` always resets the
+    stagnation/hard-cap counters (matching the pre-existing behavior of resetting
+    them on every tick the user is detected present, regardless of pause state).
+    Other triggers (e.g. 'user_chat', fired on every incoming chat message) only
+    reset the counters when the governor was actually paused, so routine chat
+    traffic can't perpetually suppress the stagnation/hard-cap safety valve from
+    ever tripping in the first place. When the governor was paused, this also
+    flips it back to 'running', logs, records an episodic memory, and fires a
+    webhook notification."""
+    global _consecutive_stagnant_cycles
+    was_paused = is_governor_paused()
+    if not was_paused and trigger != "user_presence":
+        return
+
+    reset_consecutive_background_loops()
+    _consecutive_stagnant_cycles = 0
+    set_consecutive_stagnant_cycles(0)
+    if not was_paused:
+        return
+
+    try:
+        set_system_config_value("governor.state", "running", is_agent=False)
+        set_system_config_value("governor.paused_at", "", is_agent=False)
+    except Exception as e:
+        logger.error(f"Failed to persist governor resume state: {e}")
+    log_msg = f"Smart Governor resumed via {trigger}."
+    logger.info(log_msg)
+    log_episodic_memory(
+        speaker="system",
+        message_content=log_msg,
+        context_type="background_thought"
+    )
+    send_webhook_notification("governor_resume", log_msg)
+
 async def pause_until_user_active():
-    """Waits until user_presence_status is marked active in system_config."""
+    """Blocks until the Smart Loop Governor resumes: via detected user presence,
+    incoming chat activity (resolved externally by reset_governor_state), or
+    governor.cooldown_minutes elapsing with no activity at all (0 disables this
+    fallback)."""
+    from src.explorer import _get_config_int
     from src.skills import DynamicSkillExecutor
     from src.database import get_connection
+
+    _enter_governor_pause()
+    started = _governor_monotonic()
     while True:
+        if get_governor_state() != "paused":
+            # Externally resolved (e.g. resume-on-chat fired while we were sleeping).
+            return
         try:
             DynamicSkillExecutor.execute("check_presence", {}, party_id="system")
         except Exception:
@@ -139,12 +259,15 @@ async def pause_until_user_active():
         finally:
             conn.close()
         if p_val == "active":
-            break
+            reset_governor_state("user_presence")
+            return
+        # Re-read on every iteration (not cached at pause-entry) so an operator
+        # changing governor.cooldown_minutes mid-pause takes effect immediately.
+        cooldown_minutes = _get_config_int("governor.cooldown_minutes", 30)
+        if cooldown_minutes > 0 and (_governor_monotonic() - started) >= cooldown_minutes * 60:
+            reset_governor_state("cooldown_expiry")
+            return
         await asyncio.sleep(1 if os.getenv("JANUS_TEST_MODE") == "1" else 15)
-    logger.info("User presence detected. Smart Governor reset.")
-    reset_consecutive_background_loops()
-    global _consecutive_stagnant_cycles
-    _consecutive_stagnant_cycles = 0
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -502,35 +625,38 @@ async def run_high_layer_loop():
             await asyncio.sleep(cadence)
             
             logger.info("High-level strategic tick processing...")
-            
-            # Execute self-model decay
-            try:
-                res = DynamicSkillExecutor.execute("decay_self_model", {}, party_id="system")
-                logger.info(f"High-level decay_self_model result: {res}")
-            except Exception as e:
-                logger.error(f"High-level decay_self_model failed: {e}")
-                
-            # Execute memory consolidation
-            try:
-                res = DynamicSkillExecutor.execute("consolidate_memories", {}, party_id="system")
-                logger.info(f"High-level consolidate_memories result: {res}")
-            except Exception as e:
-                logger.error(f"High-level consolidate_memories failed: {e}")
-                
-            # Execute goal evaluations
-            try:
-                res = DynamicSkillExecutor.execute("evaluate_goals", {}, party_id="system")
-                logger.info(f"High-level evaluate_goals result: {res}")
-            except Exception as e:
-                logger.error(f"High-level evaluate_goals failed: {e}")
-                
-            # Execute episodic memory cleanup
-            try:
-                res = DynamicSkillExecutor.execute("cleanup_episodic_memory", {}, party_id="system")
-                logger.info(f"High-level cleanup_episodic_memory result: {res}")
-            except Exception as e:
-                logger.error(f"High-level cleanup_episodic_memory failed: {e}")
-                
+
+            if is_governor_paused():
+                logger.info("High-level tick skipped: Smart Governor paused.")
+            else:
+                # Execute self-model decay
+                try:
+                    res = DynamicSkillExecutor.execute("decay_self_model", {}, party_id="system")
+                    logger.info(f"High-level decay_self_model result: {res}")
+                except Exception as e:
+                    logger.error(f"High-level decay_self_model failed: {e}")
+
+                # Execute memory consolidation
+                try:
+                    res = DynamicSkillExecutor.execute("consolidate_memories", {}, party_id="system")
+                    logger.info(f"High-level consolidate_memories result: {res}")
+                except Exception as e:
+                    logger.error(f"High-level consolidate_memories failed: {e}")
+
+                # Execute goal evaluations
+                try:
+                    res = DynamicSkillExecutor.execute("evaluate_goals", {}, party_id="system")
+                    logger.info(f"High-level evaluate_goals result: {res}")
+                except Exception as e:
+                    logger.error(f"High-level evaluate_goals failed: {e}")
+
+                # Execute episodic memory cleanup
+                try:
+                    res = DynamicSkillExecutor.execute("cleanup_episodic_memory", {}, party_id="system")
+                    logger.info(f"High-level cleanup_episodic_memory result: {res}")
+                except Exception as e:
+                    logger.error(f"High-level cleanup_episodic_memory failed: {e}")
+
             # Update last run timestamp in database
             conn = get_connection(read_only_constitution=True)
             try:
@@ -606,16 +732,8 @@ async def run_mid_layer_loop():
                 is_stagnant, justification = check_smart_governor_stagnation()
                 logger.info(f"Smart Governor: {justification}")
                 
-                stagnant_threshold = 3
-                conn = get_connection(read_only_constitution=True)
-                try:
-                    r = conn.execute("SELECT config_value FROM system_config WHERE config_key = 'governor.stagnant_threshold';").fetchone()
-                    if r:
-                        stagnant_threshold = int(r[0])
-                except Exception:
-                    pass
-                finally:
-                    conn.close()
+                from src.explorer import _get_config_int
+                stagnant_threshold = _get_config_int("governor.stagnant_threshold", 3)
 
                 hard_cap = getattr(src.config, "N_LOOP_LIMIT", 20)
                 
@@ -640,68 +758,72 @@ async def run_mid_layer_loop():
                     send_webhook_notification("governor_halt", log_msg)
                     await pause_until_user_active()
             else:
-                reset_consecutive_background_loops()
-                _consecutive_stagnant_cycles = 0
-                
-            # 5. Run other interval skills (excluding high-level ones and presence/drive check since we ran them)
-            try:
-                run_interval_skills()
-            except Exception as e:
-                logger.error(f"Failed to run interval skills: {e}")
-                
-            # 6. Process reflection triggers if any (skipped while a swarm dispute is
-            # pending resolution via /goals resolve, so we don't immediately re-trigger
-            # the same Proposer/Critic debate that caused the dispute)
-            global _pending_swarm_triggers
-            dispute_paused = False
-            conn = get_connection(read_only_constitution=True)
-            try:
-                row = conn.execute(
-                    "SELECT config_value FROM system_config WHERE config_key = 'dispute_paused';"
-                ).fetchone()
-                dispute_paused = bool(row and row[0] == 'true')
-            except Exception as e:
-                logger.error(f"Failed to query dispute_paused: {e}")
-            finally:
-                conn.close()
+                reset_governor_state("user_presence")
 
-            if dispute_paused:
-                if _pending_swarm_triggers:
-                    logger.warning(
-                        "Dispute Resolution Protocol: execution loop paused pending user "
-                        "resolution via /goals resolve. Skipping pending reflection trigger."
-                    )
-            elif _pending_swarm_triggers:
-                logger.info("Processing pending swarm reflection trigger in mid-level loop...")
-                while _pending_swarm_triggers:
-                    _pending_swarm_triggers.pop(0)
+            if is_governor_paused():
+                logger.debug("Mid-level tick: skipping background dispatch while Smart Governor is paused.")
+            else:
+                # 5. Run other interval skills (excluding high-level ones and presence/drive check since we ran them)
                 try:
-                    res = DynamicSkillExecutor.execute("run_reflection_cycle", {}, party_id="system")
-                    logger.info(f"Reflection cycle result: {res}")
+                    run_interval_skills()
                 except Exception as e:
-                    logger.error(f"Reflection cycle failed: {e}")
+                    logger.error(f"Failed to run interval skills: {e}")
 
-            # 6b. Drain pending swarm messages addressed to this process (parent or
-            # evolution child — JANUS_SELF_PARTY_ID defaults to "parent" for the
-            # ordinary, non-spawned daemon, so it also receives messages any
-            # evolution child sends it via send_swarm_message).
-            try:
-                from src.database import get_pending_swarm_messages, mark_swarm_message_processed
-                self_party_id = os.getenv("JANUS_SELF_PARTY_ID", "parent")
-                # get_pending_swarm_messages selects (id, sender_id, message_type, content, timestamp)
-                pending_messages = get_pending_swarm_messages(self_party_id)
-                for msg_id, sender, _message_type, content, _timestamp in pending_messages:
-                    logger.info(f"Swarm message received from '{sender}' for '{self_party_id}'.")
-                    log_episodic_memory(
-                        speaker=sender,
-                        message_content=content,
-                        context_type="background_thought"
-                    )
-                    mark_swarm_message_processed(msg_id)
-            except Exception as e:
-                logger.error(f"Failed to drain swarm messages: {e}")
+                # 6. Process reflection triggers if any (skipped while a swarm dispute is
+                # pending resolution via /goals resolve, so we don't immediately re-trigger
+                # the same Proposer/Critic debate that caused the dispute)
+                global _pending_swarm_triggers
+                dispute_paused = False
+                conn = get_connection(read_only_constitution=True)
+                try:
+                    row = conn.execute(
+                        "SELECT config_value FROM system_config WHERE config_key = 'dispute_paused';"
+                    ).fetchone()
+                    dispute_paused = bool(row and row[0] == 'true')
+                except Exception as e:
+                    logger.error(f"Failed to query dispute_paused: {e}")
+                finally:
+                    conn.close()
 
-            # 7. Update last run timestamp in database
+                if dispute_paused:
+                    if _pending_swarm_triggers:
+                        logger.warning(
+                            "Dispute Resolution Protocol: execution loop paused pending user "
+                            "resolution via /goals resolve. Skipping pending reflection trigger."
+                        )
+                elif _pending_swarm_triggers:
+                    logger.info("Processing pending swarm reflection trigger in mid-level loop...")
+                    while _pending_swarm_triggers:
+                        _pending_swarm_triggers.pop(0)
+                    try:
+                        res = DynamicSkillExecutor.execute("run_reflection_cycle", {}, party_id="system")
+                        logger.info(f"Reflection cycle result: {res}")
+                    except Exception as e:
+                        logger.error(f"Reflection cycle failed: {e}")
+
+                # 6b. Drain pending swarm messages addressed to this process (parent or
+                # evolution child — JANUS_SELF_PARTY_ID defaults to "parent" for the
+                # ordinary, non-spawned daemon, so it also receives messages any
+                # evolution child sends it via send_swarm_message).
+                try:
+                    from src.database import get_pending_swarm_messages, mark_swarm_message_processed
+                    self_party_id = os.getenv("JANUS_SELF_PARTY_ID", "parent")
+                    # get_pending_swarm_messages selects (id, sender_id, message_type, content, timestamp)
+                    pending_messages = get_pending_swarm_messages(self_party_id)
+                    for msg_id, sender, _message_type, content, _timestamp in pending_messages:
+                        logger.info(f"Swarm message received from '{sender}' for '{self_party_id}'.")
+                        log_episodic_memory(
+                            speaker=sender,
+                            message_content=content,
+                            context_type="background_thought"
+                        )
+                        mark_swarm_message_processed(msg_id)
+                except Exception as e:
+                    logger.error(f"Failed to drain swarm messages: {e}")
+
+            # 7. Update last run timestamp in database — always runs, even while
+            # paused, so /health/readyz don't misreport the daemon as dead during
+            # an intentional, cooldown-bounded pause.
             conn = get_connection(read_only_constitution=True)
             try:
                 cursor = conn.cursor()
@@ -732,14 +854,17 @@ async def reflex_queue_worker():
             priority = -neg_priority
             logger.info(f"Reflex popped: action='{action}', priority={priority}")
             
-            try:
-                res = DynamicSkillExecutor.execute(action, {}, party_id="system")
-                if res["success"]:
-                    logger.info(f"Reflex action '{action}' executed successfully: {res['result']}")
-                else:
-                    logger.error(f"Reflex action '{action}' execution failed: {res['error']}")
-            except Exception as e:
-                logger.error(f"Error executing reflex action '{action}': {e}")
+            if is_governor_paused():
+                logger.debug(f"Reflex action '{action}' skipped while Smart Governor is paused.")
+            else:
+                try:
+                    res = DynamicSkillExecutor.execute(action, {}, party_id="system")
+                    if res["success"]:
+                        logger.info(f"Reflex action '{action}' executed successfully: {res['result']}")
+                    else:
+                        logger.error(f"Reflex action '{action}' execution failed: {res['error']}")
+                except Exception as e:
+                    logger.error(f"Error executing reflex action '{action}': {e}")
                 
             # Update last run timestamp in database
             conn = get_connection(read_only_constitution=True)
@@ -781,6 +906,16 @@ async def run_heartbeat_loop():
     _last_db_write_count = None
     _last_completed_checkpoints = None
     _last_executed_intervals = {}
+
+    # A prior crashed run could leave governor.state='paused' persisted even though
+    # the in-memory counters above are freshly reset — force it back to running so
+    # the two don't contradict each other.
+    try:
+        set_system_config_value("governor.state", "running", is_agent=False)
+        set_system_config_value("governor.paused_at", "", is_agent=False)
+        set_consecutive_stagnant_cycles(0)
+    except Exception as e:
+        logger.error(f"Failed to reset governor state on startup: {e}")
     
     log_episodic_memory(
         speaker="system",
