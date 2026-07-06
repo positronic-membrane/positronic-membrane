@@ -20,6 +20,7 @@ from openai import OpenAI
 # Decoupled SDK backend library dependencies
 from src.explorer import search_web, fetch_webpage, ingest_discoveries
 from src.notifications import send_webhook_notification
+from src.skill_harness import check_circuit, record_skill_failure, record_skill_success
 from src.codebase import query_codebase_context, index_codebase
 from src.sandbox import execute_code_safely
 from src.self_modification import apply_search_replace_blocks
@@ -1708,11 +1709,16 @@ class DynamicSkillExecutor:
         and compiles/executes its code logic.
         """
         logger.info(f"Loading skill '{skill_id}' for execution...")
-        
+
         conn = get_connection(read_only_constitution=True)
         try:
             row = conn.execute(
-                "SELECT name, code_blob, entry_point_function, required_role FROM agent_skills WHERE skill_id = ? AND is_active = 1;",
+                """
+                SELECT a.name, a.code_blob, a.entry_point_function, a.required_role, cb.tripped_at
+                FROM agent_skills a
+                LEFT JOIN circuit_breaker_state cb ON cb.skill_id = a.skill_id
+                WHERE a.skill_id = ? AND a.is_active = 1;
+                """,
                 (skill_id,)
             ).fetchone()
         finally:
@@ -1721,11 +1727,14 @@ class DynamicSkillExecutor:
         if not row:
             return {"success": False, "error": f"Skill '{skill_id}' not found or is inactive."}
 
-        name, code_blob, entry_point, required_role = row
+        name, code_blob, entry_point, required_role, tripped_at = row
 
         # Check governance role permissions
         if party_id and not has_role(party_id, required_role):
             return {"success": False, "error": f"Security Veto: Execution of skill '{skill_id}' requires role '{required_role}'."}
+
+        if not check_circuit(skill_id, tripped_at=tripped_at):
+            return {"success": False, "error": f"Circuit breaker tripped for skill '{skill_id}'; execution skipped."}
 
         # Build execution SDK context
         from src.memory_orchestrator import MemoryOrchestrator
@@ -1763,10 +1772,12 @@ class DynamicSkillExecutor:
             # Retrieve entrypoint function
             func = namespace.get(entry_point)
             if not func or not callable(func):
+                record_skill_failure(skill_id)
                 return {"success": False, "error": f"AttributeError: Entry point function '{entry_point}' not found in skill code."}
 
             # Run function with supplied arguments
             result = func(**arguments)
+            record_skill_success(skill_id)
             return {"success": True, "result": result}
 
         except Exception as e:
@@ -1786,4 +1797,5 @@ class DynamicSkillExecutor:
             tb_str = "\n".join(formatted_tb)
             error_msg = f"Dynamic Execution Error: {exc_type.__name__}: {exc_value}\nTraceback:\n{tb_str}"
             logger.error(f"Skill execution failed for '{skill_id}': {error_msg}")
+            record_skill_failure(skill_id)
             return {"success": False, "error": error_msg}

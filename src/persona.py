@@ -58,6 +58,61 @@ def handle_skills_command() -> str:
         output.append(f"| `{skill_id}` | {name} | {desc} | `{role}` | `{trigger}` |")
     return "\n".join(output)
 
+def handle_circuit_command(command_str: str) -> str:
+    from src.database import get_connection
+    parts = command_str.strip().split(None, 1)
+    subcommand = ""
+    args_str = ""
+    if len(parts) > 1:
+        subcommand_part = parts[1].strip()
+        sub_parts = subcommand_part.split(None, 1)
+        subcommand = sub_parts[0].lower()
+        if len(sub_parts) > 1:
+            args_str = sub_parts[1].strip()
+
+    if not subcommand or subcommand == "status":
+        conn = get_connection(read_only_constitution=True)
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT cb.skill_id, s.name, cb.consecutive_failures, cb.tripped_at
+                FROM circuit_breaker_state cb
+                LEFT JOIN agent_skills s ON s.skill_id = cb.skill_id
+                WHERE cb.consecutive_failures > 0 OR cb.tripped_at IS NOT NULL;
+                """
+            )
+            rows = cursor.fetchall()
+        except Exception as e:
+            return f"[Error] Failed to fetch circuit breaker state: {e}"
+        finally:
+            conn.close()
+
+        if not rows:
+            return "No skills have recorded failures."
+
+        output = ["### Circuit Breaker Status\n"]
+        output.append("| Skill ID | Name | Consecutive Failures | Tripped At |")
+        output.append("| --- | --- | --- | --- |")
+        for skill_id, name, failures, tripped_at in rows:
+            status = tripped_at if tripped_at else "-"
+            output.append(f"| `{skill_id}` | {name or '?'} | {failures} | {status} |")
+        return "\n".join(output)
+    elif subcommand == "reset":
+        if not args_str:
+            return "[Error] Usage: /circuit reset <skill_id>"
+        skill_id = args_str.split()[0]
+        from src.skill_harness import reset_breaker
+        try:
+            existed = reset_breaker(skill_id)
+        except Exception as e:
+            return f"[Error] Failed to reset circuit breaker: {e}"
+        if existed:
+            return f"[✔] Circuit breaker for '{skill_id}' has been reset."
+        return f"[Error] No breaker state found for skill '{skill_id}'."
+    else:
+        return "[Error] Usage: /circuit [status] | /circuit reset <skill_id>"
+
 def handle_runskill_command(command_str: str) -> str:
     import json
     import re
@@ -1894,6 +1949,11 @@ async def run_persona_chat():
                 print(f"\n{res}\n")
                 continue
 
+            if user_msg_lower == "/circuit" or user_msg_lower.startswith("/circuit "):
+                res = handle_circuit_command(user_msg)
+                print(f"\n{res}\n")
+                continue
+
             if user_msg_lower == "/docs" or user_msg_lower.startswith("/docs "):
                 res = handle_docs_command(user_msg)
                 print(f"\n{res}\n")
@@ -2160,6 +2220,9 @@ async def handle_web_slash_command(user_msg: str) -> str:
 
     elif user_msg.strip().lower() == "/goal" or user_msg.strip().lower().startswith("/goal ") or user_msg.strip().lower() == "/goals" or user_msg.strip().lower().startswith("/goals "):
         return handle_goal_command(user_msg)
+
+    elif user_msg.strip().lower() == "/circuit" or user_msg.strip().lower().startswith("/circuit "):
+        return handle_circuit_command(user_msg)
 
     elif user_msg.strip().lower() == "/docs" or user_msg.strip().lower().startswith("/docs "):
         return handle_docs_command(user_msg)

@@ -50,6 +50,7 @@ CONFLICT_COLUMNS = {
     "self_model": ["trait_name"],
     "cognitive_layers": ["layer_name"],
     "janus_documents": ["title"],
+    "circuit_breaker_state": ["skill_id"],
 }
 
 def translate_sqlite_to_postgres(sql: str) -> str:
@@ -495,6 +496,15 @@ def init_db():
     """)
 
     cursor.execute("""
+    CREATE TABLE IF NOT EXISTS circuit_breaker_state (
+        skill_id TEXT PRIMARY KEY,
+        consecutive_failures INTEGER DEFAULT 0,
+        last_failure_at TIMESTAMP,
+        tripped_at TIMESTAMP
+    );
+    """)
+
+    cursor.execute("""
     CREATE TABLE IF NOT EXISTS self_model (
         trait_name TEXT PRIMARY KEY,
         value REAL NOT NULL DEFAULT 0.5 CHECK(value >= 0.0 AND value <= 1.0),
@@ -759,6 +769,11 @@ def init_db():
         # human review. Not agent-modifiable so the swarm cannot widen its own
         # proposal queue. 0 disables generation.
         ("goal_proposal.max_open_proposals", "3", 0),
+        # Circuit breaker (issue #59): trips a skill after this many consecutive
+        # execution failures, auto-resetting after the cooldown elapses. Not
+        # agent-modifiable so the swarm cannot disable its own containment.
+        ("circuit_breaker.max_failures", "5", 0),
+        ("circuit_breaker.cooldown_minutes", "15", 0),
     ]
     for key, value, modifiable in default_configs:
         cursor.execute("""
