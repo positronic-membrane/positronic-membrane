@@ -7,21 +7,23 @@ context isolation per GEMINI.md privacy rules.
 """
 
 import json
+import sqlite3
 import uuid
 from datetime import datetime
-from typing import Optional, List, Dict, Any
+from typing import Any, Dict, List, Optional
+
 from src.database import get_connection
 
 
 class MemoryOrchestrator:
     """Manages memory operations with optional party scoping."""
 
-    def __init__(self, db_path: str = None):
-        self.db_path = db_path
-
     def _get_connection(self):
-        """Get a database connection."""
-        return get_connection(self.db_path)
+        """Get a database connection with dict-like row access (every method
+        in this class reads columns by name, e.g. row['value'])."""
+        conn = get_connection()
+        conn.row_factory = sqlite3.Row
+        return conn
 
     def set_memory(self, party_id: Optional[str], key: str, value: Any,
                    namespace: str = 'global') -> str:

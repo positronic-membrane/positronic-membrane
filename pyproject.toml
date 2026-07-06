@@ -46,6 +46,10 @@ janus-server = "src.web_server:run_server"
 [tool.pytest.ini_options]
 minversion = "7.0"
 testpaths = ["tests"]
+markers = [
+    "e2e: slow end-to-end tests exercising real subprocess/git/sqlite/vector-db integration — excluded from a bare pytest run by default.",
+]
+addopts = "-m 'not e2e'"
 
 [tool.ruff]
 line-length = 120

@@ -58,6 +58,15 @@ Run the test suite before opening a PR:
 JANUS_TEST_MODE=1 pytest
 ```
 
+This runs the fast unit suite only — `tests/e2e/` is excluded by default (see
+`addopts` in `pyproject.toml`). If your change touches chat/persona, the
+daemon's reflection cycle, sandbox sessions, or auth/party isolation, also run
+the slower end-to-end suite:
+
+```bash
+JANUS_TEST_MODE=1 pytest -m e2e
+```
+
 - New modules get a matching `tests/test_<module>.py`.
 - Mock external calls (`urllib.request.urlopen` for GitHub, `get_effective_workspace_root` for filesystem-boundary tests) — never hit real network/services in tests.
 - See `tests/test_github_integration.py` and `tests/test_document_memory.py` for the established mocking patterns.
