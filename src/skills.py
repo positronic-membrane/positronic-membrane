@@ -1661,6 +1661,57 @@ class SafeGitHub:
             repo=repo,
         )
 
+    def get_pr(self, repo: str, number: int) -> dict:
+        validate_action(f"get GitHub PR {repo}#{number}")
+        return self._api("GET", f"/repos/{repo}/pulls/{number}", repo=repo)
+
+    def get_pr_diff(self, repo: str, number: int) -> list:
+        validate_action(f"get GitHub PR diff {repo}#{number}")
+        # GitHub caps this endpoint at 100 files per page — loop until a short
+        # page tells us we've reached the end, so PRs with >100 changed files
+        # aren't silently truncated.
+        files: list = []
+        page = 1
+        while True:
+            batch = self._api(
+                "GET", f"/repos/{repo}/pulls/{number}/files?per_page=100&page={page}", repo=repo
+            )
+            files.extend(batch)
+            if len(batch) < 100:
+                break
+            page += 1
+        return files
+
+    def merge_pr(
+        self,
+        repo: str,
+        number: int,
+        merge_method: str = "squash",
+        commit_title: Optional[str] = None,
+        commit_message: Optional[str] = None,
+    ) -> dict:
+        # Scan repo/method plus any free-text the merge commit will carry — a merge_pr
+        # call must not be able to publish text that create_pr/update_issue would have
+        # blocked at creation.
+        content = " ".join(str(v) for v in (commit_title, commit_message) if v is not None)
+        validate_action(f"merge GitHub PR {repo}#{number} via {merge_method}: {content}")
+        # Admin-only: merging is the one irreversible action in this class, and the
+        # feature this backs (issue #69) requires a human gate — no contributor-tier
+        # agent automation should ever be able to merge on its own.
+        if not has_role(self.party_id, "admin"):
+            raise PermissionError("Merging pull requests requires admin role.")
+        if merge_method != "squash":
+            raise ValueError(
+                f"Unsupported merge_method '{merge_method}': this project's workflow "
+                "(see CLAUDE.md) is squash-only."
+            )
+        payload: dict = {"merge_method": merge_method}
+        if commit_title is not None:
+            payload["commit_title"] = commit_title
+        if commit_message is not None:
+            payload["commit_message"] = commit_message
+        return self._api("PUT", f"/repos/{repo}/pulls/{number}/merge", payload, repo=repo)
+
     def create_repo(
         self, name: str, description: str = "", private: bool = True,
         org: Optional[str] = None,

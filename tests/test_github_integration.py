@@ -94,6 +94,44 @@ def test_create_pr_posts_to_correct_endpoint():
     assert result["number"] == 10
 
 
+def test_get_pr_uses_get():
+    gh = SafeGitHub(party_id="system")
+    with patch("urllib.request.urlopen", return_value=_urlopen_ctx({"number": 12})) as mock_open:
+        result = gh.get_pr(REPO, 12)
+    req = mock_open.call_args[0][0]
+    assert req.full_url == f"https://api.github.com/repos/{REPO}/pulls/12"
+    assert req.method == "GET"
+    assert result["number"] == 12
+
+
+def test_get_pr_diff_uses_files_endpoint():
+    files = [{"filename": "a.py", "patch": "@@ -1 +1 @@"}]
+    gh = SafeGitHub(party_id="system")
+    with patch("urllib.request.urlopen", return_value=_urlopen_ctx(files)) as mock_open:
+        result = gh.get_pr_diff(REPO, 12)
+    req = mock_open.call_args[0][0]
+    assert req.full_url == f"https://api.github.com/repos/{REPO}/pulls/12/files?per_page=100&page=1"
+    assert req.method == "GET"
+    assert result == files
+
+
+def test_get_pr_diff_paginates_when_page_is_full():
+    page1 = [{"filename": f"f{i}.py"} for i in range(100)]
+    page2 = [{"filename": "last.py"}]
+    gh = SafeGitHub(party_id="system")
+    with patch(
+        "urllib.request.urlopen", side_effect=[_urlopen_ctx(page1), _urlopen_ctx(page2)]
+    ) as mock_open:
+        result = gh.get_pr_diff(REPO, 12)
+    assert len(result) == 101
+    assert result[-1]["filename"] == "last.py"
+    urls = [c[0][0].full_url for c in mock_open.call_args_list]
+    assert urls == [
+        f"https://api.github.com/repos/{REPO}/pulls/12/files?per_page=100&page=1",
+        f"https://api.github.com/repos/{REPO}/pulls/12/files?per_page=100&page=2",
+    ]
+
+
 def test_update_issue_patches_only_provided_fields():
     gh = SafeGitHub(party_id="system")
     with patch("urllib.request.urlopen", return_value=_urlopen_ctx({"number": 8})) as mock_open:
@@ -241,6 +279,31 @@ def test_close_issue_blocked_for_no_party():
     gh = SafeGitHub(party_id=None)
     with pytest.raises(PermissionError, match="contributor"):
         gh.close_issue(REPO, 31)
+
+
+def test_merge_pr_blocked_for_contributor_role():
+    conn = get_connection()
+    try:
+        _insert_party(conn, "contrib_merge", "contributor")
+    finally:
+        conn.close()
+
+    gh = SafeGitHub(party_id="contrib_merge")
+    with pytest.raises(PermissionError, match="admin"):
+        gh.merge_pr(REPO, 12)
+
+
+def test_merge_pr_allowed_for_admin():
+    conn = get_connection()
+    try:
+        _insert_party(conn, "admin1", "admin")
+    finally:
+        conn.close()
+
+    gh = SafeGitHub(party_id="admin1")
+    with patch("urllib.request.urlopen", return_value=_urlopen_ctx({"merged": True})):
+        result = gh.merge_pr(REPO, 12)
+    assert result["merged"] is True
 
 
 # ---------------------------------------------------------------------------
@@ -452,3 +515,69 @@ def test_create_repo_blocked_for_user_role():
     gh = SafeGitHub(party_id="u_repo")
     with pytest.raises(PermissionError, match="contributor"):
         gh.create_repo("new-repo")
+
+
+# ---------------------------------------------------------------------------
+# merge_pr
+# ---------------------------------------------------------------------------
+
+def test_merge_pr_puts_to_correct_endpoint():
+    conn = get_connection()
+    try:
+        _insert_party(conn, "admin_merge", "admin")
+    finally:
+        conn.close()
+
+    gh = SafeGitHub(party_id="admin_merge")
+    with patch("urllib.request.urlopen", return_value=_urlopen_ctx({"merged": True})) as mock_open:
+        result = gh.merge_pr(REPO, 12)
+    req = mock_open.call_args[0][0]
+    assert req.full_url == f"https://api.github.com/repos/{REPO}/pulls/12/merge"
+    assert req.method == "PUT"
+    payload = json.loads(req.data)
+    assert payload == {"merge_method": "squash"}
+    assert result["merged"] is True
+
+
+def test_merge_pr_forwards_optional_commit_fields():
+    conn = get_connection()
+    try:
+        _insert_party(conn, "admin_merge2", "admin")
+    finally:
+        conn.close()
+
+    gh = SafeGitHub(party_id="admin_merge2")
+    with patch("urllib.request.urlopen", return_value=_urlopen_ctx({"merged": True})) as mock_open:
+        gh.merge_pr(REPO, 12, commit_title="Squash: my PR", commit_message="Details")
+    payload = json.loads(mock_open.call_args[0][0].data)
+    assert payload == {
+        "merge_method": "squash",
+        "commit_title": "Squash: my PR",
+        "commit_message": "Details",
+    }
+
+
+def test_merge_pr_rejects_non_squash_method():
+    gh = SafeGitHub(party_id="system")
+    with pytest.raises(ValueError, match="squash-only"):
+        gh.merge_pr(REPO, 12, merge_method="rebase")
+
+
+def test_merge_pr_scans_commit_title_for_banned_boundaries():
+    gh = SafeGitHub(party_id="system")
+    with pytest.raises(SafetyViolationError):
+        gh.merge_pr(REPO, 12, commit_title="see facebook.com/page")
+
+
+def test_merge_pr_not_mergeable_surfaces_http_error():
+    conn = get_connection()
+    try:
+        _insert_party(conn, "admin_merge3", "admin")
+    finally:
+        conn.close()
+
+    gh = SafeGitHub(party_id="admin_merge3")
+    err = _http_error(405, "Method Not Allowed", b'{"message": "Pull Request is not mergeable"}')
+    with patch("urllib.request.urlopen", side_effect=err):
+        with pytest.raises(RuntimeError, match="not mergeable"):
+            gh.merge_pr(REPO, 12)
