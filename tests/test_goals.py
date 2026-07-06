@@ -363,8 +363,8 @@ def _reflection_side_effect(proposal_response):
         elif agent_id == "critic":
             return "Decision: 1\nJustification: Safe."
         elif agent_id == "archivist":
-            if "curiosity_topics" in prompt.lower():
-                return "CURIOSITY_TOPICS: sandbox egress, network policy"
+            if "curiosity topics" in prompt.lower():
+                return 'CURIOSITY_TOPICS: ["sandbox egress", "network policy"]'
             return "Execution summary nugget."
         return ""
     return side_effect
@@ -440,6 +440,33 @@ def test_reflection_cycle_tolerates_unparseable_proposal_response():
 
     assert res["success"] is True
     assert sg.get_proposals() == []
+
+def test_reflection_cycle_curiosity_topic_with_embedded_comma_is_not_shredded():
+    """Issue #78: a curiosity topic containing an internal comma must survive intact,
+    with no stray brackets, instead of being split into fragments."""
+    def side_effect(agent_id, prompt, system_override=None, **kwargs):
+        if agent_id == "proposer":
+            return "PROPOSED_ACTION: Review recent episodic logs"
+        elif agent_id == "critic":
+            return "Decision: 1\nJustification: Safe."
+        elif agent_id == "archivist":
+            if "curiosity topics" in prompt.lower():
+                return 'CURIOSITY_TOPICS: ["vector store scaling, sharding strategy", "[stray-bracket]"]'
+            return "Execution summary nugget."
+        return ""
+
+    with patch("src.skills.query_agent", side_effect=side_effect), \
+         patch("src.memory.query_memories", return_value=[]), \
+         patch("src.memory.add_memory", return_value=None), \
+         patch("src.skills.get_active_curiosity_topics", return_value=[]), \
+         patch("src.skills.update_curiosity_topics", return_value=None), \
+         patch("src.skills.update_curiosity_vector") as mock_update_vector:
+        res = DynamicSkillExecutor.execute("run_reflection_cycle", {}, party_id="system")
+
+    assert res["success"] is True
+    mock_update_vector.assert_called_once_with(
+        ["vector store scaling, sharding strategy", "stray-bracket"]
+    )
 
 def test_propose_goals_skill_direct_invocation():
     """The propose_goals skill can also be run standalone (e.g. via /runskill)."""
