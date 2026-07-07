@@ -994,6 +994,39 @@ def check_presence():
     );
     """)
 
+    # Ensure test_runs table exists (Regression Watcher — issue #66)
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS test_runs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        commit_sha TEXT,
+        triggered_by TEXT NOT NULL DEFAULT 'manual' CHECK(triggered_by IN ('manual', 'sandbox_ship', 'ci')),
+        total INTEGER NOT NULL DEFAULT 0,
+        passed INTEGER NOT NULL DEFAULT 0,
+        failed INTEGER NOT NULL DEFAULT 0,
+        errors INTEGER NOT NULL DEFAULT 0,
+        skipped INTEGER NOT NULL DEFAULT 0,
+        duration_seconds REAL,
+        status TEXT NOT NULL CHECK(status IN ('passed', 'failed'))
+    );
+    """)
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_test_runs_timestamp ON test_runs(timestamp DESC);")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_test_runs_commit_sha ON test_runs(commit_sha);")
+
+    # Ensure test_case_results table exists (per-test outcomes, for flaky detection)
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS test_case_results (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        test_run_id INTEGER NOT NULL,
+        test_name TEXT NOT NULL,
+        outcome TEXT NOT NULL CHECK(outcome IN ('passed', 'failed', 'skipped', 'error')),
+        duration_seconds REAL,
+        FOREIGN KEY(test_run_id) REFERENCES test_runs(id) ON DELETE CASCADE
+    );
+    """)
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_test_case_results_test_name ON test_case_results(test_name, test_run_id DESC);")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_test_case_results_run_id ON test_case_results(test_run_id);")
+
     # Epistemic ingestion staging table (Phase 1 of the Epistemic Ingestion Pipeline)
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS janus_sandbox_facts (

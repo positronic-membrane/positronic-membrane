@@ -13,6 +13,7 @@ from src.database import (
     get_connection,
     log_episodic_memory
 )
+from src.regression_watcher import get_current_commit_sha, record_test_run
 from abc import ABC, abstractmethod
 
 class SandboxExecutor(ABC):
@@ -657,7 +658,11 @@ def ship_sandbox_session() -> list:
         passed = True
         logs = "No tests directory found, skipping sandbox tests."
         stats = {"passed": 0, "failed": 0, "total": 0, "coverage": None}
-    
+
+    # Resolve commit_sha early so it's available for both the regression-abort
+    # path (recording the run below) and the success path (test_run_baselines insert).
+    commit_sha = get_current_commit_sha(cwd=str(sandbox_root))
+
     # 2. Compare results against the baseline from test_run_baselines
     conn = get_connection(read_only_constitution=True)
     cursor = conn.cursor()
@@ -692,7 +697,20 @@ def ship_sandbox_session() -> list:
             if stats["coverage"] < baseline_cov:
                 has_regression = True
                 regression_reason = f"Coverage dropped from {baseline_cov}% to {stats['coverage']}%."
-                
+
+    # Record this run into test_runs regardless of outcome, for /test history + flaky detection.
+    # Pass status explicitly: has_regression can be True purely from a coverage drop, which
+    # stats["failed"]/errors alone wouldn't reflect.
+    try:
+        record_test_run(
+            stats,
+            commit_sha=commit_sha,
+            triggered_by="sandbox_ship",
+            status="failed" if has_regression else "passed",
+        )
+    except Exception as e:
+        logger.warning(f"Failed to record test run for sandbox ship: {e}")
+
     if has_regression:
         # Abort shipping flow
         log_episodic_memory(
@@ -705,19 +723,6 @@ def ship_sandbox_session() -> list:
         raise RuntimeError(f"Regression detected: {regression_reason}. Sandbox session aborted.")
         
     # If successful, insert new baseline row in test_run_baselines
-    commit_sha = ""
-    try:
-        res_sha = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            cwd=sandbox_root,
-            capture_output=True,
-            text=True
-        )
-        if res_sha.returncode == 0:
-            commit_sha = res_sha.stdout.strip()
-    except Exception:
-        pass
-
     conn = get_connection(read_only_constitution=True)
     try:
         cursor = conn.cursor()

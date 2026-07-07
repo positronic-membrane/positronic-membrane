@@ -858,6 +858,78 @@ def handle_goal_command(command_str: str) -> str:
             "create, status, checkpoint, complete, prioritize, proposals, approve, reject, resolve."
         )
 
+def handle_test_command(command_str: str) -> str:
+    """
+    Handles /test slash commands for the Regression Watcher (issue #66).
+
+    Supported subcommands:
+      /test run           — run the full pytest suite now and record the result
+      /test history [n]   — show the n most recent recorded test runs (default 10)
+    """
+    from src.regression_watcher import (
+        run_test_suite,
+        record_test_run,
+        get_test_run_history,
+        detect_flaky_tests,
+        get_current_commit_sha,
+    )
+
+    parts = command_str.strip().split(None, 1)
+    subcommand = ""
+    args_str = ""
+    if len(parts) > 1:
+        subcommand_part = parts[1].strip()
+        sub_parts = subcommand_part.split(None, 1)
+        subcommand = sub_parts[0].lower()
+        if len(sub_parts) > 1:
+            args_str = sub_parts[1].strip()
+
+    if subcommand == "run":
+        stats = run_test_suite()
+        try:
+            record_test_run(
+                stats,
+                commit_sha=get_current_commit_sha(),
+                triggered_by="manual",
+                test_cases=stats.get("test_cases"),
+            )
+        except Exception as e:
+            logger.warning(f"Failed to record manual test run: {e}")
+        emoji = "✅" if stats.get("passed_overall") else "❌"
+        return (
+            f"### {emoji} Test Suite Run Complete\n"
+            f"- Total: {stats['total']}  Passed: {stats['passed']}  Failed: {stats['failed']}  "
+            f"Errors: {stats['errors']}  Skipped: {stats['skipped']}\n"
+            f"- Duration: {stats['duration']:.2f}s"
+        )
+
+    elif subcommand == "history" or not subcommand:
+        limit = 10
+        if args_str.strip().isdigit():
+            limit = int(args_str.strip())
+        runs = get_test_run_history(limit)
+        if not runs:
+            return "No test runs recorded yet. Trigger one with `/test run`."
+
+        output = ["### 🧪 Recent Test Runs\n"]
+        for r in runs:
+            emoji = "✅" if r["status"] == "passed" else "❌"
+            sha_short = (r["commit_sha"] or "")[:8]
+            output.append(
+                f"- **[{r['id']}]** {emoji} {r['timestamp']} ({r['triggered_by']}, `{sha_short}`) — "
+                f"{r['passed']}/{r['total']} passed, {r['failed']} failed, {r['errors']} errors"
+            )
+
+        flaky = detect_flaky_tests()
+        if flaky:
+            output.append("\n#### ⚠️ Flaky Tests Detected")
+            for name in flaky:
+                output.append(f"- `{name}`")
+
+        return "\n".join(output)
+
+    return "[Error] Unknown /test subcommand. Usage: /test [run | history [n]]"
+
 def handle_docs_command(command_str: str) -> str:
     """
     Handles /docs slash commands for document drafts and memory sync operations.
@@ -2205,6 +2277,11 @@ async def run_persona_chat():
                 print(f"\n{res}\n")
                 continue
 
+            if user_msg_lower == "/test" or user_msg_lower.startswith("/test "):
+                res = handle_test_command(user_msg)
+                print(f"\n{res}\n")
+                continue
+
             if user_msg_lower == "/circuit" or user_msg_lower.startswith("/circuit "):
                 res = handle_circuit_command(user_msg)
                 print(f"\n{res}\n")
@@ -2496,6 +2573,9 @@ async def handle_web_slash_command(user_msg: str) -> str:
 
     elif user_msg.strip().lower() == "/goal" or user_msg.strip().lower().startswith("/goal ") or user_msg.strip().lower() == "/goals" or user_msg.strip().lower().startswith("/goals "):
         return handle_goal_command(user_msg)
+
+    elif user_msg.strip().lower() == "/test" or user_msg.strip().lower().startswith("/test "):
+        return handle_test_command(user_msg)
 
     elif user_msg.strip().lower() == "/circuit" or user_msg.strip().lower().startswith("/circuit "):
         return handle_circuit_command(user_msg)
