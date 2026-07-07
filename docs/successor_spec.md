@@ -156,18 +156,18 @@ v2 inherits doc #14 (Restructured Roadmap V2–V8+) as **advisory input, not obl
 
 ---
 
-## 9. Open questions for the operator (answers recorded here on ratification)
+## 9. Operator decisions (recorded 2026-07-07, prior to ratification)
 
-1. **Successor repo name** — recommendation: `positronic-membrane/positronic-membrane-v2` (explicit lineage, keeps the org namespace clean). The package name (§4.1) follows this choice.
-2. **Persona identity** — does the name "Journey" carry to v2, or does v2 name itself as part of its setup? (Pure flavor, but it touches the succession protocol's "which instance is Journey" question, #102.)
-3. **Theme confirmation** — Proactive Goal Pursuit is carried from doc #14; confirm it survives the V1 sign-off reflection (#96) unchanged, or amend here.
-4. **Version numbering** — recommendation: v2 releases as `2.0.0` under three-part semver; v1's final tag (#96) establishes `1.x`.
-5. **Fresh start vs. import leaning** — decision executes at first boot (#100), but record the current leaning here at ratification so #93 can sequence the import-consuming issues appropriately or drop them from the critical path.
+1. **Successor repo name:** `positronic-membrane/positronic-membrane-v2`. The package name (§4.1) follows: working name `membrane`, finalized in v2's first skeleton issue.
+2. **Persona identity:** **"Journey" carries over.** The name follows the active conversational surface — which resolves #102's "which instance is Journey" question in advance: the persona name belongs to whichever instance holds the surface, transferring at cutover.
+3. **Theme:** **Proactive Goal Pursuit confirmed** as the single capability theme (§2.2). If the V1 sign-off reflection (#96) surfaces reasons to change it, that is an amendment PR to this document, not a silent re-scope.
+4. **Version numbering:** v2 releases as `2.0.0` under three-part semver; v1's final tag (#96) establishes `1.x`.
+5. **Fresh start vs. import:** **import leaning.** v2 is expected to ingest v1's exported metadata (constitution, documents, self-model, goals) at first boot via #100 — putting #100 on the critical path for #93's issue sequencing. The final decision still executes at first boot per §1; if it flips to fresh-start, only sequencing changes, not this spec.
 
 ---
 
 ## 10. Ratification & change control
 
-- Merging the PR that introduces this document constitutes operator ratification of everything not listed in §9; §9's answers are recorded by follow-up commit or PR review notes at merge time.
+- Merging the PR that introduces this document constitutes operator ratification of the full document, including §9's recorded decisions.
 - Post-merge, this document is upserted into `janus_documents` (purpose `knowledge`, tags `successor, spec, v2`) so the system's own memory holds the ratified spec — #93 reads it from there.
 - Amendments are PRs against this file; each amendment PR states which downstream issues (#93's output) it invalidates.
