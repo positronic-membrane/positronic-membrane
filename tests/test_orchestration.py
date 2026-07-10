@@ -4,6 +4,7 @@ import pytest
 
 import src.config
 from src.database import get_connection, init_db, save_sandbox_session
+from src.middleware import SelfModificationFrozenError
 from src.security import decrypt_api_key, encrypt_api_key
 from src.skills import SafeAgentOrchestration
 
@@ -287,6 +288,22 @@ def test_review_dispatch_approve_allowed_for_admin_with_matching_session(mock_sh
     sao = SafeAgentOrchestration(party_id="admin_review")
     assert sao.review_dispatch(1, approve=True) is True
     mock_ship.assert_called_once()
+
+
+@patch("src.skills.ship_sandbox_session")
+def test_review_dispatch_approve_blocked_when_self_modification_frozen(mock_ship):
+    mock_ship.side_effect = SelfModificationFrozenError("frozen for V1 sign-off")
+
+    conn = get_connection()
+    _insert_party(conn, "admin_frozen", "admin")
+    _insert_dispatch_row(conn, 1, "success", "dispatch_1")
+    conn.close()
+
+    save_sandbox_session("/fake/sandbox_1", "evolution/sandbox-dispatch_1", "active", session_name="dispatch_1")
+
+    sao = SafeAgentOrchestration(party_id="admin_frozen")
+    with pytest.raises(SelfModificationFrozenError):
+        sao.review_dispatch(1, approve=True)
 
 
 @patch("src.skills.abort_sandbox_session")

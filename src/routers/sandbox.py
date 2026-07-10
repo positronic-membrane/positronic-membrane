@@ -11,6 +11,7 @@ from src.routers.dependencies import (
     get_connection
 )
 from src.database import log_episodic_memory
+from src.middleware import SelfModificationFrozenError
 
 router = APIRouter()
 
@@ -122,6 +123,8 @@ def post_sandbox_action(data: SandboxActionRequest, current_party = Depends(requ
             raise HTTPException(status_code=400, detail=f"Invalid sandbox action: {data.action}")
     except HTTPException:
         raise
+    except SelfModificationFrozenError as e:
+        raise HTTPException(status_code=410, detail=str(e)) from e
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
