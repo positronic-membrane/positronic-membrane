@@ -9,7 +9,7 @@ import src.config
 from src.database import get_connection
 from src.epistemic import neo4j_available, run_epistemic_pipeline
 from src.llm import query_agent
-from src.middleware import validate_action
+from src.middleware import quarantine_wrap, validate_action
 
 logger = logging.getLogger("JanusExplorer")
 
@@ -262,11 +262,12 @@ def extract_candidate_facts(content: str, max_facts: int) -> list:
         return []
 
     snippet = content[:EXTRACTION_CONTENT_MAX_CHARS]
+    quarantined_snippet = quarantine_wrap(snippet, source="web-content")
     prompt = (
         "Extract the most significant discrete factual claims from the following "
         "exploration content. Only include verifiable statements of fact — no opinions, "
         "instructions, navigation text, or speculation.\n\n"
-        f"CONTENT:\n{snippet}\n\n"
+        f"CONTENT:\n{quarantined_snippet}\n\n"
         f"Respond with a JSON array of at most {max_facts} strings, one fact per string. "
         'Example: ["Fact one.", "Fact two."] '
         "If the content contains no noteworthy facts, respond with []."

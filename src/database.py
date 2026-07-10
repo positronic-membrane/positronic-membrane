@@ -851,6 +851,11 @@ def init_db():
         # refuses to write the live workspace. Not agent-modifiable — only a human flips
         # this at sign-off.
         ("self_modification.frozen", "0", 0),
+        # Untrusted-input hardening (issue #107): default-on filter dropping
+        # non-collaborator/member GitHub comment bodies from /handoff bundles
+        # (replaced with a placeholder). Not agent-modifiable — loosening this
+        # widens the prompt-injection surface into external coding agents.
+        ("handoff.filter_untrusted_authors", "1", 0),
     ]
     for key, value, modifiable in default_configs:
         cursor.execute("""
