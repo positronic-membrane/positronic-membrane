@@ -1152,7 +1152,12 @@ def handle_review_command(command_str: str) -> str:
     except Exception as err:
         return f"[Error] Failed to review PR: {err}"
 
-    status = "APPROVED" if verdict["overall_met"] else "CHANGES REQUESTED"
+    if verdict.get("author_verified") is False:
+        status = "QUEUED FOR OPERATOR"
+    elif verdict["overall_met"]:
+        status = "APPROVED"
+    else:
+        status = "CHANGES REQUESTED"
     return (
         f"[✔] Review posted on PR #{pr_number} — {status}.\n"
         f"Recommendation: {verdict['recommendation']}\n"
@@ -1205,6 +1210,25 @@ def handle_merge_command(command_str: str) -> str:
             f"[Error] No /review verdict found for PR #{pr_number}. "
             f"Run `/review {pr_number} <issue_number>` first, or use `/merge {pr_number} --force` "
             "to merge without a review."
+        )
+    # Fail closed on `is not True` (not `is False`): a verdict persisted before
+    # issue #107 shipped has no "author_verified" key at all (.get returns None),
+    # and treating that the same as an explicit False keeps old, never-checked
+    # verdicts from silently bypassing this gate.
+    if verdict is not None and verdict.get("author_verified") is not True and not force:
+        if verdict.get("author_verified") is False:
+            reason = (
+                f"PR #{pr_number}'s author is not a recognized repo collaborator/member, "
+                "so automated review was skipped"
+            )
+        else:
+            reason = (
+                f"PR #{pr_number}'s stored /review verdict predates author verification "
+                "and was never checked against it"
+            )
+        return (
+            f"[Error] {reason} (see issue #107). Manually review the diff, then use "
+            f"`/merge {pr_number} --force` to merge anyway."
         )
     if verdict is not None and not verdict.get("overall_met") and not force:
         unmet = [c["text"] for c in verdict.get("criteria", []) if not c.get("met")]
@@ -1376,10 +1400,21 @@ def _build_persona_prompt(user_query: str, party_id=None) -> tuple:
     if search_query:
         try:
             from src.explorer import search_web
+            from src.middleware import UNTRUSTED_DATA_NOTICE, quarantine_wrap
             results = search_web(search_query)
             if results:
-                web_text = "\n".join([f"- Title: {r['title']}\n  URL: {r['url']}\n  Snippet: {r['snippet']}" for r in results])
-                semantic_context += f"--- Live Web Search Results for '{search_query}' ---\n{web_text}\n\n"
+                web_text = "\n".join(
+                    quarantine_wrap(
+                        f"Title: {r['title']}\nURL: {r['url']}\nSnippet: {r['snippet']}",
+                        source="web-search",
+                        include_notice=False,
+                    )
+                    for r in results
+                )
+                semantic_context += (
+                    f"--- Live Web Search Results for '{search_query}' ---\n"
+                    f"{UNTRUSTED_DATA_NOTICE}\n{web_text}\n\n"
+                )
             else:
                 semantic_context += f"--- Live Web Search Results ---\nWeb search for '{search_query}' returned no results.\n\n"
         except Exception as e:

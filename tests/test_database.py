@@ -89,6 +89,22 @@ def test_skills_library_ref_seeded_and_locked():
     assert row[0] == "v1"
     assert row[1] == 0
 
+def test_handoff_filter_untrusted_authors_seeded_and_locked():
+    """handoff.filter_untrusted_authors (issue #107) seeds default-on ('1') and
+    is not agent-modifiable."""
+    conn = get_connection(read_only_constitution=True)
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT config_value, is_agent_modifiable FROM system_config WHERE config_key = ?;",
+        ("handoff.filter_untrusted_authors",),
+    )
+    row = cursor.fetchone()
+    conn.close()
+
+    assert row is not None
+    assert row[0] == "1"
+    assert row[1] == 0
+
 def test_write_prevention_on_constitution():
     """Verify that writing to core_constitution is blocked on standard connections."""
     conn = get_connection(read_only_constitution=True)

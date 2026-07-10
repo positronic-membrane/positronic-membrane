@@ -5,6 +5,7 @@ from typing import List, Optional
 
 import src.config
 from src.codebase import generate_file_summary
+from src.middleware import UNTRUSTED_DATA_NOTICE, is_trusted_github_author, quarantine_wrap
 from src.skills import SafeDocuments, SafeGitHub
 
 logger = logging.getLogger("JanusAgentHandoff")
@@ -110,15 +111,38 @@ def _build_conventions_section() -> str:
         return f"*Failed to read CONTRIBUTING.md: {e}*"
 
 
+def _filter_untrusted_authors_enabled() -> bool:
+    """Reads system_config['handoff.filter_untrusted_authors'], default True
+    (filter on) if the row is missing/unreadable."""
+    from src.explorer import _get_config_str
+    value = _get_config_str("handoff.filter_untrusted_authors", "1")
+    return value.strip().lower() not in ("0", "false", "no", "off")
+
+
 def _build_discussion_section(comments: list) -> str:
     if not comments:
         return "*No comments on this issue.*"
-    entries = []
+
+    filter_untrusted = _filter_untrusted_authors_enabled()
+    entries = [UNTRUSTED_DATA_NOTICE]
     for comment in comments:
         # GitHub returns "user": null for comments from deleted/ghost accounts.
         author = (comment.get("user") or {}).get("login", "unknown")
         created_at = comment.get("created_at", "")
-        entries.append(f"**{author}** ({created_at}):\n{comment.get('body', '')}")
+        trusted = is_trusted_github_author(comment)
+
+        if not trusted and filter_untrusted:
+            body = (
+                "*(comment from an unverified author omitted — set "
+                "`handoff.filter_untrusted_authors=0` to display it)*"
+            )
+        else:
+            body = comment.get("body", "")
+
+        entries.append(
+            f"**{author}** ({created_at}):\n"
+            + quarantine_wrap(body, source="github-comment", author=author, trusted=trusted, include_notice=False)
+        )
     return "\n\n".join(entries)
 
 
@@ -151,6 +175,8 @@ def generate_handoff(
     body = issue.get("body") or ""
     state = issue.get("state", "")
     labels = ", ".join(label.get("name", "") for label in (issue.get("labels") or []))
+    issue_author = (issue.get("user") or {}).get("login", "unknown")
+    issue_trusted = is_trusted_github_author(issue)
 
     target_paths = parse_target_files(body)
 
@@ -162,11 +188,17 @@ def generate_handoff(
         "pytest, JANUS_TEST_MODE=1, mirror existing test file naming (test_<module>.py).*"
     )
 
+    # Title is issue-author content too — kept out of the H1 heading (the very
+    # first line of the bundle) and quarantined alongside the body instead.
+    quarantined_issue = quarantine_wrap(
+        f"**Title:** {title}\n\n{body}", source="github-issue-body", author=issue_author, trusted=issue_trusted
+    )
+
     sections = [
-        f"# Agent Handoff: Issue #{issue_number} — {title}",
+        f"# Agent Handoff: Issue #{issue_number}",
         "## Issue\n\n"
         f"**Repo:** {repo}\n**Number:** #{issue_number}\n**State:** {state}\n"
-        f"**Labels:** {labels or 'none'}\n\n{body}",
+        f"**Labels:** {labels or 'none'}\n\n{quarantined_issue}",
         f"## Discussion\n\n{_build_discussion_section(comments)}",
         f"## Context Files\n\n{_build_context_files_section(target_paths)}",
         "## Architecture Notes\n\n"
