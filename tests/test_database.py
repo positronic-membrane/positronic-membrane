@@ -1,3 +1,4 @@
+import base64
 import sqlite3
 import threading
 from unittest.mock import patch
@@ -223,6 +224,123 @@ def test_janus_documents_backfill_migration_adds_purpose_and_metadata(tmp_path):
         assert row[1] == "old content"
         assert row[2] == "memory"
         assert row[3] == "{}"
+    finally:
+        src.config.DB_PATH = orig_db_path
+
+
+def test_external_agents_legacy_encryption_migration(tmp_path, monkeypatch):
+    """Pre-fix rows encrypted with the legacy XOR scheme (using the old
+    hardcoded default key, since no JANUS_ENCRYPTION_KEY was ever set) must
+    be transparently re-encrypted to fernet:v1: on init_db(), given a
+    JANUS_ENCRYPTION_KEY is now configured."""
+    from src.security import _LEGACY_DEFAULT_KEY_DIGEST_HEX, decrypt_api_key
+
+    legacy_default_digest = bytes.fromhex(_LEGACY_DEFAULT_KEY_DIGEST_HEX)
+    plaintext_key = "sk-legacy-abc123"
+    xor_bytes = bytes(
+        b ^ legacy_default_digest[i % len(legacy_default_digest)]
+        for i, b in enumerate(plaintext_key.encode("utf-8"))
+    )
+    legacy_ciphertext = base64.b64encode(xor_bytes).decode("utf-8")
+
+    legacy_db = tmp_path / "legacy_agents.db"
+    conn = sqlite3.connect(str(legacy_db))
+    conn.execute("""
+        CREATE TABLE external_agents (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL UNIQUE,
+            type TEXT NOT NULL CHECK(type IN ('api', 'cli')),
+            endpoint TEXT NOT NULL,
+            api_key_encrypted TEXT,
+            capabilities TEXT,
+            is_active INTEGER DEFAULT 1 CHECK(is_active IN (0, 1)),
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+    """)
+    conn.execute(
+        "INSERT INTO external_agents (name, type, endpoint, api_key_encrypted) "
+        "VALUES ('legacy-agent', 'api', 'https://example.com', ?);",
+        (legacy_ciphertext,),
+    )
+    conn.commit()
+    conn.close()
+
+    orig_db_path = src.config.DB_PATH
+    monkeypatch.setattr(src.config, "JANUS_ENCRYPTION_KEY", "new-real-secret-key")
+    src.config.DB_PATH = str(legacy_db)
+    try:
+        init_db()
+        conn = get_connection(read_only_constitution=True)
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT api_key_encrypted FROM external_agents WHERE name = 'legacy-agent';"
+        )
+        row = cursor.fetchone()
+        conn.close()
+        new_enc = row[0]
+        assert new_enc.startswith("fernet:v1:")
+        assert decrypt_api_key(new_enc) == plaintext_key
+    finally:
+        src.config.DB_PATH = orig_db_path
+
+
+def test_external_agents_migration_is_idempotent(tmp_path, monkeypatch):
+    """A second init_db() run must not re-encrypt already-migrated rows."""
+    from src.security import _LEGACY_DEFAULT_KEY_DIGEST_HEX
+
+    legacy_default_digest = bytes.fromhex(_LEGACY_DEFAULT_KEY_DIGEST_HEX)
+    plaintext_key = "sk-legacy-xyz789"
+    xor_bytes = bytes(
+        b ^ legacy_default_digest[i % len(legacy_default_digest)]
+        for i, b in enumerate(plaintext_key.encode("utf-8"))
+    )
+    legacy_ciphertext = base64.b64encode(xor_bytes).decode("utf-8")
+
+    legacy_db = tmp_path / "legacy_agents_idempotent.db"
+    conn = sqlite3.connect(str(legacy_db))
+    conn.execute("""
+        CREATE TABLE external_agents (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL UNIQUE,
+            type TEXT NOT NULL CHECK(type IN ('api', 'cli')),
+            endpoint TEXT NOT NULL,
+            api_key_encrypted TEXT,
+            capabilities TEXT,
+            is_active INTEGER DEFAULT 1 CHECK(is_active IN (0, 1)),
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+    """)
+    conn.execute(
+        "INSERT INTO external_agents (name, type, endpoint, api_key_encrypted) "
+        "VALUES ('legacy-agent', 'api', 'https://example.com', ?);",
+        (legacy_ciphertext,),
+    )
+    conn.commit()
+    conn.close()
+
+    orig_db_path = src.config.DB_PATH
+    monkeypatch.setattr(src.config, "JANUS_ENCRYPTION_KEY", "new-real-secret-key")
+    src.config.DB_PATH = str(legacy_db)
+    try:
+        init_db()
+        conn = get_connection(read_only_constitution=True)
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT api_key_encrypted FROM external_agents WHERE name = 'legacy-agent';"
+        )
+        first_enc = cursor.fetchone()[0]
+        conn.close()
+
+        init_db()
+        conn = get_connection(read_only_constitution=True)
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT api_key_encrypted FROM external_agents WHERE name = 'legacy-agent';"
+        )
+        second_enc = cursor.fetchone()[0]
+        conn.close()
+
+        assert first_enc == second_enc
     finally:
         src.config.DB_PATH = orig_db_path
 

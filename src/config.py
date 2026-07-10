@@ -67,6 +67,10 @@ GITHUB_REPO = os.getenv("GITHUB_REPO", "")                   # e.g., "owner/repo
 # Comma-separated "owner/repo" values, e.g. "jmccauley75gh/positronic-membrane"
 GITHUB_READONLY_REPOS: list = [r.strip() for r in os.getenv("GITHUB_READONLY_REPOS", "").split(",") if r.strip()]
 
+# External Agents (encrypted API key storage — see src/security.py)
+EXTERNAL_AGENTS_ENABLED = os.getenv("EXTERNAL_AGENTS_ENABLED", "False").lower() in ("true", "1", "yes")
+JANUS_ENCRYPTION_KEY = os.getenv("JANUS_ENCRYPTION_KEY", "")
+
 # Agent Handoff Protocol (see src/agent_handoff.py)
 AGENT_HANDOFF_TEMPLATE = os.getenv("AGENT_HANDOFF_TEMPLATE", "generic")  # "claude_code", "codex", or "generic"
 
@@ -195,6 +199,13 @@ def validate_config() -> ConfigValidationResult:
         warnings.append(
             "GITHUB_ENABLED=True but neither GITHUB_ACCESS_TOKEN nor "
             "GITHUB_PM_TOKEN is set — GitHub integration will fail at call time"
+        )
+
+    # External Agents (encrypted API key storage)
+    if EXTERNAL_AGENTS_ENABLED and not JANUS_ENCRYPTION_KEY:
+        errors.append(
+            "EXTERNAL_AGENTS_ENABLED=True but JANUS_ENCRYPTION_KEY is not set — "
+            "external agent API keys cannot be encrypted"
         )
 
     # OpenRouter routing (mirrors the routing condition in src/llm.py)
