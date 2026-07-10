@@ -251,7 +251,9 @@ def _create_evolution_sandbox(session_name: str) -> tuple:
             logger.warning(f"Could not isolate database for sandbox session: {e}")
 
     # 3. Save to database (persist fork SHA so ship can diff against it later)
-    save_sandbox_session(sandbox_path_str, branch_name, "active", fork_sha=fork_sha, purpose="evolution")
+    save_sandbox_session(
+        sandbox_path_str, branch_name, "active", fork_sha=fork_sha, purpose="evolution", session_name=session_name
+    )
 
     logger.info(f"Sandbox created successfully.")
     return sandbox_path_str, branch_name
@@ -286,7 +288,9 @@ def _create_project_sandbox(session_name: str, app_name: str, overwrite: bool = 
     if res.returncode != 0:
         raise RuntimeError(f"Failed to git init project sandbox: {res.stderr or res.stdout}")
 
-    save_sandbox_session(project_path_str, "", "active", purpose="project", app_name=sanitized)
+    save_sandbox_session(
+        project_path_str, "", "active", purpose="project", app_name=sanitized, session_name=session_name
+    )
 
     logger.info(f"Project sandbox '{sanitized}' created at '{project_path_str}'.")
     return project_path_str, ""

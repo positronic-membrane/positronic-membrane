@@ -36,7 +36,9 @@ def test_create_project_sandbox_runs_git_init(mock_save, mock_run, tmp_path):
         init_args = mock_run.call_args[0][0]
         assert init_args[:2] == ["git", "init"]
 
-        mock_save.assert_called_once_with(path, "", "active", purpose="project", app_name="demo-app")
+        mock_save.assert_called_once_with(
+            path, "", "active", purpose="project", app_name="demo-app", session_name="demo"
+        )
     finally:
         src.config.ROOT_DIR = orig_root
 

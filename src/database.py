@@ -1533,7 +1533,7 @@ def get_pending_modification() -> dict:
 
 # Staged Sandbox Session Helpers
 def save_sandbox_session(path: str, branch: str, status: str, test_logs: str = "", fork_sha: str = "",
-                          purpose: str = "evolution", app_name: str = ""):
+                          purpose: str = "evolution", app_name: str = "", session_name: str = ""):
     """Saves active sandbox session metadata in system_config."""
     conn = get_connection(read_only_constitution=True)
     cursor = conn.cursor()
@@ -1550,6 +1550,11 @@ def save_sandbox_session(path: str, branch: str, status: str, test_logs: str = "
         configs.append(("active_sandbox_fork_sha", fork_sha))
     if app_name:
         configs.append(("active_sandbox_app_name", app_name))
+    # Raw (un-sanitized) session name, e.g. "dispatch_42" — lets review_dispatch() verify the
+    # currently active session is actually the one a dispatch created, by direct string
+    # comparison against dispatch_log.sandbox_session_id (see #95).
+    if session_name:
+        configs.append(("active_sandbox_session_name", session_name))
     for key, val in configs:
         cursor.execute("""
         INSERT OR REPLACE INTO system_config (config_key, config_value, is_agent_modifiable)
@@ -1570,6 +1575,7 @@ def clear_sandbox_session():
         "active_sandbox_fork_sha",
         "active_sandbox_purpose",
         "active_sandbox_app_name",
+        "active_sandbox_session_name",
     ]
     for key in keys:
         cursor.execute("DELETE FROM system_config WHERE config_key = ?;", (key,))
@@ -1590,7 +1596,8 @@ def get_sandbox_session() -> dict:
         'active_sandbox_test_logs',
         'active_sandbox_fork_sha',
         'active_sandbox_purpose',
-        'active_sandbox_app_name'
+        'active_sandbox_app_name',
+        'active_sandbox_session_name'
     );
     """)
     rows = cursor.fetchall()

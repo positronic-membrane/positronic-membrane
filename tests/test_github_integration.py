@@ -558,9 +558,27 @@ def test_merge_pr_forwards_optional_commit_fields():
 
 
 def test_merge_pr_rejects_non_squash_method():
-    gh = SafeGitHub(party_id="system")
+    conn = get_connection()
+    try:
+        _insert_party(conn, "admin_merge_squash", "admin")
+    finally:
+        conn.close()
+
+    gh = SafeGitHub(party_id="admin_merge_squash")
     with pytest.raises(ValueError, match="squash-only"):
         gh.merge_pr(REPO, 12, merge_method="rebase")
+
+
+def test_merge_pr_blocked_for_system_party():
+    gh = SafeGitHub(party_id="system")
+    with pytest.raises(PermissionError, match="System"):
+        gh.merge_pr(REPO, 12)
+
+
+def test_merge_pr_blocked_for_none_party_id():
+    gh = SafeGitHub(party_id=None)
+    with pytest.raises(PermissionError, match="admin"):
+        gh.merge_pr(REPO, 12)
 
 
 def test_merge_pr_scans_commit_title_for_banned_boundaries():

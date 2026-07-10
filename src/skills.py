@@ -13,7 +13,8 @@ from src.sandbox_session import (
     apply_changes_to_sandbox,
     ship_sandbox_session,
     abort_sandbox_session,
-    get_sandbox_diff
+    get_sandbox_diff,
+    get_active_sandbox
 )
 from openai import OpenAI
 
@@ -813,7 +814,10 @@ class SafeLayeredCognition:
 
 class SafeAgentOrchestration:
     """Safe external agent registration and dispatch operations for dynamic skills."""
-    
+
+    def __init__(self, party_id: Optional[str] = None):
+        self.party_id = party_id
+
     def register_agent(self, name: str, agent_type: str, endpoint: str, api_key: str, capabilities: list) -> int:
         """
         Registers a new external coding agent in the SQLite registry.
@@ -1180,14 +1184,33 @@ FILE: <relative_path>
             
         if status not in ('success', 'failed'):
             return False
-            
+
+        # Approving ships a dispatch's sandboxed changes into the live workspace — the one
+        # irreversible half of this method — so it gets the same admin gate as
+        # SafeGitHub.merge_pr. Rejecting only discards a sandbox, so it stays ungated (#95):
+        # a contributor-tier caller aborting its own failed/unwanted dispatch is not a
+        # privilege escalation.
+        if approve:
+            require_admin(self.party_id, "approve dispatch reviews")
+
+        # Regardless of approve/reject, never act on whatever sandbox happens to be active if
+        # it isn't the one this dispatch actually created — shipping the wrong session's
+        # changes is bad, but so is discarding the wrong session's in-progress work.
+        active_name = get_active_sandbox().get("active_sandbox_session_name")
+        if not active_name or active_name != sandbox:
+            raise RuntimeError(
+                f"Active sandbox session ('{active_name or 'none'}') does not match dispatch "
+                f"[{dispatch_id}]'s recorded session ('{sandbox}'); refusing to "
+                f"{'ship' if approve else 'abort'} the wrong sandbox."
+            )
+
         if approve:
             ship_sandbox_session()
             new_status = "reviewed"
         else:
             abort_sandbox_session()
             new_status = "failed"
-            
+
         conn = get_connection(read_only_constitution=True)
         try:
             conn.execute("UPDATE dispatch_log SET status = ?, completed_at = CURRENT_TIMESTAMP WHERE id = ?;", (new_status, dispatch_id))
@@ -1698,8 +1721,7 @@ class SafeGitHub:
         # Admin-only: merging is the one irreversible action in this class, and the
         # feature this backs (issue #69) requires a human gate — no contributor-tier
         # agent automation should ever be able to merge on its own.
-        if not has_role(self.party_id, "admin"):
-            raise PermissionError("Merging pull requests requires admin role.")
+        require_admin(self.party_id, "merge pull requests")
         if merge_method != "squash":
             raise ValueError(
                 f"Unsupported merge_method '{merge_method}': this project's workflow "
@@ -1735,7 +1757,14 @@ class SafeGitHub:
 
 
 def has_role(party_id: Optional[str], required_role: str) -> bool:
-    """Verifies that the given party meets or exceeds the required security role."""
+    """
+    Verifies that the given party meets or exceeds the required security role.
+
+    NOTE: party_id == 'system' always returns True here, regardless of required_role — it is
+    NOT safe on its own to gate an irreversible/destructive action. Callers backing such an
+    action (see require_admin below) must add an explicit party_id == 'system' check of their
+    own rather than relying on this function alone (#95).
+    """
     if required_role == 'observer':
         return True
     if not party_id:
@@ -1753,6 +1782,20 @@ def has_role(party_id: Optional[str], required_role: str) -> bool:
         return role_hierarchy.get(role, -1) >= role_hierarchy.get(required_role, 0)
     finally:
         conn.close()
+
+
+def require_admin(party_id: Optional[str], action_description: str) -> None:
+    """
+    Enforces the admin gate shared by every irreversible action (merging a PR,
+    shipping a dispatch's sandboxed changes into the live workspace). 'system' is
+    explicitly blocked rather than relying on has_role(), which treats
+    party_id='system' as satisfying any role check (#95) -- background/daemon-
+    triggered execution must never itself satisfy a human-ratification gate.
+    """
+    if party_id == 'system':
+        raise PermissionError(f"System-party actions may not {action_description}.")
+    if not has_role(party_id, "admin"):
+        raise PermissionError(f"{action_description.capitalize()} requires admin role.")
 
 class DynamicSkillExecutor:
     """Compiles and executes database-backed Python skills in isolated namespaces."""
@@ -1804,7 +1847,7 @@ class DynamicSkillExecutor:
             "goals": SafeGoals(),
             "documents": SafeDocuments(),
             "layered_cognition": SafeLayeredCognition(),
-            "agent_orchestration": SafeAgentOrchestration(),
+            "agent_orchestration": SafeAgentOrchestration(party_id),
             "replication": SafeReplication(),
             "explorer": SafeExplorer(party_id),
             "codebase": SafeCodebase(),

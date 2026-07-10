@@ -547,8 +547,9 @@ def handle_agent_command(command_str: str) -> str:
     return "[Error] Unknown subcommand. Supported: list, register"
 
 def handle_dispatch_command(command_str: str) -> str:
-    from src.skills import SafeAgentOrchestration
-    sao = SafeAgentOrchestration()
+    from src.skills import has_role, SafeAgentOrchestration
+    party_id = get_session_party_id()
+    sao = SafeAgentOrchestration(party_id=party_id)
     
     parts = command_str.strip().split(None, 1)
     subcommand = ""
@@ -592,6 +593,9 @@ def handle_dispatch_command(command_str: str) -> str:
                 return "[Error] Action must be either 'approve' or 'reject'."
                 
             approve = (action == 'approve')
+            if approve and not has_role(party_id, "admin"):
+                return "[Error] /dispatch review ... approve requires the 'admin' role."
+
             success = sao.review_dispatch(did, approve=approve)
             if success:
                 verb = "merged and shipped" if approve else "aborted and discarded"
@@ -599,6 +603,8 @@ def handle_dispatch_command(command_str: str) -> str:
             return f"[Error] Failed to review dispatch [{did}]. Ensure task is in 'success' or 'failed' status."
         except ValueError:
             return "[Error] Dispatch ID must be an integer."
+        except (PermissionError, RuntimeError) as e:
+            return f"[Error] {e}"
         except Exception as e:
             return f"[Error] Review failed: {e}"
 
