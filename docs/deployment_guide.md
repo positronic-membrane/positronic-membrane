@@ -141,13 +141,12 @@ To run agent code validations safely without RCE risks on your host system:
 unless you also set `ALLOW_LOCAL_SANDBOX_EXEC=True`. Only use this for trusted local development —
 never in a production/droplet deployment.
 
-### E2B Sandboxes (Micro-VMs)
-Set `SANDBOX_PROVIDER=e2b` and define your api key:
-```env
-SANDBOX_PROVIDER=e2b
-E2B_API_KEY=your_e2b_api_key_here
-```
-*   Janus automatically spins up isolated micro-VM sandboxes via E2B API, uploads the modified code files, runs tests, and reports outcomes without touching local disks.
+### E2B Sandboxes (Micro-VMs) — Not Implemented
+`SANDBOX_PROVIDER=e2b` is **not supported**. `E2BSandboxExecutor` is an unimplemented stub — it
+previously fabricated fake passing test logs instead of actually running anything, which would
+have silently defeated the sandbox ship regression gate. Boot-time config validation now rejects
+`SANDBOX_PROVIDER=e2b` outright (the process refuses to start). Use `docker` (recommended,
+default) or `local` instead.
 
 ---
 

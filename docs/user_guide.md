@@ -45,7 +45,7 @@ DB_PATH=/path/to/janus.db
 VECTOR_DB_PATH=/path/to/chromadb
 
 # executors
-SANDBOX_PROVIDER=docker            # "local", "docker" (default), or "e2b"
+SANDBOX_PROVIDER=docker            # "local" or "docker" (default) — "e2b" is unimplemented, rejected at boot
 SPAWN_PROVIDER=local               # "local", "docker", or "ecs"
 
 # Offline Mock Engine

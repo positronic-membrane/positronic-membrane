@@ -123,23 +123,17 @@ class DockerSandboxExecutor(SandboxExecutor):
         return passed, logs
 
 class E2BSandboxExecutor(SandboxExecutor):
+    _NOT_IMPLEMENTED_MSG = (
+        "E2BSandboxExecutor is not implemented. It previously fabricated passing "
+        "test logs without executing anything. Use SANDBOX_PROVIDER=docker "
+        "(recommended, default) or 'local' instead."
+    )
+
+    def __init__(self):
+        raise NotImplementedError(self._NOT_IMPLEMENTED_MSG)
+
     def run_tests(self, sandbox_root: str, test_timeout: int, env: dict) -> tuple:
-        logger.info(f"E2BSandboxExecutor running tests for {sandbox_root}...")
-        if not src.config.E2B_API_KEY:
-            return False, "Error: E2B_API_KEY is not configured in environment."
-            
-        # Mock/stub E2B execution logs for simulation
-        logs = (
-            "E2B VM Sandbox Session Started.\n"
-            "Uploading workspace files from local sandbox worktree...\n"
-            "Files uploaded successfully.\n"
-            "Executing: pytest -v inside VM...\n"
-            "============================= test session starts ==============================\n"
-            "collected 189 items\n"
-            "tests/test_database.py ....\n"
-            "=========================== 189 passed in 2.11s ===========================\n"
-        )
-        return True, logs
+        raise NotImplementedError(self._NOT_IMPLEMENTED_MSG)
 
 def get_sandbox_executor() -> SandboxExecutor:
     provider = getattr(src.config, "SANDBOX_PROVIDER", "local").lower()
@@ -457,8 +451,8 @@ def run_sandbox_tests() -> tuple:
     else:
         env["PYTHONPATH"] = str(sandbox_root)
         
-    executor = get_sandbox_executor()
     try:
+        executor = get_sandbox_executor()
         passed, logs = executor.run_tests(str(sandbox_root), src.config.SANDBOX_TEST_TIMEOUT, env)
     except Exception as e:
         passed = False

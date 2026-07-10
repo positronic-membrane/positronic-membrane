@@ -204,12 +204,19 @@ def validate_config() -> ConfigValidationResult:
             "OPENROUTER_API_KEY is empty"
         )
 
-    # Sandbox / spawn provider enums
-    if SANDBOX_PROVIDER not in ("local", "docker", "e2b"):
+    # Sandbox / spawn provider enums — compare case-insensitively, matching
+    # get_sandbox_executor()'s own `.lower()` dispatch in src/sandbox_session.py,
+    # so e.g. SANDBOX_PROVIDER=E2B can't slip past this check into the warning branch.
+    sandbox_provider_normalized = (SANDBOX_PROVIDER or "").lower()
+    if sandbox_provider_normalized not in ("local", "docker", "e2b"):
         warnings.append(f"SANDBOX_PROVIDER='{SANDBOX_PROVIDER}' is not one of local/docker/e2b")
-    elif SANDBOX_PROVIDER == "e2b" and not E2B_API_KEY:
-        warnings.append("SANDBOX_PROVIDER=e2b but E2B_API_KEY is empty")
-    elif SANDBOX_PROVIDER == "local" and not ALLOW_LOCAL_SANDBOX_EXEC:
+    elif sandbox_provider_normalized == "e2b":
+        errors.append(
+            "SANDBOX_PROVIDER=e2b is not supported — the E2B executor is unimplemented "
+            "and previously fabricated passing test results. Use 'docker' (recommended) "
+            "or 'local'."
+        )
+    elif sandbox_provider_normalized == "local" and not ALLOW_LOCAL_SANDBOX_EXEC:
         warnings.append(
             "SANDBOX_PROVIDER=local but ALLOW_LOCAL_SANDBOX_EXEC is not set — "
             "local sandbox calls will be refused"

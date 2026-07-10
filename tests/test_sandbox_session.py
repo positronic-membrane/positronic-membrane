@@ -5,10 +5,12 @@ import pytest
 
 import src.config
 from src.sandbox_session import (
+    E2BSandboxExecutor,
     abort_sandbox_session,
     apply_changes_to_sandbox,
     create_sandbox_session,
     get_sandbox_diff,
+    get_sandbox_executor,
     get_sandbox_modified_files,
     run_sandbox_tests,
     sanitize_session_name,
@@ -155,6 +157,85 @@ def test_run_sandbox_tests_timeout(mock_save, mock_run, mock_get_session, tmp_pa
 
     # Verify DB was updated to "failed" with timeout logs
     mock_save.assert_called_once_with(str(sandbox_path), "janus/sandbox-feat", "failed", test_logs=logs)
+
+
+def test_e2b_executor_raises_not_implemented_at_construction():
+    """E2B is an unimplemented stub — must fail loudly, never fabricate a passing result."""
+    with pytest.raises(NotImplementedError):
+        E2BSandboxExecutor()
+
+
+def test_get_sandbox_executor_e2b_raises_not_implemented(monkeypatch):
+    monkeypatch.setattr(src.config, "SANDBOX_PROVIDER", "e2b")
+    with pytest.raises(NotImplementedError):
+        get_sandbox_executor()
+
+
+@patch("src.sandbox_session.get_sandbox_session")
+@patch("src.sandbox_session.save_sandbox_session")
+def test_run_sandbox_tests_e2b_provider_returns_graceful_failure(mock_save, mock_get_session, tmp_path):
+    """
+    run_sandbox_tests() must honor its documented (passed, logs) contract even
+    when the configured provider is unimplemented — the executor's
+    NotImplementedError must not escape this boundary uncaught.
+    """
+    sandbox_path = tmp_path / "sandbox_folder"
+    sandbox_path.mkdir()
+
+    mock_get_session.return_value = {
+        "active_sandbox_path": str(sandbox_path),
+        "active_sandbox_branch": "janus/sandbox-feat",
+        "active_sandbox_status": "active",
+    }
+
+    orig_provider = src.config.SANDBOX_PROVIDER
+    src.config.SANDBOX_PROVIDER = "e2b"
+    try:
+        passed, logs = run_sandbox_tests()
+    finally:
+        src.config.SANDBOX_PROVIDER = orig_provider
+
+    assert passed is False
+    assert "not implemented" in logs.lower()
+
+
+@patch("src.sandbox_session.get_sandbox_session")
+@patch("src.sandbox_session.abort_sandbox_session")
+@patch("src.sandbox_session.shutil.copy2")
+def test_ship_sandbox_session_e2b_provider_aborts_instead_of_shipping(
+    mock_copy, mock_abort, mock_get_session, tmp_path
+):
+    """
+    Regression test for issue #94: even if the SANDBOX_PROVIDER=e2b boot-time
+    validation gate were bypassed, ship_sandbox_session() must never silently
+    ship a fabricated passing result — the unimplemented executor is treated as
+    a failed test run and aborts through the existing regression gate (which
+    cleans up the sandbox worktree/branch via abort_sandbox_session()), rather
+    than leaving an unhandled exception fly and the sandbox session dangling.
+    """
+    orig_root = src.config.ROOT_DIR
+    orig_provider = src.config.SANDBOX_PROVIDER
+    src.config.ROOT_DIR = tmp_path
+    src.config.SANDBOX_PROVIDER = "e2b"
+
+    sandbox_path = tmp_path / "sandbox"
+    (sandbox_path / "tests").mkdir(parents=True)
+
+    mock_get_session.return_value = {
+        "active_sandbox_path": str(sandbox_path),
+        "active_sandbox_branch": "janus/sandbox-feat",
+        "active_sandbox_status": "active",
+    }
+
+    try:
+        with pytest.raises(RuntimeError, match="Regression detected"):
+            ship_sandbox_session()
+    finally:
+        src.config.ROOT_DIR = orig_root
+        src.config.SANDBOX_PROVIDER = orig_provider
+
+    mock_abort.assert_called_once()
+    mock_copy.assert_not_called()
 
 @patch("src.sandbox_session.get_sandbox_session")
 @patch("src.sandbox_session.subprocess.run")

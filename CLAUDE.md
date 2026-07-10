@@ -155,8 +155,9 @@ re-deriving that trust assumption first.
    copies it back — or, if `GITHUB_ENABLED=True`, opens a GitHub PR instead of writing locally.
 3. **`src/sandbox_session.py`** (`/sandbox start|status|diff|ship|abort`, `SafeAgentOrchestration.dispatch_task`)
    — a real `git worktree`+branch under `.janus_sandboxes/session_<name>`, with its own copied DB, executed via
-   a pluggable `SandboxExecutor` (`local`/`docker`/`e2b`, chosen by `SANDBOX_PROVIDER`; `e2b` is currently a
-   stub that fabricates passing logs). `ship_sandbox_session()` reruns tests, aborts the whole session (raises)
+   a pluggable `SandboxExecutor` (`local`/`docker`, chosen by `SANDBOX_PROVIDER`; `e2b` is rejected at boot by
+   config validation and its executor raises `NotImplementedError` — it was previously a stub that fabricated
+   passing logs, see issue #94). `ship_sandbox_session()` reruns tests, aborts the whole session (raises)
    on any regression vs. the most recent `test_run_baselines` row, and only then copies modified files back
    and deletes the worktree/branch.
 
