@@ -3,9 +3,26 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 import src.config
-from src.database import get_connection, init_db
+from src.database import get_connection, init_db, save_sandbox_session
 from src.security import decrypt_api_key, encrypt_api_key
 from src.skills import SafeAgentOrchestration
+
+
+def _insert_party(conn, party_id: str, role: str) -> None:
+    conn.execute(
+        "INSERT OR REPLACE INTO parties (id, name, role) VALUES (?, ?, ?)",
+        (party_id, f"Test {party_id}", role),
+    )
+    conn.commit()
+
+
+def _insert_dispatch_row(conn, dispatch_id: int, status: str, sandbox_session_id: str, agent_id=None) -> None:
+    conn.execute(
+        "INSERT INTO dispatch_log (id, agent_id, task_description, status, sandbox_session_id) "
+        "VALUES (?, ?, 'task description', ?, ?);",
+        (dispatch_id, agent_id, status, sandbox_session_id),
+    )
+    conn.commit()
 
 
 @pytest.fixture(autouse=True)
@@ -182,23 +199,19 @@ async def test_cli_dispatch_task(mock_run_tests, mock_create_sandbox, mock_sub_r
 @patch("src.skills.abort_sandbox_session")
 def test_dispatch_review(mock_abort, mock_ship):
     """Verify review_dispatch updates DB and commits/discards sandbox session appropriately."""
-    sao = SafeAgentOrchestration()
+    conn = get_connection()
+    _insert_party(conn, "admin_dispatch", "admin")
+    conn.close()
+
+    sao = SafeAgentOrchestration(party_id="admin_dispatch")
     aid = sao.register_agent("coder-api", "api", "https://api.mock.net", "secret-key", [])
 
     conn = get_connection()
-    conn.execute(
-        "INSERT INTO dispatch_log (id, agent_id, task_description, status, sandbox_session_id) "
-        "VALUES (1, ?, 'task description', 'success', 'dispatch_1');",
-        (aid,)
-    )
-    conn.execute(
-        "INSERT INTO dispatch_log (id, agent_id, task_description, status, sandbox_session_id) "
-        "VALUES (2, ?, 'task description', 'failed', 'dispatch_2');",
-        (aid,)
-    )
-    conn.commit()
+    _insert_dispatch_row(conn, 1, "success", "dispatch_1", agent_id=aid)
+    _insert_dispatch_row(conn, 2, "failed", "dispatch_2", agent_id=aid)
     conn.close()
 
+    save_sandbox_session("/fake/sandbox_1", "evolution/sandbox-dispatch_1", "active", session_name="dispatch_1")
     success = sao.review_dispatch(1, approve=True)
     assert success is True
     mock_ship.assert_called_once()
@@ -206,9 +219,213 @@ def test_dispatch_review(mock_abort, mock_ship):
     status1 = sao.get_dispatch_status(1)
     assert status1["status"] == "reviewed"
 
+    # ship_sandbox_session is mocked, so the real clear_sandbox_session() never ran —
+    # re-point the active session at dispatch 2's before reviewing it.
+    save_sandbox_session("/fake/sandbox_2", "evolution/sandbox-dispatch_2", "active", session_name="dispatch_2")
     success2 = sao.review_dispatch(2, approve=False)
     assert success2 is True
     mock_abort.assert_called_once()
 
     status2 = sao.get_dispatch_status(2)
     assert status2["status"] == "failed"
+
+
+# ---------------------------------------------------------------------------
+# review_dispatch — role gate, system carve-out, and session-identity checks (#95)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("role", ["observer", "user", "contributor"])
+def test_review_dispatch_approve_blocked_for_non_admin_roles(role):
+    conn = get_connection()
+    _insert_party(conn, f"p_{role}", role)
+    _insert_dispatch_row(conn, 1, "success", "dispatch_1")
+    conn.close()
+
+    sao = SafeAgentOrchestration(party_id=f"p_{role}")
+    with pytest.raises(PermissionError, match="admin"):
+        sao.review_dispatch(1, approve=True)
+
+
+def test_review_dispatch_approve_blocked_for_none_party():
+    conn = get_connection()
+    _insert_dispatch_row(conn, 1, "success", "dispatch_1")
+    conn.close()
+
+    sao = SafeAgentOrchestration(party_id=None)
+    with pytest.raises(PermissionError, match="admin"):
+        sao.review_dispatch(1, approve=True)
+
+
+def test_review_dispatch_approve_blocked_for_system_party():
+    conn = get_connection()
+    _insert_dispatch_row(conn, 1, "success", "dispatch_1")
+    conn.close()
+
+    sao = SafeAgentOrchestration(party_id="system")
+    with pytest.raises(PermissionError, match="System"):
+        sao.review_dispatch(1, approve=True)
+
+
+@patch("src.skills.ship_sandbox_session")
+def test_review_dispatch_approve_allowed_for_admin_with_matching_session(mock_ship):
+    conn = get_connection()
+    _insert_party(conn, "admin_review", "admin")
+    _insert_dispatch_row(conn, 1, "success", "dispatch_1")
+    conn.close()
+
+    save_sandbox_session("/fake/sandbox_1", "evolution/sandbox-dispatch_1", "active", session_name="dispatch_1")
+
+    sao = SafeAgentOrchestration(party_id="admin_review")
+    assert sao.review_dispatch(1, approve=True) is True
+    mock_ship.assert_called_once()
+
+
+@patch("src.skills.abort_sandbox_session")
+def test_review_dispatch_reject_ungated_for_non_admin(mock_abort):
+    conn = get_connection()
+    _insert_party(conn, "contributor_reject", "contributor")
+    _insert_dispatch_row(conn, 1, "failed", "dispatch_1")
+    conn.close()
+
+    save_sandbox_session("/fake/sandbox_1", "evolution/sandbox-dispatch_1", "active", session_name="dispatch_1")
+
+    sao = SafeAgentOrchestration(party_id="contributor_reject")
+    assert sao.review_dispatch(1, approve=False) is True
+    mock_abort.assert_called_once()
+
+
+@patch("src.skills.ship_sandbox_session")
+def test_review_dispatch_refuses_session_mismatch_on_approve(mock_ship):
+    conn = get_connection()
+    _insert_party(conn, "admin_mismatch", "admin")
+    _insert_dispatch_row(conn, 1, "success", "dispatch_1")
+    conn.close()
+
+    # Active session belongs to a different dispatch.
+    save_sandbox_session("/fake/sandbox_2", "evolution/sandbox-dispatch_2", "active", session_name="dispatch_2")
+
+    sao = SafeAgentOrchestration(party_id="admin_mismatch")
+    with pytest.raises(RuntimeError, match="does not match"):
+        sao.review_dispatch(1, approve=True)
+    mock_ship.assert_not_called()
+
+
+@patch("src.skills.abort_sandbox_session")
+def test_review_dispatch_refuses_session_mismatch_on_reject(mock_abort):
+    conn = get_connection()
+    _insert_party(conn, "contributor_mismatch", "contributor")
+    _insert_dispatch_row(conn, 1, "failed", "dispatch_1")
+    conn.close()
+
+    save_sandbox_session("/fake/sandbox_2", "evolution/sandbox-dispatch_2", "active", session_name="dispatch_2")
+
+    sao = SafeAgentOrchestration(party_id="contributor_mismatch")
+    with pytest.raises(RuntimeError, match="does not match"):
+        sao.review_dispatch(1, approve=False)
+    mock_abort.assert_not_called()
+
+
+@pytest.mark.parametrize("approve", [True, False])
+def test_review_dispatch_refuses_when_no_active_session(approve):
+    conn = get_connection()
+    _insert_party(conn, "admin_no_session", "admin")
+    _insert_dispatch_row(conn, 1, "success" if approve else "failed", "dispatch_1")
+    conn.close()
+
+    sao = SafeAgentOrchestration(party_id="admin_no_session")
+    with pytest.raises(RuntimeError, match="does not match"):
+        sao.review_dispatch(1, approve=approve)
+
+
+def test_no_seeded_skill_reaches_merge_pr_or_review_dispatch():
+    """
+    Pins that merge_pr/review_dispatch stay unreachable via party_id='system'
+    skill-execution paths (interval/reflex/swarm) until a future change
+    deliberately re-derives this trust boundary (see #95).
+    """
+    conn = get_connection()
+    try:
+        rows = conn.execute("SELECT skill_id, code_blob FROM agent_skills;").fetchall()
+    finally:
+        conn.close()
+    for row in rows:
+        skill_id, code_blob = row[0], row[1]
+        assert "merge_pr(" not in code_blob, f"skill '{skill_id}' calls merge_pr"
+        assert "review_dispatch(" not in code_blob, f"skill '{skill_id}' calls review_dispatch"
+
+
+# ---------------------------------------------------------------------------
+# handle_dispatch_command "review" — command-level gate (#95)
+# ---------------------------------------------------------------------------
+
+@patch("src.persona.get_session_party_id", return_value="contributor_cmd")
+@patch("src.skills.SafeAgentOrchestration.review_dispatch")
+def test_dispatch_review_command_blocked_for_contributor_role(mock_review, mock_party):
+    from src.persona import handle_dispatch_command
+
+    conn = get_connection()
+    _insert_party(conn, "contributor_cmd", "contributor")
+    conn.close()
+
+    result = handle_dispatch_command("/dispatch review 1 approve")
+    assert "[Error]" in result
+    assert "admin" in result
+    mock_review.assert_not_called()
+
+
+@patch("src.persona.get_session_party_id", return_value="admin_cmd")
+@patch("src.skills.SafeAgentOrchestration.review_dispatch")
+def test_dispatch_review_command_allowed_for_admin(mock_review, mock_party):
+    from src.persona import handle_dispatch_command
+
+    conn = get_connection()
+    _insert_party(conn, "admin_cmd", "admin")
+    conn.close()
+
+    mock_review.return_value = True
+    result = handle_dispatch_command("/dispatch review 1 approve")
+    assert "successfully merged and shipped" in result
+    mock_review.assert_called_once_with(1, approve=True)
+
+
+@patch("src.persona.get_session_party_id", return_value="contributor_cmd2")
+@patch("src.skills.SafeAgentOrchestration.review_dispatch")
+def test_dispatch_review_command_reject_ungated_for_contributor(mock_review, mock_party):
+    from src.persona import handle_dispatch_command
+
+    conn = get_connection()
+    _insert_party(conn, "contributor_cmd2", "contributor")
+    conn.close()
+
+    mock_review.return_value = True
+    result = handle_dispatch_command("/dispatch review 1 reject")
+    assert "successfully aborted and discarded" in result
+    mock_review.assert_called_once_with(1, approve=False)
+
+
+@patch("src.persona.get_session_party_id", return_value="admin_cmd3")
+@patch("src.skills.SafeAgentOrchestration.review_dispatch")
+def test_dispatch_review_command_returns_error_string_on_permission_error(mock_review, mock_party):
+    from src.persona import handle_dispatch_command
+
+    conn = get_connection()
+    _insert_party(conn, "admin_cmd3", "admin")
+    conn.close()
+
+    mock_review.side_effect = PermissionError("nope")
+    result = handle_dispatch_command("/dispatch review 1 approve")
+    assert result == "[Error] nope"
+
+
+@patch("src.persona.get_session_party_id", return_value="admin_cmd4")
+@patch("src.skills.SafeAgentOrchestration.review_dispatch")
+def test_dispatch_review_command_returns_error_string_on_runtime_error(mock_review, mock_party):
+    from src.persona import handle_dispatch_command
+
+    conn = get_connection()
+    _insert_party(conn, "admin_cmd4", "admin")
+    conn.close()
+
+    mock_review.side_effect = RuntimeError("session mismatch")
+    result = handle_dispatch_command("/dispatch review 1 approve")
+    assert result == "[Error] session mismatch"

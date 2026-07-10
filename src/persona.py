@@ -24,10 +24,21 @@ def get_session_party_id() -> Optional[str]:
             row = conn.execute("SELECT id FROM parties WHERE role = ? LIMIT 1;", (role,)).fetchone()
             if row:
                 return row[0]
-        # Fallback to any party
-        row = conn.execute("SELECT id FROM parties LIMIT 1;").fetchone()
+        # Fallback to any other configured party (e.g. a manually-inserted observer)
+        row = conn.execute("SELECT id FROM parties WHERE name != 'system' LIMIT 1;").fetchone()
         if row:
             return row[0]
+        # No real party has ever been configured -- the CLI/chat persona path has no bootstrap
+        # ceremony of its own (unlike the multi-party web API's role_bootstrap.py). Auto-provision
+        # a stable local-operator admin identity, mirroring routers/dependencies.py's implicit
+        # local_user/admin fallback, so a solo CLI operator's session doesn't resolve to the
+        # literal 'system' identity -- which merge_pr/review_dispatch explicitly reject (#95).
+        conn.execute(
+            "INSERT OR IGNORE INTO parties (id, name, role, created_at, last_seen, metadata) "
+            "VALUES ('local_user', 'local_user', 'admin', datetime('now'), datetime('now'), '{}');"
+        )
+        conn.commit()
+        return 'local_user'
     except Exception:
         pass
     finally:
@@ -547,8 +558,9 @@ def handle_agent_command(command_str: str) -> str:
     return "[Error] Unknown subcommand. Supported: list, register"
 
 def handle_dispatch_command(command_str: str) -> str:
-    from src.skills import SafeAgentOrchestration
-    sao = SafeAgentOrchestration()
+    from src.skills import has_role, SafeAgentOrchestration
+    party_id = get_session_party_id()
+    sao = SafeAgentOrchestration(party_id=party_id)
     
     parts = command_str.strip().split(None, 1)
     subcommand = ""
@@ -592,6 +604,9 @@ def handle_dispatch_command(command_str: str) -> str:
                 return "[Error] Action must be either 'approve' or 'reject'."
                 
             approve = (action == 'approve')
+            if approve and not has_role(party_id, "admin"):
+                return "[Error] /dispatch review ... approve requires the 'admin' role."
+
             success = sao.review_dispatch(did, approve=approve)
             if success:
                 verb = "merged and shipped" if approve else "aborted and discarded"
@@ -599,6 +614,8 @@ def handle_dispatch_command(command_str: str) -> str:
             return f"[Error] Failed to review dispatch [{did}]. Ensure task is in 'success' or 'failed' status."
         except ValueError:
             return "[Error] Dispatch ID must be an integer."
+        except (PermissionError, RuntimeError) as e:
+            return f"[Error] {e}"
         except Exception as e:
             return f"[Error] Review failed: {e}"
 
