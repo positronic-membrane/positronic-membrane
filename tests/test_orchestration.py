@@ -26,26 +26,35 @@ def _insert_dispatch_row(conn, dispatch_id: int, status: str, sandbox_session_id
 
 
 @pytest.fixture(autouse=True)
-def setup_test_db(tmp_path):
-    """Isolate DB settings for testing."""
+def setup_test_db(tmp_path, monkeypatch):
+    """Isolate DB settings for testing. Also enables external-agent
+    registration (disabled by default, see issue #105) since this whole
+    file exercises SafeAgentOrchestration.register_agent/dispatch_task."""
     temp_db = tmp_path / "test_janus_orchestration.db"
     orig_db_path = src.config.DB_PATH
     src.config.DB_PATH = str(temp_db)
+    monkeypatch.setattr(src.config, "EXTERNAL_AGENTS_ENABLED", True)
+    monkeypatch.setattr(src.config, "JANUS_ENCRYPTION_KEY", "orchestration-test-secret")
     init_db()
     yield
     src.config.DB_PATH = orig_db_path
 
 def test_security_encryption_roundtrip(monkeypatch):
     """Verify symmetric encryption and decryption round-trip works correctly."""
-    monkeypatch.setenv("JANUS_ENCRYPTION_KEY", "super-secret-key-123")
+    monkeypatch.setattr(src.config, "JANUS_ENCRYPTION_KEY", "super-secret-key-123")
     secret = "sk-proj-12345abcdef"
     enc = encrypt_api_key(secret)
     assert enc != secret
+    assert enc.startswith("fernet:v1:")
     assert decrypt_api_key(enc) == secret
 
-    monkeypatch.delenv("JANUS_ENCRYPTION_KEY", raising=False)
-    enc_fallback = encrypt_api_key(secret)
-    assert decrypt_api_key(enc_fallback) == secret
+
+def test_security_encrypt_without_key_raises(monkeypatch):
+    """Encrypting with no JANUS_ENCRYPTION_KEY configured must fail loudly,
+    not silently fall back to a hardcoded default (see issue #105)."""
+    monkeypatch.setattr(src.config, "JANUS_ENCRYPTION_KEY", "")
+    with pytest.raises(RuntimeError):
+        encrypt_api_key("sk-proj-12345abcdef")
 
 def test_agent_registration():
     """Verify external agents are correctly registered and API keys are stored in encrypted format."""

@@ -823,6 +823,10 @@ class SafeAgentOrchestration:
         Registers a new external coding agent in the SQLite registry.
         Encrypts the API key before storage if type is 'api'.
         """
+        from src.config import EXTERNAL_AGENTS_ENABLED
+        if not EXTERNAL_AGENTS_ENABLED:
+            raise ValueError("External agent registration is disabled (EXTERNAL_AGENTS_ENABLED=False).")
+
         if agent_type not in ('api', 'cli'):
             raise ValueError("Type must be either 'api' or 'cli'.")
             
@@ -877,6 +881,10 @@ class SafeAgentOrchestration:
         Spawns a sandbox, formats context, dispatches the task to the agent,
         applies changes, runs tests, and updates dispatch logs.
         """
+        from src.config import EXTERNAL_AGENTS_ENABLED
+        if not EXTERNAL_AGENTS_ENABLED:
+            raise ValueError("External agent dispatch is disabled (EXTERNAL_AGENTS_ENABLED=False).")
+
         from pathlib import Path
         # 1. Fetch agent details
         conn = get_connection(read_only_constitution=True)

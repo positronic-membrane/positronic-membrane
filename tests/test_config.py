@@ -103,6 +103,28 @@ def test_github_enabled_with_token_no_warning(monkeypatch):
     assert not any("GITHUB" in w for w in result.warnings)
 
 
+def test_external_agents_enabled_without_encryption_key_is_error(monkeypatch):
+    monkeypatch.setattr(config, "EXTERNAL_AGENTS_ENABLED", True)
+    monkeypatch.setattr(config, "JANUS_ENCRYPTION_KEY", "")
+    result = validate_config()
+    assert not result.ok
+    assert any("JANUS_ENCRYPTION_KEY" in e for e in result.errors)
+
+
+def test_external_agents_enabled_with_encryption_key_no_error(monkeypatch):
+    monkeypatch.setattr(config, "EXTERNAL_AGENTS_ENABLED", True)
+    monkeypatch.setattr(config, "JANUS_ENCRYPTION_KEY", "some-secret-value")
+    result = validate_config()
+    assert not any("JANUS_ENCRYPTION_KEY" in e for e in result.errors)
+
+
+def test_external_agents_disabled_skips_encryption_key_check(monkeypatch):
+    monkeypatch.setattr(config, "EXTERNAL_AGENTS_ENABLED", False)
+    monkeypatch.setattr(config, "JANUS_ENCRYPTION_KEY", "")
+    result = validate_config()
+    assert result.ok
+
+
 def test_openrouter_model_without_key_is_warning(monkeypatch):
     monkeypatch.setattr(config, "LLM_MODEL", "openai/gpt-4o")
     monkeypatch.setattr(config, "OPENROUTER_API_KEY", "")

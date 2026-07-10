@@ -648,6 +648,60 @@ def init_db():
     );
     """)
 
+    # Existing installs may have external_agents.api_key_encrypted values
+    # produced by the pre-fix XOR "encryption" scheme (issue #105). Re-encrypt
+    # them with real Fernet encryption. Rows already migrated are prefixed
+    # 'fernet:v1:' and excluded by the WHERE clause, making this idempotent.
+    from src.security import _CIPHERTEXT_PREFIX, _legacy_xor_decrypt, encrypt_api_key
+    cursor.execute(
+        "SELECT id, api_key_encrypted FROM external_agents "
+        "WHERE api_key_encrypted IS NOT NULL AND api_key_encrypted NOT LIKE ?;",
+        (f"{_CIPHERTEXT_PREFIX}%",),
+    )
+    legacy_agent_rows = cursor.fetchall()
+    if legacy_agent_rows:
+        if not src.config.JANUS_ENCRYPTION_KEY:
+            logger.warning(
+                "Skipping external_agents encryption migration — JANUS_ENCRYPTION_KEY "
+                "not set; %d legacy row(s) left unmigrated.", len(legacy_agent_rows),
+            )
+        else:
+            logger.info(
+                "Migrating %d external_agents row(s) from legacy XOR encryption to Fernet...",
+                len(legacy_agent_rows),
+            )
+            migrated_count = 0
+            for legacy_row in legacy_agent_rows:
+                try:
+                    row_id = legacy_row['id']
+                    row_enc_key = legacy_row['api_key_encrypted']
+                except (TypeError, IndexError, KeyError):
+                    row_id, row_enc_key = legacy_row
+                plaintext_key = _legacy_xor_decrypt(row_enc_key)
+                if not plaintext_key:
+                    logger.warning(
+                        "external_agents.id=%s: could not decrypt legacy ciphertext "
+                        "during migration, skipping.", row_id,
+                    )
+                    continue
+                try:
+                    cursor.execute(
+                        "UPDATE external_agents SET api_key_encrypted = ? WHERE id = ?;",
+                        (encrypt_api_key(plaintext_key), row_id),
+                    )
+                except Exception:
+                    logger.warning(
+                        "external_agents.id=%s: failed to re-encrypt during migration, "
+                        "leaving row as legacy ciphertext for now.", row_id, exc_info=True,
+                    )
+                    continue
+                migrated_count += 1
+            conn.commit()
+            logger.info(
+                "external_agents encryption migration complete: %d row(s) migrated.",
+                migrated_count,
+            )
+
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS dispatch_log (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
