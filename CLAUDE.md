@@ -48,7 +48,7 @@ Run `/code-review high` on every feature branch before opening a PR. Fix all fin
 
 Reserve `/code-review ultra` for:
 - Version milestone merges (end of a V3 sprint, etc.)
-- Any PR touching security-sensitive paths: `src/auth.py`, `src/sandbox*.py`, `src/self_modification.py`, `core_constitution`
+- Any PR touching security-sensitive *behavior* in `src/auth.py`, `src/sandbox*.py`, `src/self_modification.py`, or `core_constitution` — i.e. sandbox execution/escape boundaries, auth/role checks, self-modification gating, or constitution enforcement. Metadata-only changes to these files (bookkeeping fields, logging, comments, docstrings) that don't alter that behavior are covered by `/code-review high` alone.
 
 ## Commands
 
