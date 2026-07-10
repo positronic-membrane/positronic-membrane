@@ -53,6 +53,11 @@ def test_config_write_permissions():
     with pytest.raises(SafetyViolationError):
         validate_config_write("n_loop_limit")
 
+    # skills.library_ref is locked (is_agent_modifiable = 0) — issue #104: the
+    # swarm cannot repoint itself at a different skills-library version line
+    with pytest.raises(SafetyViolationError):
+        validate_config_write("skills.library_ref")
+
 def test_action_boundary_violations():
     """Verify that proposed actions violating path or domain limits are blocked."""
     # Commit banned boundaries to test database
