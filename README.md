@@ -11,7 +11,7 @@ Swarm AI experimentation and local autonomous agent daemon orchestration. Design
 *   **Pluggable Persistence Adapters:** Abstracts both relational and vector data structures behind a dialect-aware query wrapper. Dynamically routes to:
     *   **Local Mode:** SQLite3 file-backed database and filesystem-backed ChromaDB collections.
     *   **Cloud Mode:** PostgreSQL instance (with restricted schema role privileges) and **pgvector** collection tables.
-*   **Pluggable Sandbox Executors:** Sandbox code executions run dynamically via the `SandboxExecutor` interface based on environment configuration (`local` git worktrees, `docker` containers, or `e2b` micro-VMs).
+*   **Pluggable Sandbox Executors:** Sandbox code executions run dynamically via the `SandboxExecutor` interface based on environment configuration (`local` git worktrees or `docker` containers).
 *   **PostgreSQL Spawning Replication:** Child agent swarms are spawned into isolated database schemas (e.g. `janus_child_<name>`) on the database cluster dynamically using search path routing.
 
 ---

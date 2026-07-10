@@ -124,11 +124,21 @@ def test_unknown_sandbox_provider_is_warning(monkeypatch):
     assert any("SANDBOX_PROVIDER" in w for w in result.warnings)
 
 
-def test_e2b_provider_missing_key_is_warning(monkeypatch):
+def test_e2b_provider_is_boot_blocking_error(monkeypatch):
+    """E2B_API_KEY presence must not matter — the executor itself is unimplemented."""
     monkeypatch.setattr(config, "SANDBOX_PROVIDER", "e2b")
-    monkeypatch.setattr(config, "E2B_API_KEY", "")
+    monkeypatch.setattr(config, "E2B_API_KEY", "dummy-key")
     result = validate_config()
-    assert any("E2B_API_KEY" in w for w in result.warnings)
+    assert not result.ok
+    assert any("SANDBOX_PROVIDER" in e for e in result.errors)
+
+
+def test_e2b_provider_uppercase_is_still_a_boot_blocking_error(monkeypatch):
+    """Case must not let SANDBOX_PROVIDER=E2B slip past into the warning branch."""
+    monkeypatch.setattr(config, "SANDBOX_PROVIDER", "E2B")
+    result = validate_config()
+    assert not result.ok
+    assert any("SANDBOX_PROVIDER" in e for e in result.errors)
 
 
 def test_local_provider_disallowed_is_warning(monkeypatch):
