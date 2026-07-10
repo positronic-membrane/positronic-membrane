@@ -8,6 +8,11 @@ class SafetyViolationError(Exception):
     """Raised when an autonomous agent attempts to execute an action violating the constitution or safety rules."""
     pass
 
+class SelfModificationFrozenError(Exception):
+    """Raised when a live-workspace self-modification write is attempted while
+    system_config['self_modification.frozen'] is set."""
+    pass
+
 def check_sql_safety(sql_query: str):
     """
     Parses SQL queries to block any updates, deletes, drops, or alters 

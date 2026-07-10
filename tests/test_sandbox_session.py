@@ -4,8 +4,10 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 import src.config
+from src.middleware import SelfModificationFrozenError
 from src.sandbox_session import (
     E2BSandboxExecutor,
+    _is_self_modification_frozen,
     abort_sandbox_session,
     apply_changes_to_sandbox,
     create_sandbox_session,
@@ -446,6 +448,130 @@ def test_ship_sandbox_session(
         mock_clear.assert_called_once()
     finally:
         src.config.ROOT_DIR = orig_root
+
+@patch("src.sandbox_session._is_self_modification_frozen", return_value=True)
+@patch("src.sandbox_session.get_sandbox_session")
+@patch("src.sandbox_session.get_sandbox_modified_files")
+@patch("src.sandbox_session.cleanup_git_sandbox")
+@patch("src.sandbox_session.clear_sandbox_session")
+@patch("src.sandbox_session.shutil.copy2")
+def test_ship_sandbox_session_raises_when_frozen(
+    mock_copy,
+    mock_clear,
+    mock_cleanup,
+    mock_get_modified,
+    mock_get_session,
+    mock_frozen,
+    tmp_path
+):
+    """Verify ship refuses to touch the live workspace when self-modification is frozen."""
+    orig_root = src.config.ROOT_DIR
+    src.config.ROOT_DIR = tmp_path
+
+    sandbox_path = tmp_path / "sandbox"
+    sandbox_path.mkdir()
+
+    mock_get_session.return_value = {
+        "active_sandbox_path": str(sandbox_path),
+        "active_sandbox_branch": "janus/sandbox-feat",
+        "active_sandbox_status": "passed"
+    }
+
+    try:
+        with pytest.raises(SelfModificationFrozenError):
+            ship_sandbox_session()
+
+        mock_copy.assert_not_called()
+        mock_cleanup.assert_not_called()
+        mock_clear.assert_not_called()
+    finally:
+        src.config.ROOT_DIR = orig_root
+
+@patch("src.sandbox_session._is_self_modification_frozen", return_value=True)
+@patch("src.sandbox_session.log_episodic_memory")
+@patch("src.sandbox_session.get_sandbox_session")
+@patch("src.sandbox_session.shutil.copy2")
+def test_ship_sandbox_session_frozen_logs_episodic_memory(
+    mock_copy, mock_get_session, mock_log, mock_frozen, tmp_path
+):
+    """Verify a blocked frozen ship attempt leaves an audit trail in episodic memory."""
+    sandbox_path = tmp_path / "sandbox"
+    sandbox_path.mkdir()
+
+    mock_get_session.return_value = {
+        "active_sandbox_path": str(sandbox_path),
+        "active_sandbox_branch": "janus/sandbox-feat",
+        "active_sandbox_status": "passed"
+    }
+
+    with pytest.raises(SelfModificationFrozenError):
+        ship_sandbox_session()
+
+    mock_log.assert_called_once()
+    _, kwargs = mock_log.call_args
+    assert kwargs["context_type"] == "background_thought"
+    assert "frozen" in kwargs["message_content"].lower()
+
+@patch("src.sandbox_session.get_connection")
+def test_is_self_modification_frozen_fails_closed_on_db_error(mock_get_connection):
+    """A DB error while checking the freeze flag must refuse to ship, not silently allow it."""
+    mock_get_connection.side_effect = RuntimeError("database is locked")
+
+    with pytest.raises(RuntimeError, match="Unable to determine self-modification freeze state"):
+        _is_self_modification_frozen()
+
+@patch("src.sandbox_session._is_self_modification_frozen", side_effect=[False, True])
+@patch("src.sandbox_session.get_sandbox_session")
+@patch("src.sandbox_session.get_sandbox_modified_files")
+@patch("src.sandbox_session.shutil.copy2")
+def test_ship_sandbox_session_catches_freeze_flipped_after_tests(
+    mock_copy, mock_get_modified, mock_get_session, mock_frozen, tmp_path
+):
+    """If the flag flips while the sandbox test suite is running, the pre-copy re-check
+    must still catch it instead of proceeding on the stale first-check result."""
+    orig_root = src.config.ROOT_DIR
+    src.config.ROOT_DIR = tmp_path
+
+    sandbox_path = tmp_path / "sandbox"
+    sandbox_path.mkdir()
+
+    mock_get_session.return_value = {
+        "active_sandbox_path": str(sandbox_path),
+        "active_sandbox_branch": "janus/sandbox-feat",
+        "active_sandbox_status": "passed"
+    }
+    mock_get_modified.return_value = ["src/helper.py"]
+
+    try:
+        with pytest.raises(SelfModificationFrozenError):
+            ship_sandbox_session()
+
+        assert mock_frozen.call_count == 2
+        mock_copy.assert_not_called()
+    finally:
+        src.config.ROOT_DIR = orig_root
+
+@patch("src.sandbox_session._is_self_modification_frozen", return_value=True)
+@patch("src.sandbox_session.get_sandbox_session")
+@patch("src.sandbox_session.clear_sandbox_session")
+def test_ship_sandbox_session_project_purpose_unaffected_by_freeze(
+    mock_clear, mock_get_session, mock_frozen, tmp_path
+):
+    """Project-purpose sandboxes never touch ROOT_DIR, so the freeze must not block them."""
+    sandbox_path = tmp_path / "project_sandbox"
+    sandbox_path.mkdir()
+
+    mock_get_session.return_value = {
+        "active_sandbox_path": str(sandbox_path),
+        "active_sandbox_branch": "janus/sandbox-proj",
+        "active_sandbox_status": "passed",
+        "active_sandbox_purpose": "project",
+    }
+
+    copied = ship_sandbox_session()
+
+    assert copied == []
+    mock_clear.assert_called_once()
 
 @patch("src.sandbox_session.get_sandbox_session")
 @patch("src.sandbox_session.cleanup_git_sandbox")

@@ -847,6 +847,10 @@ def init_db():
         # the swarm cannot repoint itself at a library line built for a
         # different (incompatible) SDK major version.
         ("skills.library_ref", "v1", 0),
+        # V1 sign-off freeze switch (issue #97): once flipped to 1, ship_sandbox_session()
+        # refuses to write the live workspace. Not agent-modifiable — only a human flips
+        # this at sign-off.
+        ("self_modification.frozen", "0", 0),
     ]
     for key, value, modifiable in default_configs:
         cursor.execute("""

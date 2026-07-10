@@ -58,6 +58,11 @@ def test_config_write_permissions():
     with pytest.raises(SafetyViolationError):
         validate_config_write("skills.library_ref")
 
+    # self_modification.frozen is locked (is_agent_modifiable = 0) — issue #97: only
+    # a human may flip the V1 sign-off freeze switch
+    with pytest.raises(SafetyViolationError):
+        validate_config_write("self_modification.frozen")
+
 def test_action_boundary_violations():
     """Verify that proposed actions violating path or domain limits are blocked."""
     # Commit banned boundaries to test database

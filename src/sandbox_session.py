@@ -14,6 +14,7 @@ from src.database import (
     log_episodic_memory
 )
 from src.regression_watcher import get_current_commit_sha, record_test_run
+from src.middleware import SelfModificationFrozenError
 from abc import ABC, abstractmethod
 
 class SandboxExecutor(ABC):
@@ -627,6 +628,36 @@ def _ship_project_sandbox(session: dict) -> list:
     clear_sandbox_session()
     return tracked_files
 
+def _is_self_modification_frozen() -> bool:
+    try:
+        conn = get_connection(read_only_constitution=True)
+        try:
+            cursor = conn.cursor()
+            cursor.execute("SELECT config_value FROM system_config WHERE config_key = 'self_modification.frozen';")
+            row = cursor.fetchone()
+            return bool(row) and str(row[0]) == "1"
+        finally:
+            conn.close()
+    except Exception as e:
+        logger.error(f"Failed to read self_modification.frozen config: {e}")
+        raise RuntimeError(
+            f"Unable to determine self-modification freeze state; refusing to ship as a precaution: {e}"
+        ) from e
+
+def _refuse_frozen_ship():
+    log_episodic_memory(
+        speaker="system",
+        message_content="Blocked attempt to ship sandbox changes to the live workspace: "
+                         "self-modification is frozen for V1 sign-off.",
+        context_type="background_thought",
+        party_id="system"
+    )
+    raise SelfModificationFrozenError(
+        "Self-modification of the live workspace is frozen for V1 sign-off. This version no "
+        "longer applies sandbox changes to its own codebase — use the successor repository's "
+        "workflow instead."
+    )
+
 def ship_sandbox_session() -> list:
     """
     Copies all modified/new files in the sandbox back to the active workspace,
@@ -644,6 +675,9 @@ def ship_sandbox_session() -> list:
 
     if session.get("active_sandbox_purpose") == "project":
         return _ship_project_sandbox(session)
+
+    if _is_self_modification_frozen():
+        _refuse_frozen_ship()
 
     sandbox_root = Path(session["active_sandbox_path"])
     branch_name = session["active_sandbox_branch"]
@@ -734,9 +768,16 @@ def ship_sandbox_session() -> list:
     finally:
         conn.close()
         
+    # Re-check immediately before writing: the first check (above) ran before the
+    # potentially long test suite, so the flag could have been flipped mid-flight.
+    # This narrows that race window down to the gap between this line and the copy
+    # loop instead of the whole test run.
+    if _is_self_modification_frozen():
+        _refuse_frozen_ship()
+
     modified_files = get_sandbox_modified_files()
     copied_files = []
-    
+
     # 3. Copy files to main workspace
     for rel_path in modified_files:
         src_file = sandbox_root / rel_path
