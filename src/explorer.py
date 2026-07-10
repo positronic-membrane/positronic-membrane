@@ -168,6 +168,24 @@ def _get_config_int(config_key: str, default: int) -> int:
     return default
 
 
+def _get_config_str(config_key: str, default: str) -> str:
+    """Reads a string value from system_config, falling back to `default`."""
+    try:
+        conn = get_connection()
+        try:
+            row = conn.execute(
+                "SELECT config_value FROM system_config WHERE config_key = ?;",
+                (config_key,),
+            ).fetchone()
+        finally:
+            conn.close()
+        if row and str(row[0]).strip():
+            return str(row[0])
+    except Exception as e:
+        logger.error(f"Failed to read {config_key}, using default {default}: {e}")
+    return default
+
+
 def get_max_facts_per_cycle() -> int:
     """
     Per-call cap on facts submitted to the epistemic pipeline. Phases 2-3 each

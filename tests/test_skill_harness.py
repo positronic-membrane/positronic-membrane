@@ -257,13 +257,16 @@ def test_stage_skill_staging_dir_always_cleaned(tmp_path):
 # sync_from_registry — local_path mode (no git required)
 # ---------------------------------------------------------------------------
 
-def _make_local_registry(base: Path, skills: list[dict]) -> None:
+def _make_local_registry(base: Path, skills: list[dict], sdk_version: str | None = None) -> None:
     """Write a minimal registry layout under base."""
     (base / "metadata.json").write_text(
         json.dumps({"name": "test-library", "version": "0.1.0"}), encoding="utf-8"
     )
+    registry_body = {"version": "1.0", "skills": skills}
+    if sdk_version is not None:
+        registry_body["sdk_version"] = sdk_version
     (base / "registry.json").write_text(
-        json.dumps({"version": "1.0", "skills": skills}), encoding="utf-8"
+        json.dumps(registry_body), encoding="utf-8"
     )
     skills_dir = base / "skills"
     skills_dir.mkdir(exist_ok=True)
@@ -405,6 +408,164 @@ def test_sync_from_registry_blocks_sibling_prefix_escape(tmp_path):
     assert "escapes library root" in result["failed"][0]["reason"]
 
 
+# ---------------------------------------------------------------------------
+# sync_from_registry — sdk_version compatibility gate (issue #104)
+# ---------------------------------------------------------------------------
+
+def test_sync_from_registry_rejects_mismatched_top_level_sdk_version(tmp_path):
+    """A registry-wide sdk_version that doesn't match this instance is rejected
+    at sync time (never staged, never inserted into agent_skills)."""
+    import src.config as config
+
+    lib_dir = tmp_path / "lib"
+    lib_dir.mkdir()
+    (lib_dir / "skills").mkdir()
+    (lib_dir / "skills" / "future_skill.py").write_text(
+        "def run(sdk, args):\n    return {}", encoding="utf-8"
+    )
+
+    mismatched_version = f"not-{config.SDK_MAJOR_VERSION}"
+    _make_local_registry(
+        lib_dir,
+        [{
+            "skill_id": "future_skill",
+            "name": "Future",
+            "description": "",
+            "parameters_schema": "{}",
+            "entry_point_function": "run",
+            "required_role": "contributor",
+            "trigger_type": "manual",
+            "trigger_config": "{}",
+            "file": "skills/future_skill.py",
+        }],
+        sdk_version=mismatched_version,
+    )
+
+    result = sync_from_registry(local_path=str(lib_dir))
+
+    assert result["synced"] == []
+    assert result["failed"] == [{
+        "skill_id": "future_skill",
+        "reason": (
+            f"sdk_version mismatch: skill targets '{mismatched_version}', "
+            f"this instance runs '{config.SDK_MAJOR_VERSION}'"
+        ),
+    }]
+    assert result["fatal_error"] is None
+
+    with get_connection() as conn:
+        row = conn.execute(
+            "SELECT skill_id FROM agent_skills WHERE skill_id = ?", ("future_skill",)
+        ).fetchone()
+    assert row is None
+
+
+def test_sync_from_registry_descriptor_sdk_version_overrides_registry_level(tmp_path):
+    """A per-skill sdk_version takes precedence over the registry-wide default."""
+    import src.config as config
+
+    lib_dir = tmp_path / "lib"
+    lib_dir.mkdir()
+    (lib_dir / "skills").mkdir()
+    (lib_dir / "skills" / "compatible_skill.py").write_text(
+        "def run(sdk, args):\n    return {}", encoding="utf-8"
+    )
+
+    mismatched_version = f"not-{config.SDK_MAJOR_VERSION}"
+    _make_local_registry(
+        lib_dir,
+        [{
+            "skill_id": "compatible_skill",
+            "name": "Compatible",
+            "description": "",
+            "parameters_schema": "{}",
+            "entry_point_function": "run",
+            "required_role": "contributor",
+            "trigger_type": "manual",
+            "trigger_config": "{}",
+            "file": "skills/compatible_skill.py",
+            "sdk_version": config.SDK_MAJOR_VERSION,
+        }],
+        sdk_version=mismatched_version,
+    )
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    with patch("src.skill_harness.config.get_effective_workspace_root", return_value=workspace):
+        result = sync_from_registry(local_path=str(lib_dir))
+
+    assert result["synced"] == ["compatible_skill"]
+    assert result["failed"] == []
+    assert result["fatal_error"] is None
+
+
+def test_sync_from_registry_missing_sdk_version_is_treated_as_compatible(tmp_path):
+    """A legacy/pre-feature registry with no sdk_version field anywhere still syncs."""
+    lib_dir = tmp_path / "lib"
+    lib_dir.mkdir()
+    (lib_dir / "skills").mkdir()
+    (lib_dir / "skills" / "legacy_skill.py").write_text(
+        "def run(sdk, args):\n    return {}", encoding="utf-8"
+    )
+
+    _make_local_registry(lib_dir, [{
+        "skill_id": "legacy_skill",
+        "name": "Legacy",
+        "description": "",
+        "parameters_schema": "{}",
+        "entry_point_function": "run",
+        "required_role": "contributor",
+        "trigger_type": "manual",
+        "trigger_config": "{}",
+        "file": "skills/legacy_skill.py",
+    }])
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    with patch("src.skill_harness.config.get_effective_workspace_root", return_value=workspace):
+        result = sync_from_registry(local_path=str(lib_dir))
+
+    assert result["synced"] == ["legacy_skill"]
+    assert result["failed"] == []
+    assert result["fatal_error"] is None
+
+
+def test_sync_from_registry_explicit_null_descriptor_sdk_version_falls_through(tmp_path):
+    """An explicit `"sdk_version": null` on a descriptor must NOT bypass a
+    mismatched registry-level default — it should fall through to it, not be
+    treated as "no override present"."""
+    lib_dir = tmp_path / "lib"
+    lib_dir.mkdir()
+    (lib_dir / "skills").mkdir()
+    (lib_dir / "skills" / "future_skill.py").write_text(
+        "def run(sdk, args):\n    return {}", encoding="utf-8"
+    )
+
+    _make_local_registry(
+        lib_dir,
+        [{
+            "skill_id": "future_skill",
+            "name": "Future",
+            "description": "",
+            "parameters_schema": "{}",
+            "entry_point_function": "run",
+            "required_role": "contributor",
+            "trigger_type": "manual",
+            "trigger_config": "{}",
+            "file": "skills/future_skill.py",
+            "sdk_version": None,
+        }],
+        sdk_version="v2",
+    )
+
+    result = sync_from_registry(local_path=str(lib_dir))
+
+    assert result["synced"] == []
+    assert len(result["failed"]) == 1
+    assert result["failed"][0]["skill_id"] == "future_skill"
+    assert "sdk_version mismatch" in result["failed"][0]["reason"]
+
+
 def test_format_sync_summary_fatal():
     from src.skill_harness import format_sync_summary
     summary = format_sync_summary(
@@ -447,3 +608,30 @@ def test_sync_from_registry_git_failure_is_fatal(tmp_path, monkeypatch):
     assert result["synced"] == []
     assert result["failed"] == []
     assert "dubious ownership" in result["fatal_error"]
+
+
+def test_sync_from_registry_uses_pinned_ref_from_system_config(tmp_path, monkeypatch):
+    """The git clone must use the skills.library_ref system_config pin, not the
+    env-configured SKILLS_LIBRARY_REF default (issue #104)."""
+    import src.skill_harness as harness
+    from src.database import set_system_config_value
+
+    set_system_config_value("skills.library_ref", "v7-custom-pin", is_agent=False)
+
+    monkeypatch.setattr(harness.config, "ROOT_DIR", tmp_path)
+    monkeypatch.setattr(harness.config, "SKILLS_LIBRARY_REF", "should-not-be-used")
+
+    captured_cmds = []
+
+    def _fake_git(cmd, **kwargs):
+        captured_cmds.append(cmd)
+        raise __import__("subprocess").CalledProcessError(128, cmd, stderr="stop after capture")
+
+    monkeypatch.setattr(harness.subprocess, "run", _fake_git)
+
+    sync_from_registry()
+
+    assert captured_cmds, "expected at least one git subprocess call to be captured"
+    clone_cmd = captured_cmds[0]
+    assert "v7-custom-pin" in clone_cmd
+    assert "should-not-be-used" not in clone_cmd

@@ -842,6 +842,11 @@ def init_db():
         # agent-modifiable so the swarm cannot disable its own containment.
         ("circuit_breaker.max_failures", "5", 0),
         ("circuit_breaker.cooldown_minutes", "15", 0),
+        # Skills library version pin (issue #104): which branch/ref of
+        # janus-skills-library boot sync fetches from. Not agent-modifiable so
+        # the swarm cannot repoint itself at a library line built for a
+        # different (incompatible) SDK major version.
+        ("skills.library_ref", "v1", 0),
     ]
     for key, value, modifiable in default_configs:
         cursor.execute("""

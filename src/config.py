@@ -89,8 +89,14 @@ NEO4J_DATABASE = os.getenv("NEO4J_DATABASE", "neo4j")
 
 # Skills Library (sibling repo for registry sync)
 SKILLS_LIBRARY_REPO   = os.getenv("SKILLS_LIBRARY_REPO",   "git@github.com:jmccauley75gh/janus-skills-library.git")
-SKILLS_LIBRARY_REF    = os.getenv("SKILLS_LIBRARY_REF",    os.getenv("SKILLS_LIBRARY_BRANCH", "main"))
+SKILLS_LIBRARY_REF    = os.getenv("SKILLS_LIBRARY_REF",    os.getenv("SKILLS_LIBRARY_BRANCH", "v1"))
 SKILLS_LIBRARY_BRANCH = SKILLS_LIBRARY_REF  # backward-compat alias
+
+# The frozen SDK/Safe*-wrapper major line this codebase implements (issue #104).
+# Not env-driven: the successor ("v2") is a separate repository per the
+# successor model, so this only changes via a code change in a new line, never
+# at runtime. Boot sync refuses skill blobs whose declared sdk_version differs.
+SDK_MAJOR_VERSION = "v1"
 
 # OpenRouter Configuration
 OPENROUTER_BASE_URL = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")

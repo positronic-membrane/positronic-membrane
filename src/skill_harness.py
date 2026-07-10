@@ -12,7 +12,7 @@ from typing import Optional
 
 import src.config as config
 from src.database import get_connection
-from src.explorer import _get_config_int
+from src.explorer import _get_config_int, _get_config_str
 
 logger = logging.getLogger(__name__)
 
@@ -321,7 +321,10 @@ def sync_from_registry(
         source_dir = Path(local_path)
     else:
         url = repo_url or config.SKILLS_LIBRARY_REPO
-        branch = config.SKILLS_LIBRARY_REF
+        # skills.library_ref (issue #104) pins which branch/ref boot sync fetches
+        # from; not agent-modifiable (see database.py default_configs). Falls
+        # back to the env-configured default only if the config row is missing.
+        branch = _get_config_str("skills.library_ref", config.SKILLS_LIBRARY_REF)
         cache_dir = config.ROOT_DIR / ".janus_sandboxes" / "skills_library"
 
         try:
@@ -375,6 +378,24 @@ def sync_from_registry(
     for descriptor in skills:
         skill_id = descriptor.get("skill_id", "<unknown>")
         try:
+            # sdk_version compatibility gate (issue #104): a descriptor-level
+            # value overrides the library-wide registry.json default. Absent
+            # (or explicitly null/empty) on both means a legacy/pre-feature
+            # registry — treated as compatible. `or`, not dict.get's fallback,
+            # so an explicit `"sdk_version": null` on a descriptor still falls
+            # through to the registry-level value instead of silently
+            # bypassing the gate.
+            declared_version = descriptor.get("sdk_version") or registry.get("sdk_version")
+            if declared_version and declared_version != config.SDK_MAJOR_VERSION:
+                failed.append({
+                    "skill_id": skill_id,
+                    "reason": (
+                        f"sdk_version mismatch: skill targets '{declared_version}', "
+                        f"this instance runs '{config.SDK_MAJOR_VERSION}'"
+                    ),
+                })
+                continue
+
             skill_file = (source_dir / descriptor["file"]).resolve()
             if not skill_file.is_relative_to(source_dir_resolved):
                 failed.append({"skill_id": skill_id, "reason": "file path escapes library root"})
