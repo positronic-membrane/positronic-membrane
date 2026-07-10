@@ -24,21 +24,10 @@ def get_session_party_id() -> Optional[str]:
             row = conn.execute("SELECT id FROM parties WHERE role = ? LIMIT 1;", (role,)).fetchone()
             if row:
                 return row[0]
-        # Fallback to any other configured party (e.g. a manually-inserted observer)
-        row = conn.execute("SELECT id FROM parties WHERE name != 'system' LIMIT 1;").fetchone()
+        # Fallback to any party
+        row = conn.execute("SELECT id FROM parties LIMIT 1;").fetchone()
         if row:
             return row[0]
-        # No real party has ever been configured -- the CLI/chat persona path has no bootstrap
-        # ceremony of its own (unlike the multi-party web API's role_bootstrap.py). Auto-provision
-        # a stable local-operator admin identity, mirroring routers/dependencies.py's implicit
-        # local_user/admin fallback, so a solo CLI operator's session doesn't resolve to the
-        # literal 'system' identity -- which merge_pr/review_dispatch explicitly reject (#95).
-        conn.execute(
-            "INSERT OR IGNORE INTO parties (id, name, role, created_at, last_seen, metadata) "
-            "VALUES ('local_user', 'local_user', 'admin', datetime('now'), datetime('now'), '{}');"
-        )
-        conn.commit()
-        return 'local_user'
     except Exception:
         pass
     finally:
