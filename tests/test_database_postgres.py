@@ -40,6 +40,39 @@ def test_sql_translation_pragma_ignored():
     translated = translate_sqlite_to_postgres(sql)
     assert translated == "SELECT 1"
 
+def test_init_db_never_uses_pragma_table_info():
+    """Regression guard for #125: init_db()'s migrations must never regress to
+    PRAGMA table_info() introspection, which translate_sqlite_to_postgres()
+    silently rewrites to a no-op under DB_TYPE=postgres, crashing init_db()."""
+    import inspect
+
+    import src.database as database_module
+
+    source = inspect.getsource(database_module.init_db)
+    assert "PRAGMA table_info" not in source
+
+def test_migration_alter_table_statements_survive_postgres_translation():
+    """The fixed janus_documents/parties migrations (#125) use plain ALTER TABLE
+    ADD COLUMN, which must pass through translate_sqlite_to_postgres() unchanged
+    (not rewritten to SELECT 1 the way PRAGMA table_info() was)."""
+    alter_stmts = [
+        "ALTER TABLE janus_documents ADD COLUMN purpose TEXT NOT NULL DEFAULT 'memory';",
+        "ALTER TABLE janus_documents ADD COLUMN metadata TEXT NOT NULL DEFAULT '{}';",
+        "ALTER TABLE parties ADD COLUMN last_seen TEXT NOT NULL DEFAULT '';",
+        "ALTER TABLE parties ADD COLUMN metadata TEXT NOT NULL DEFAULT '{}';",
+    ]
+    for sql in alter_stmts:
+        translated = translate_sqlite_to_postgres(sql)
+        assert translated != "SELECT 1"
+        assert "ALTER TABLE" in translated
+
+    # last_seen's backfill UPDATE relies on the existing datetime('now') ->
+    # CURRENT_TIMESTAMP translation rule, not on any PRAGMA/introspection path.
+    update_sql = "UPDATE parties SET last_seen = datetime('now') WHERE last_seen = '';"
+    translated_update = translate_sqlite_to_postgres(update_sql)
+    assert translated_update != "SELECT 1"
+    assert "CURRENT_TIMESTAMP" in translated_update
+
 def test_write_protection_core_constitution():
     # Cursor wrapper should raise PermissionError when read_only_constitution=True and write is attempted
     mock_cursor = MagicMock()

@@ -119,7 +119,10 @@ def translate_sqlite_to_postgres(sql: str) -> str:
     # 4. Handle datetime('now') -> CURRENT_TIMESTAMP
     sql = re.sub(r"datetime\('now'\)", "CURRENT_TIMESTAMP", sql, flags=re.IGNORECASE)
 
-    # 5. Handle SQLite PRAGMA statements
+    # 5. Handle SQLite PRAGMA statements. NOTE: this silently turns
+    # PRAGMA table_info(...) into a 1-column no-op — never use PRAGMA-based
+    # column introspection in a migration (see _add_column_if_missing() below,
+    # and issue #125); it will pass under SQLite and crash under Postgres.
     if sql.strip().upper().startswith("PRAGMA"):
         return "SELECT 1"
 
@@ -361,6 +364,30 @@ def check_connection() -> bool:
             except Exception:
                 pass
 
+def _add_column_if_missing(conn, cursor, alter_sql, backfill_sql=None):
+    """Idempotently run an ALTER TABLE ... ADD COLUMN statement for an
+    existing-install migration, swallowing the "column already exists" error
+    (sqlite3.OperationalError / psycopg2.errors.DuplicateColumn) on repeat runs.
+
+    Portable replacement for the PRAGMA table_info() + Python column-list
+    introspection idiom, which translate_sqlite_to_postgres() rewrites to a
+    no-op "SELECT 1" under DB_TYPE=postgres, breaking column detection
+    (issue #125). `backfill_sql`, if given, runs immediately after a
+    successful ALTER — use it when the new column can't have a live
+    (non-constant) DEFAULT, since SQLite refuses to add one to a non-empty
+    table; add the column with a sentinel constant default instead and
+    backfill real values via this second statement.
+    """
+    try:
+        cursor.execute(alter_sql)
+        if backfill_sql:
+            cursor.execute(backfill_sql)
+        conn.commit()
+    except Exception as e:
+        conn.rollback()
+        logger.debug("init_db: column migration skipped (%s): %s", alter_sql, e)
+
+
 def init_db():
     """
     Creates tables if they do not exist and populates default system configurations.
@@ -588,17 +615,10 @@ def init_db():
     # autonomous dynamic-skill dispatch, a real party id for human-initiated
     # /goal complete, NULL for not-yet-completed or pre-migration rows) so the
     # Goal-Autonomy-Rate DoD metric (tracked in #96/#112) has a raw count to read.
-    # Uses try/except instead of the PRAGMA table_info() introspection idiom
-    # used elsewhere in this function: translate_sqlite_to_postgres() rewrites
-    # any PRAGMA to a no-op "SELECT 1", so table_info-based column detection
-    # silently breaks under DB_TYPE=postgres — this ADD COLUMN is plain,
-    # portable SQL and is made idempotent by swallowing the "already exists"
-    # error instead.
-    try:
-        cursor.execute("ALTER TABLE goal_checkpoints ADD COLUMN completed_by_party_id TEXT;")
-        conn.commit()
-    except Exception:
-        conn.rollback()
+    _add_column_if_missing(
+        conn, cursor,
+        "ALTER TABLE goal_checkpoints ADD COLUMN completed_by_party_id TEXT;",
+    )
 
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS goal_proposals (
@@ -749,12 +769,16 @@ def init_db():
     """)
 
     # Existing installs predate the purpose/metadata columns above; backfill them.
-    cursor.execute("PRAGMA table_info(janus_documents);")
-    janus_documents_columns = [row[1] for row in cursor.fetchall()]
-    if "purpose" not in janus_documents_columns:
-        cursor.execute("ALTER TABLE janus_documents ADD COLUMN purpose TEXT NOT NULL DEFAULT 'memory';")
-    if "metadata" not in janus_documents_columns:
-        cursor.execute("ALTER TABLE janus_documents ADD COLUMN metadata TEXT NOT NULL DEFAULT '{}';")
+    # Each column is its own migration so one already-present column doesn't
+    # abort the other's addition.
+    _add_column_if_missing(
+        conn, cursor,
+        "ALTER TABLE janus_documents ADD COLUMN purpose TEXT NOT NULL DEFAULT 'memory';",
+    )
+    _add_column_if_missing(
+        conn, cursor,
+        "ALTER TABLE janus_documents ADD COLUMN metadata TEXT NOT NULL DEFAULT '{}';",
+    )
 
     # Populate cognitive_layers with defaults if empty
     cursor.execute("SELECT COUNT(*) FROM cognitive_layers;")
@@ -1089,12 +1113,23 @@ def check_presence():
                 migration_sql = f.read()
             cursor.executescript(migration_sql)
     else:
-        cursor.execute("PRAGMA table_info(parties);")
-        columns = [row[1] for row in cursor.fetchall()]
-        if "last_seen" not in columns:
-            cursor.execute("ALTER TABLE parties ADD COLUMN last_seen TEXT NOT NULL DEFAULT (datetime('now'));")
-        if "metadata" not in columns:
-            cursor.execute("ALTER TABLE parties ADD COLUMN metadata TEXT NOT NULL DEFAULT '{}';")
+        # SQLite refuses ADD COLUMN ... DEFAULT (datetime('now')) outright once
+        # the table has rows ("Cannot add a column with non-constant default") —
+        # add with a constant '' sentinel default first, then backfill real
+        # values via UPDATE, which has no such restriction. NOTE: '' therefore
+        # becomes this column's *standing* schema default on migrated installs
+        # (not just a one-time backfill value) — every INSERT INTO parties must
+        # specify last_seen explicitly rather than rely on the column default
+        # (all current call sites do; see src/role_bootstrap.py).
+        _add_column_if_missing(
+            conn, cursor,
+            "ALTER TABLE parties ADD COLUMN last_seen TEXT NOT NULL DEFAULT '';",
+            backfill_sql="UPDATE parties SET last_seen = datetime('now') WHERE last_seen = '';",
+        )
+        _add_column_if_missing(
+            conn, cursor,
+            "ALTER TABLE parties ADD COLUMN metadata TEXT NOT NULL DEFAULT '{}';",
+        )
 
     # Ensure interaction_profiles table exists
     cursor.execute("""

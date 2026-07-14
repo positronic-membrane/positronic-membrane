@@ -287,12 +287,24 @@ CREATE TABLE IF NOT EXISTS janus_embeddings (
     PRIMARY KEY (collection_name, id)
 );
 
+-- 27. Create janus_documents table
+CREATE TABLE IF NOT EXISTS janus_documents (
+    id         SERIAL PRIMARY KEY,
+    title      TEXT NOT NULL UNIQUE,
+    content    TEXT NOT NULL DEFAULT '',
+    tags       TEXT NOT NULL DEFAULT '[]',
+    purpose    TEXT NOT NULL DEFAULT 'memory' CHECK(purpose IN ('memory', 'knowledge')),
+    metadata   TEXT NOT NULL DEFAULT '{}',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
 -- Seed system party
 INSERT INTO parties (id, name, role, created_at, last_seen, metadata)
 VALUES ('system', 'system', 'observer', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, '{}')
 ON CONFLICT (id) DO NOTHING;
 
--- 27. Setup Postgres roles and schema permissions
+-- 28. Setup Postgres roles and schema permissions
 DO $$
 BEGIN
     IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'janus_admin') THEN

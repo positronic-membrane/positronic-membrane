@@ -320,6 +320,56 @@ def test_goal_checkpoints_backfill_migration_adds_completed_by_party_id(tmp_path
         src.config.DB_PATH = orig_db_path
 
 
+def test_parties_backfill_migration_adds_last_seen_and_metadata(tmp_path):
+    """Pre-existing DBs created before the multiparty last_seen/metadata columns
+    only have the original parties columns; re-running init_db() must backfill
+    them without dropping existing rows (issue #125 regression coverage)."""
+    legacy_db = tmp_path / "legacy_parties.db"
+    conn = sqlite3.connect(str(legacy_db))
+    conn.execute("""
+        CREATE TABLE parties (
+            id TEXT PRIMARY KEY,
+            name TEXT UNIQUE NOT NULL,
+            role TEXT NOT NULL CHECK(role IN ('user', 'contributor', 'admin', 'observer')),
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            public_key TEXT
+        );
+    """)
+    conn.execute("INSERT INTO parties (id, name, role) VALUES ('legacy_party', 'Legacy Party', 'user');")
+    conn.commit()
+    conn.close()
+
+    orig_db_path = src.config.DB_PATH
+    src.config.DB_PATH = str(legacy_db)
+    try:
+        init_db()
+        conn = get_connection(read_only_constitution=True)
+        cursor = conn.cursor()
+        cursor.execute("PRAGMA table_info(parties);")
+        columns = {row[1] for row in cursor.fetchall()}
+        assert {"last_seen", "metadata"}.issubset(columns)
+
+        cursor.execute("SELECT name, role, last_seen, metadata FROM parties WHERE id = 'legacy_party';")
+        row = cursor.fetchone()
+        conn.close()
+        assert row[0] == "Legacy Party"
+        assert row[1] == "user"
+        assert row[2]  # backfilled to a real timestamp, not left blank/NULL
+        assert row[3] == "{}"
+
+        # Idempotent: running init_db() again must not error, duplicate the
+        # columns, or clobber the already-backfilled last_seen value.
+        init_db()
+        conn = get_connection(read_only_constitution=True)
+        cursor = conn.cursor()
+        cursor.execute("SELECT last_seen FROM parties WHERE id = 'legacy_party';")
+        last_seen_after_rerun = cursor.fetchone()[0]
+        conn.close()
+        assert last_seen_after_rerun == row[2]
+    finally:
+        src.config.DB_PATH = orig_db_path
+
+
 def test_external_agents_legacy_encryption_migration(tmp_path, monkeypatch):
     """Pre-fix rows encrypted with the legacy XOR scheme (using the old
     hardcoded default key, since no JANUS_ENCRYPTION_KEY was ever set) must

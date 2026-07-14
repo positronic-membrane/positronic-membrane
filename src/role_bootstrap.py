@@ -51,9 +51,9 @@ class RoleBootstrap:
         conn = self._get_connection()
         try:
             conn.execute(
-                'INSERT INTO parties (id, name, role, created_at, public_key) '
-                'VALUES (?, ?, ?, ?, ?)',
-                (party_id, name, 'admin', now, key)
+                'INSERT INTO parties (id, name, role, created_at, last_seen, public_key) '
+                'VALUES (?, ?, ?, ?, ?, ?)',
+                (party_id, name, 'admin', now, now, key)
             )
             conn.commit()
         finally:
