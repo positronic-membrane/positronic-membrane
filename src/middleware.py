@@ -135,7 +135,8 @@ def quarantine_wrap(
     safe_content = _QUARANTINE_TAG_RE.sub(r"‹\1›", content)
     body = f"{UNTRUSTED_DATA_NOTICE}\n\n{safe_content}" if include_notice else safe_content
 
-    attrs = f'source="{source}"'
+    safe_source = source.replace('"', "&quot;")
+    attrs = f'source="{safe_source}"'
     if author:
         safe_author = author.replace('"', "&quot;")
         attrs += f' author="{safe_author}" trusted="{str(trusted).lower()}"'

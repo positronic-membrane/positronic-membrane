@@ -1582,6 +1582,29 @@ def _strip_skill_call_json(text: str) -> str:
     return "".join(result).strip()
 
 
+def _quarantine_result(source: str, result) -> str:
+    """Wrap a skill/sandbox return value so it can't be mistaken for a directive.
+
+    Skill results (SafeExplorer.fetch/search, SafeGitHub reads, etc.) and
+    sandbox command output can carry externally-authored content. They're
+    logged as background_thought and spliced back into the next turn's prompt
+    (_build_persona_prompt), the same buffer the ReAct loop's own skill-call
+    parser scans on later turns — see issue #123. Wrapped uniformly (success,
+    failure, and exception text alike) since agent_skills content is synced
+    from an external repo we don't control here.
+    """
+    from src.middleware import quarantine_wrap
+    return quarantine_wrap(str(result), source=source, include_notice=False)
+
+
+def _untrusted_notice_if(condition: bool) -> str:
+    """Emit UNTRUSTED_DATA_NOTICE once for a batch of quarantined items, or ""."""
+    if not condition:
+        return ""
+    from src.middleware import UNTRUSTED_DATA_NOTICE
+    return f"{UNTRUSTED_DATA_NOTICE}\n\n"
+
+
 def stream_persona_response(user_msg: str, party_id=None):
     """
     Generator yielding (event_type, content) tuples for SSE delivery.
@@ -1632,23 +1655,26 @@ def stream_persona_response(user_msg: str, party_id=None):
         execution_summary = ""
         has_failure = False
 
+        execution_summary += _untrusted_notice_if(bool(skill_calls) or bool(sandbox_blocks))
+
         for skill_id, arguments in skill_calls:
             yield ("status", f"Using tool: {skill_id}…")
+            source = f"skill:{skill_id}"
             try:
                 res = DynamicSkillExecutor.execute(skill_id, arguments, party_id=party_id or get_session_party_id())
                 if res["success"]:
-                    execution_summary += f"[Skill '{skill_id}' executed successfully]\nResult: {res['result']}\n\n"
+                    execution_summary += f"[Skill '{skill_id}' executed successfully]\nResult: {_quarantine_result(source, res['result'])}\n\n"
                 else:
-                    execution_summary += f"[Skill '{skill_id}' failed]\nError: {res['error']}\n\n"
+                    execution_summary += f"[Skill '{skill_id}' failed]\nError: {_quarantine_result(source, res['error'])}\n\n"
                     has_failure = True
             except Exception as e:
-                execution_summary += f"[Skill '{skill_id}' error]\nException: {e}\n\n"
+                execution_summary += f"[Skill '{skill_id}' error]\nException: {_quarantine_result(source, e)}\n\n"
                 has_failure = True
 
         if sandbox_blocks:
             yield ("status", "Executing sandbox commands…")
             results = [execute_chat_sandbox_commands(b) for b in sandbox_blocks]
-            execution_summary += "[Sandbox Commands Executed]\n" + "\n\n".join(results)
+            execution_summary += "[Sandbox Commands Executed]\n" + _quarantine_result("sandbox_command", "\n\n".join(results))
 
         log_episodic_memory("sandbox_automation", execution_summary.strip(), "background_thought", party_id=party_id)
 
@@ -1830,17 +1856,23 @@ def generate_persona_response_autonomous(user_msg: str, party_id: Optional[str] 
                 break
 
         execution_summary = ""
+        has_failure = False
+
+        execution_summary += _untrusted_notice_if(bool(skill_id) or bool(sandbox_blocks))
 
         if skill_id:
+            source = f"skill:{skill_id}"
             print(f"\n[Janus Daemon] Dynamic Skill Block Detected: '{skill_id}'")
             try:
                 res = DynamicSkillExecutor.execute(skill_id, arguments, party_id=party_id or get_session_party_id())
                 if res["success"]:
-                    execution_summary += f"[Dynamic Skill '{skill_id}' Executed Successfully]\nResult: {res['result']}\n\n"
+                    execution_summary += f"[Dynamic Skill '{skill_id}' Executed Successfully]\nResult: {_quarantine_result(source, res['result'])}\n\n"
                 else:
-                    execution_summary += f"[Dynamic Skill '{skill_id}' Failed]\nError: {res['error']}\n\n"
+                    execution_summary += f"[Dynamic Skill '{skill_id}' Failed]\nError: {_quarantine_result(source, res['error'])}\n\n"
+                    has_failure = True
             except Exception as e:
-                execution_summary += f"[Dynamic Skill '{skill_id}' Error]\nException: {e}\n\n"
+                execution_summary += f"[Dynamic Skill '{skill_id}' Error]\nException: {_quarantine_result(source, e)}\n\n"
+                has_failure = True
 
         if sandbox_blocks:
             print(f"\n[Janus Daemon] Found {len(sandbox_blocks)} sandbox command block(s). Executing...")
@@ -1849,7 +1881,7 @@ def generate_persona_response_autonomous(user_msg: str, party_id: Optional[str] 
             for block in sandbox_blocks:
                 res = execute_chat_sandbox_commands(block)
                 execution_results.append(res)
-            execution_summary += "[Sandbox Commands Executed]\n" + "\n\n".join(execution_results)
+            execution_summary += "[Sandbox Commands Executed]\n" + _quarantine_result("sandbox_command", "\n\n".join(execution_results))
 
         # 4. Log execution results to SQLite as a background thought
         log_episodic_memory(
@@ -1860,7 +1892,6 @@ def generate_persona_response_autonomous(user_msg: str, party_id: Optional[str] 
         )
 
         # 5. Formulate next turn query to continue conversation, highlighting failures if any
-        has_failure = "Failed" in execution_summary or "Error" in execution_summary or "Exception" in execution_summary
         if has_failure:
             current_query = "Some actions or skills failed. Please review the background thought history, address the failure, and try again or proceed."
         else:

@@ -66,6 +66,18 @@ wherever it reaches a prompt at all:
   extraction prompt (facts derived from it were already validated via
   `validate_action()` before reaching the epistemic pipeline; this closes the
   raw-content-into-prompt step specifically).
+- Dynamic skill-execution results re-entering the ReAct prompt (issue #123,
+  follow-up to this issue) — any skill's raw return value (e.g.
+  `SafeExplorer.fetch`/`.search`, `SafeGitHub.get_issue`/`get_pr`/etc.), its
+  error/exception text, and `\`\`\`sandbox\`\`\`` command output are all
+  quarantine-wrapped at the point `src/persona.py`'s two ReAct loops
+  (`stream_persona_response`, `generate_persona_response_autonomous`) format
+  them into `execution_summary`, before it's logged as `background_thought`
+  and spliced back into the next turn's `deliberation_summary` — the same
+  buffer the ReAct loop's skill-call parser scans. Wrapped for every skill_id
+  uniformly rather than an allowlist of "known external-content" skills, since
+  skill code is synced from an externally-maintained skills-library repo this
+  repo doesn't control.
 
 `pr_review` also quarantines the *linked issue's* Acceptance Criteria text and
 the PR diff inside the critic prompts (`src/pr_review.py::_evaluate_criterion`,
@@ -77,17 +89,6 @@ issue *title* is quarantined alongside the body rather than left in the raw
 
 ## Known limitations (not fixed here)
 
-- **Skill-execution results re-enter the ReAct prompt unquarantined.** Only
-  the directly-spliced web-search snippet in `_build_persona_prompt` got
-  `quarantine_wrap`. Any skill invocation that fetches external content
-  (`SafeExplorer.fetch`, `SafeGitHub.get_issue`/`get_pr`/etc., available to
-  any non-`"system"` caller) has its raw result logged as a `background_thought`
-  episodic-memory row, which is spliced back into the *next* turn's prompt via
-  `deliberation_summary` — the same buffer the ReAct loop's skill-call parser
-  scans. This is architecturally the same vector this issue closes for web
-  search, but fixing it generally means auditing/wrapping every skill's return
-  value at the point it's logged, which is a larger change to the ReAct loop's
-  prompt assembly than this issue's scope. Tracked for a follow-up.
 - **`is_trusted_github_author` has no bot-identity carve-out.** If the
   system's own GitHub write account (`GITHUB_ACCESS_TOKEN`/`GITHUB_PM_TOKEN`)
   ever has an `author_association` other than `OWNER`/`MEMBER`/`COLLABORATOR`
