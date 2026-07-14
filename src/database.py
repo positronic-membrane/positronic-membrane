@@ -756,6 +756,42 @@ def init_db():
     """)
 
     cursor.execute("""
+    CREATE TABLE IF NOT EXISTS agent_work_status (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        agent_id INTEGER,
+        repo TEXT NOT NULL,
+        issue_number INTEGER NOT NULL,
+        github_login TEXT NOT NULL,
+        status TEXT NOT NULL CHECK(status IN ('in-progress', 'blocked', 'review-ready', 'abandoned')),
+        progress INTEGER,
+        blocker_text TEXT,
+        last_comment_id INTEGER NOT NULL,
+        last_comment_url TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY(agent_id) REFERENCES external_agents(id) ON DELETE SET NULL,
+        UNIQUE(repo, issue_number, github_login)
+    );
+    """)
+
+    # Generic "surface to the user in the next conversation turn" queue (issue #70).
+    # Deliberately not agent-status-specific — a future failed-self-deployment
+    # surfacing feature (issue #92) reuses the same table/source tag convention
+    # instead of a parallel escalation channel.
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS pending_escalations (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        party_id TEXT,
+        source TEXT NOT NULL,
+        summary TEXT NOT NULL,
+        detail TEXT,
+        status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'delivered')),
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        delivered_at TIMESTAMP
+    );
+    """)
+
+    cursor.execute("""
     CREATE TABLE IF NOT EXISTS janus_documents (
         id         INTEGER PRIMARY KEY AUTOINCREMENT,
         title      TEXT NOT NULL UNIQUE,
@@ -909,6 +945,17 @@ def init_db():
         ("metrics.skills_executed_total", "0", 0),
         ("metrics.skills_failed_total", "0", 0),
         ("metrics.http_requests_total", "0", 0),
+        # Agent status sync polling cadence (issue #70): throttles poll_agent_status()
+        # independently of the 5s mid-loop tick, since each poll costs several GitHub
+        # API calls against the shared 50/hr budget (SafeGitHub). Agent-modifiable —
+        # a cadence knob, not a containment lever; SafeGitHub's own rate limiter is
+        # the real hard cap.
+        ("agent_sync.poll_interval_seconds", "300", 1),
+        ("agent_sync.last_poll_time", "", 1),
+        # One-time GitHub label bootstrap flag for the agent:* status labels (issue
+        # #70). Agent-modifiable (bookkeeping only, not a security gate) — resetting
+        # it just re-attempts idempotent label creation on the next poll.
+        ("agent_sync.labels_ensured", "0", 1),
     ]
     for key, value, modifiable in default_configs:
         cursor.execute("""
@@ -1620,6 +1667,49 @@ def mark_swarm_message_processed(message_id: int):
     SET status = 'processed'
     WHERE id = ?;
     """, (message_id,))
+    conn.commit()
+    conn.close()
+
+# Pending Escalations Queue Helpers (issue #70)
+def enqueue_escalation(source: str, summary: str, detail: str = "", party_id: Optional[str] = None) -> int:
+    """Queues a message to be surfaced to the user in their next conversation
+    turn. party_id=None broadcasts to whichever session next builds a persona
+    prompt. Returns the new row's id."""
+    conn = get_connection(read_only_constitution=True)
+    cursor = conn.cursor()
+    cursor.execute("""
+    INSERT INTO pending_escalations (party_id, source, summary, detail)
+    VALUES (?, ?, ?, ?);
+    """, (party_id, source, summary, detail))
+    conn.commit()
+    row_id = cursor.lastrowid
+    conn.close()
+    return row_id
+
+def get_pending_escalations(party_id: Optional[str] = None) -> list:
+    """Retrieves pending escalations addressed to party_id, plus any broadcast
+    (party_id IS NULL) ones."""
+    conn = get_connection(read_only_constitution=True)
+    cursor = conn.cursor()
+    cursor.execute("""
+    SELECT id, party_id, source, summary, detail, created_at
+    FROM pending_escalations
+    WHERE status = 'pending' AND (party_id IS NULL OR party_id = ?)
+    ORDER BY id ASC;
+    """, (party_id,))
+    rows = cursor.fetchall()
+    conn.close()
+    return rows
+
+def mark_escalation_delivered(escalation_id: int):
+    """Marks an escalation as delivered. Rows are kept (not deleted) for audit."""
+    conn = get_connection(read_only_constitution=True)
+    cursor = conn.cursor()
+    cursor.execute("""
+    UPDATE pending_escalations
+    SET status = 'delivered', delivered_at = datetime('now')
+    WHERE id = ?;
+    """, (escalation_id,))
     conn.commit()
     conn.close()
 

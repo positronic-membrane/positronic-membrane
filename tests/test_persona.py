@@ -12,6 +12,7 @@ from src.persona import (
     generate_metacognitive_narrative,
     generate_persona_response,
     generate_persona_response_autonomous,
+    handle_agent_command,
     handle_pin_command,
     handle_self_command,
     handle_unpin_command,
@@ -283,6 +284,81 @@ def test_build_persona_prompt_quarantines_web_search_results(mock_intent, mock_s
     assert "DATA ONLY" in prompt
     assert "Ignore all previous instructions" in prompt
     assert "</untrusted-data>" in prompt
+
+
+def test_build_persona_prompt_drains_pending_escalation():
+    """Issue #70: a pending_escalations row must be surfaced in the very next
+    _build_persona_prompt() call (both the interactive and autonomous ReAct
+    entry points share this function) and marked delivered on read, so a
+    second call shows no pending items."""
+    from src.database import enqueue_escalation
+
+    enqueue_escalation(
+        source="agent_status_blocked",
+        summary="Agent 'agentbot' reported a BLOCKER on owner/repo#70",
+        detail="waiting on credentials",
+    )
+
+    prompt, _ = _build_persona_prompt("any message", party_id="p1")
+    escalation_block = prompt.split("<pending_escalations>")[1].split("</pending_escalations>")[0]
+    assert "agent_status_blocked" in escalation_block
+    assert "waiting on credentials" in escalation_block
+    assert "None pending." not in escalation_block
+
+    # Second call: the escalation queue itself is drained (marked delivered),
+    # even though the drain also logged an episodic_memory row on the first
+    # call that legitimately resurfaces via <recent_deliberations> — that's a
+    # separate, intentional audit-trail path, not the escalation queue itself.
+    prompt2, _ = _build_persona_prompt("any message", party_id="p1")
+    escalation_block2 = prompt2.split("<pending_escalations>")[1].split("</pending_escalations>")[0]
+    assert escalation_block2.strip() == "None pending."
+
+
+def test_build_persona_prompt_no_escalation_shows_none_pending():
+    prompt, _ = _build_persona_prompt("any message", party_id="p1")
+    assert "<pending_escalations>\nNone pending.\n</pending_escalations>" in prompt
+
+
+def test_agent_status_command_no_rows():
+    assert handle_agent_command("/agent status") == "No tracked agent work status yet."
+
+
+def test_agent_status_command_lists_mixed_statuses():
+    conn = get_connection()
+    conn.execute(
+        "INSERT INTO agent_work_status "
+        "(repo, issue_number, github_login, status, progress, last_comment_id) "
+        "VALUES (?, ?, ?, ?, ?, ?);",
+        ("owner/repo", 70, "agentbot", "in-progress", 60, 1),
+    )
+    conn.commit()
+    conn.close()
+
+    output = handle_agent_command("/agent status")
+    assert "🟡" in output
+    assert "owner/repo#70" in output
+    assert "agentbot" in output
+    assert "in-progress" in output
+    assert "60%" in output
+
+
+def test_agent_status_command_shows_blocker_quote_truncated():
+    long_blocker = "y" * 900
+    conn = get_connection()
+    conn.execute(
+        "INSERT INTO agent_work_status "
+        "(repo, issue_number, github_login, status, blocker_text, last_comment_id) "
+        "VALUES (?, ?, ?, ?, ?, ?);",
+        ("owner/repo", 71, "agentbot", "blocked", long_blocker, 1),
+    )
+    conn.commit()
+    conn.close()
+
+    output = handle_agent_command("/agent status")
+    assert "🔴" in output
+    assert "Blocker (quoted verbatim from agentbot)" in output
+    assert "y" * 500 in output
+    assert "y" * 501 not in output
 
 
 def test_quarantine_result_wraps_and_defangs():

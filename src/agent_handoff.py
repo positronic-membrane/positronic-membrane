@@ -103,6 +103,29 @@ def _build_context_files_section(target_paths: List[str]) -> str:
     return "\n\n".join(parts)
 
 
+def _build_status_protocol_section() -> str:
+    """Static text describing the structured status-comment format (issue #70),
+    so an agent receiving a handoff packet is told the reporting protocol as
+    part of receiving work, not just agents that happen to already know it."""
+    from src.agent_sync import STATUS_LABELS
+
+    labels_list = "\n".join(f"- `{name}`" for name in STATUS_LABELS)
+    return (
+        "Apply one of the following labels to this issue to reflect your current state:\n\n"
+        f"{labels_list}\n\n"
+        "Then post a status comment on the issue using this exact hidden-comment format "
+        "(a JSON object inside an HTML comment) so the system can parse it:\n\n"
+        "```\n<!-- agent-status\n"
+        '{"status": "in-progress", "progress": 60, "blocker": null, "agent": "your-registered-name"}\n'
+        "-->\n```\n\n"
+        "`status` must be one of `in-progress`, `blocked`, `review-ready`, `abandoned`. "
+        "`progress` is an integer 0-100 (optional). `blocker` is a short description of what's "
+        "blocking you, required when `status` is `blocked`. `agent` should match your registration "
+        "name in the external_agents table, if you have one. Only comments from repo "
+        "collaborators/members/owners are honored — comments from unverified accounts are ignored."
+    )
+
+
 def _build_conventions_section() -> str:
     contributing_path = src.config.ROOT_DIR / "CONTRIBUTING.md"
     try:
@@ -207,6 +230,7 @@ def generate_handoff(
         f"## Acceptance Criteria\n\n{acceptance_criteria}",
         f"## Test Plan\n\n{test_plan}",
         f"## Conventions\n\n{_build_conventions_section()}",
+        f"## Status Reporting Protocol\n\n{_build_status_protocol_section()}",
     ]
 
     bundle = "\n\n".join(sections)

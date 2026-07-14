@@ -162,6 +162,21 @@ def test_generate_handoff_assembles_all_sections():
     assert "Looks good." in bundle
 
 
+def test_generate_handoff_includes_status_reporting_protocol_section():
+    """Issue #70: every handoff bundle must document the structured status-comment
+    protocol, so a receiving agent is told how to report progress as part of
+    receiving the work, not just agents that already happen to know it."""
+    with _mock_urlopen(_issue_payload(), _comments_payload()):
+        bundle = generate_handoff(68, party_id="system")
+
+    assert "## Status Reporting Protocol" in bundle
+    assert "agent:in-progress" in bundle
+    assert "agent:blocked" in bundle
+    assert "agent:review-ready" in bundle
+    assert "agent:abandoned" in bundle
+    assert "<!-- agent-status" in bundle
+
+
 def test_generate_handoff_includes_context_file_summary(monkeypatch, tmp_path):
     dummy_file = tmp_path / "src" / "agent_handoff.py"
     dummy_file.parent.mkdir(parents=True)
