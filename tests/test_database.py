@@ -259,6 +259,67 @@ def test_janus_documents_backfill_migration_adds_purpose_and_metadata(tmp_path):
         src.config.DB_PATH = orig_db_path
 
 
+def test_goal_checkpoints_backfill_migration_adds_completed_by_party_id(tmp_path):
+    """Pre-existing DBs created before issue #63 only have the original 5
+    goal_checkpoints columns; re-running init_db() must backfill
+    completed_by_party_id (NULL for pre-existing rows) without dropping data."""
+    legacy_db = tmp_path / "legacy_goal_checkpoints.db"
+    conn = sqlite3.connect(str(legacy_db))
+    conn.execute("""
+        CREATE TABLE goals (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            type TEXT NOT NULL,
+            status TEXT NOT NULL,
+            description TEXT NOT NULL,
+            progress_metric TEXT,
+            parent_goal_id INTEGER,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+    """)
+    conn.execute("""
+        CREATE TABLE goal_checkpoints (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            goal_id INTEGER NOT NULL,
+            checkpoint_description TEXT NOT NULL,
+            achieved INTEGER DEFAULT 0 CHECK(achieved IN (0, 1)),
+            achieved_at TIMESTAMP,
+            FOREIGN KEY(goal_id) REFERENCES goals(id) ON DELETE CASCADE
+        );
+    """)
+    conn.execute("INSERT INTO goals (id, type, status, description) VALUES (1, 'short', 'completed', 'legacy goal');")
+    conn.execute(
+        "INSERT INTO goal_checkpoints (goal_id, checkpoint_description, achieved, achieved_at) "
+        "VALUES (1, 'legacy checkpoint', 1, '2026-01-01T00:00:00');"
+    )
+    conn.commit()
+    conn.close()
+
+    orig_db_path = src.config.DB_PATH
+    src.config.DB_PATH = str(legacy_db)
+    try:
+        init_db()
+        conn = get_connection(read_only_constitution=True)
+        cursor = conn.cursor()
+        cursor.execute("PRAGMA table_info(goal_checkpoints);")
+        columns = {row[1] for row in cursor.fetchall()}
+        assert "completed_by_party_id" in columns
+
+        cursor.execute(
+            "SELECT checkpoint_description, achieved, completed_by_party_id FROM goal_checkpoints WHERE goal_id = 1;"
+        )
+        row = cursor.fetchone()
+        conn.close()
+        assert row[0] == "legacy checkpoint"
+        assert row[1] == 1
+        assert row[2] is None
+
+        # Idempotent: running init_db() again must not error or duplicate the column.
+        init_db()
+    finally:
+        src.config.DB_PATH = orig_db_path
+
+
 def test_external_agents_legacy_encryption_migration(tmp_path, monkeypatch):
     """Pre-fix rows encrypted with the legacy XOR scheme (using the old
     hardcoded default key, since no JANUS_ENCRYPTION_KEY was ever set) must

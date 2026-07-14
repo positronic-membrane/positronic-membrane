@@ -39,6 +39,7 @@ from src.persona import (
     generate_persona_response_autonomous,
     handle_web_slash_command
 )
+from src.metrics import increment_http_requests_total
 
 logger = logging.getLogger("JanusWebServer")
 
@@ -77,14 +78,29 @@ async def rate_limit_middleware(request: Request, call_next):
                 content={"detail": "Too many requests. Please try again later."}
             )
         ip_request_history[client_ip].append(now)
-        
+
     return await call_next(request)
+
+# Request logging + counting. Registered after rate_limit_middleware so it
+# becomes the OUTERMOST layer (Starlette wraps middleware in reverse
+# registration order) — that way even a 429 short-circuit from the rate
+# limiter still passes back through here and gets logged/counted.
+@app.middleware("http")
+async def request_logging_middleware(request: Request, call_next):
+    start = time.monotonic()
+    response = await call_next(request)
+    duration_ms = (time.monotonic() - start) * 1000
+    logger.info(
+        f"{request.method} {request.url.path} {response.status_code} {duration_ms:.1f}ms"
+    )
+    increment_http_requests_total()
+    return response
 
 # Path to static directory
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 # Import routers
-from src.routers import auth, chat, sandbox, constitution, goals, health, governor
+from src.routers import auth, chat, sandbox, constitution, goals, health, governor, metrics
 
 # Register routers
 app.include_router(auth.router)
@@ -94,6 +110,7 @@ app.include_router(constitution.router)
 app.include_router(goals.router)
 app.include_router(health.router)
 app.include_router(governor.router)
+app.include_router(metrics.router)
 
 # --- Static Files / Single-Page-App Fallback ---
 
@@ -120,6 +137,8 @@ def serve_static(path: str):
 def run_server(port=5005):
     """Starts the Uvicorn ASGI server. Blocks until process is interrupted."""
     from src.config import run_config_check
+    from src.logging_config import setup_logging
+    setup_logging()
     if run_config_check() != 0:
         # os._exit (not sys.exit/raise SystemExit) because main.py may run this
         # in a background thread, where SystemExit only kills that thread and

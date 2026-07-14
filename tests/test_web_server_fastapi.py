@@ -309,3 +309,39 @@ def test_header_resolution_isolation():
             db_conn.close()
             src.config.REQUIRE_AUTH = original_require_auth
 
+
+def test_metrics_endpoint_unauthenticated():
+    """GET /metrics is a Prometheus-scrape-style endpoint — no auth required."""
+    client = TestClient(app)
+    orig_require = src.config.REQUIRE_AUTH
+    try:
+        src.config.REQUIRE_AUTH = True
+        resp = client.get("/metrics")
+        assert resp.status_code == 200
+        data = resp.json()
+        for key in (
+            "llm_calls_total", "llm_calls_failed_total", "daemon_cycles_total",
+            "skills_executed_total", "skills_failed_total", "http_requests_total",
+            "daemon_last_cycle_timestamp", "episodic_memory_rows", "active_goals_count",
+            "goals_checkpoints_completed_total", "goals_checkpoints_completed_autonomously",
+        ):
+            assert key in data
+    finally:
+        src.config.REQUIRE_AUTH = orig_require
+
+
+def test_api_system_metrics_requires_auth():
+    client = TestClient(app)
+    orig_require = src.config.REQUIRE_AUTH
+    try:
+        src.config.REQUIRE_AUTH = True
+        resp = client.get("/api/system/metrics")
+        assert resp.status_code == 401
+
+        token = create_access_token("some-user-uuid", "user")
+        resp = client.get("/api/system/metrics", headers={"Authorization": f"Bearer {token}"})
+        assert resp.status_code == 200
+        assert "llm_calls_total" in resp.json()
+    finally:
+        src.config.REQUIRE_AUTH = orig_require
+

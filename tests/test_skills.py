@@ -369,3 +369,95 @@ def test_evaluate_drives_triggers_reflection(mock_query):
     assert len(_pending_swarm_triggers) == 1
     assert drives.get("boredom") == 0 # Reset to 0
 
+
+def test_executor_increments_skills_executed_and_failed_totals():
+    from src.metrics import _get_counter
+
+    conn = get_connection(read_only_constitution=False)
+    conn.execute("""
+    INSERT INTO agent_skills (skill_id, name, description, parameters_schema, code_blob, entry_point_function, required_role)
+    VALUES (
+        'test_metrics_ok', 'Test Metrics Ok', 'Succeeds', '{}',
+        'def run():\n    return 1', 'run', 'user'
+    );
+    """)
+    conn.execute("""
+    INSERT INTO agent_skills (skill_id, name, description, parameters_schema, code_blob, entry_point_function, required_role)
+    VALUES (
+        'test_metrics_fail', 'Test Metrics Fail', 'Fails', '{}',
+        'def run():\n    raise ValueError("boom")', 'run', 'user'
+    );
+    """)
+    conn.commit()
+    conn.close()
+
+    before_executed = _get_counter("metrics.skills_executed_total")
+    before_failed = _get_counter("metrics.skills_failed_total")
+
+    res = DynamicSkillExecutor.execute('test_metrics_ok', {}, party_id='user1')
+    assert res['success']
+    assert _get_counter("metrics.skills_executed_total") == before_executed + 1
+    assert _get_counter("metrics.skills_failed_total") == before_failed
+
+    res = DynamicSkillExecutor.execute('test_metrics_fail', {}, party_id='user1')
+    assert not res['success']
+    assert _get_counter("metrics.skills_executed_total") == before_executed + 2
+    assert _get_counter("metrics.skills_failed_total") == before_failed + 1
+
+
+def test_executor_veto_does_not_increment_skills_executed_total():
+    """A role veto happens before dispatch, so it must not count as 'executed'."""
+    from src.metrics import _get_counter
+
+    conn = get_connection(read_only_constitution=False)
+    conn.execute("""
+    INSERT INTO agent_skills (skill_id, name, description, parameters_schema, code_blob, entry_point_function, required_role)
+    VALUES (
+        'test_metrics_vetoed', 'Test Metrics Vetoed', 'Admin only', '{}',
+        'def run():\n    return 1', 'run', 'admin'
+    );
+    """)
+    conn.commit()
+    conn.close()
+
+    before_executed = _get_counter("metrics.skills_executed_total")
+    res = DynamicSkillExecutor.execute('test_metrics_vetoed', {}, party_id='user1')
+    assert not res['success']
+    assert _get_counter("metrics.skills_executed_total") == before_executed
+
+
+def test_safe_goals_complete_checkpoint_records_party_id():
+    from src.skills import SafeGoals
+
+    sg = SafeGoals(party_id=None)
+    goal_id = sg.create_goal("short", "test goal")
+    checkpoint_id = sg.add_checkpoint(goal_id, "test checkpoint")
+
+    autonomous_sg = SafeGoals(party_id="system")
+    assert autonomous_sg.complete_checkpoint(checkpoint_id)
+
+    conn = get_connection(read_only_constitution=True)
+    row = conn.execute(
+        "SELECT achieved, completed_by_party_id FROM goal_checkpoints WHERE id = ?;", (checkpoint_id,)
+    ).fetchone()
+    conn.close()
+    assert row[0] == 1
+    assert row[1] == "system"
+
+
+def test_safe_goals_complete_checkpoint_without_party_id_leaves_null():
+    from src.skills import SafeGoals
+
+    sg = SafeGoals()
+    goal_id = sg.create_goal("short", "test goal 2")
+    checkpoint_id = sg.add_checkpoint(goal_id, "test checkpoint 2")
+
+    assert sg.complete_checkpoint(checkpoint_id)
+
+    conn = get_connection(read_only_constitution=True)
+    row = conn.execute(
+        "SELECT completed_by_party_id FROM goal_checkpoints WHERE id = ?;", (checkpoint_id,)
+    ).fetchone()
+    conn.close()
+    assert row[0] is None
+

@@ -203,3 +203,15 @@ def test_run_config_check_warns_but_returns_0(monkeypatch, caplog):
     with caplog.at_level("WARNING"):
         assert run_config_check() == 0
     assert "GITHUB" in caplog.text
+
+
+def test_unknown_log_level_is_warning(monkeypatch):
+    monkeypatch.setattr(config, "LOG_LEVEL", "VERBOSE")
+    result = validate_config()
+    assert any("LOG_LEVEL" in w for w in result.warnings)
+
+
+def test_unknown_log_format_is_warning(monkeypatch):
+    monkeypatch.setattr(config, "LOG_FORMAT", "xml")
+    result = validate_config()
+    assert any("LOG_FORMAT" in w for w in result.warnings)

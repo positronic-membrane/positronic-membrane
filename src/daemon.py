@@ -11,6 +11,7 @@ from src.middleware import validate_action, SafetyViolationError, check_loop_saf
 from src.memory import add_memory, query_memories, orchestrate_workspace_snapshot
 from src.watcher import DirectoryWatcher
 from src.notifications import send_webhook_notification
+from src.metrics import increment_daemon_cycles_total
 from src.database import (
     increment_boredom,
     reset_boredom,
@@ -269,8 +270,6 @@ async def pause_until_user_active():
             return
         await asyncio.sleep(1 if os.getenv("JANUS_TEST_MODE") == "1" else 15)
 
-# Setup logging
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("JanusDaemon")
 
 def detect_user_presence(workspace_path: Path, max_age_seconds: int = 300) -> bool:
@@ -835,6 +834,7 @@ async def run_mid_layer_loop():
                 logger.error(f"Failed to update mid layer last_run_at: {e}")
             finally:
                 conn.close()
+            increment_daemon_cycles_total()
                 
     except asyncio.CancelledError:
         logger.info("Mid-level loop cancelled.")
