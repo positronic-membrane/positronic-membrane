@@ -1,8 +1,9 @@
 import logging
+
 from fastapi import APIRouter, Depends
 
-from src.routers.dependencies import require_role
 import src.daemon as daemon
+from src.routers.dependencies import require_role
 
 logger = logging.getLogger("JanusWebServer")
 router = APIRouter()

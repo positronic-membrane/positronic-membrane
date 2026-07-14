@@ -1,10 +1,7 @@
 import sys
-from src.database import (
-    add_constitution_rule, 
-    mark_setup_complete, 
-    log_episodic_memory,
-    get_constitution
-)
+
+from src.database import add_constitution_rule, log_episodic_memory, mark_setup_complete
+
 
 def run_socratic_wizard():
     """
@@ -56,7 +53,7 @@ def run_socratic_wizard():
     print(f"  * Restricted Boundaries: {boundaries}")
     print(f"  * Self-Modification Scope: {self_mod_rules}")
     print("-"*60)
-    
+
     confirm = input("Do you agree to commit these rules to the core constitution? (y/n): ").strip().lower()
     if confirm not in ("y", "yes"):
         print("Setup aborted. Rules were not written.")
@@ -70,13 +67,16 @@ def run_socratic_wizard():
     # Log completion in episodic memory
     log_episodic_memory(
         speaker="system",
-        message_content=f"Socratic Setup complete. Sealed constitution rules: Core Directive='{directive}', Restricted Boundaries='{boundaries}', Self-Modification Scope='{self_mod_rules}'",
+        message_content=(
+            f"Socratic Setup complete. Sealed constitution rules: Core Directive='{directive}', "
+            f"Restricted Boundaries='{boundaries}', Self-Modification Scope='{self_mod_rules}'"
+        ),
         context_type="user_visible"
     )
 
     # Set setup_complete flag in system_config
     mark_setup_complete()
-    
+
     print("\n[✔] Alignment interview complete. core_constitution rules are sealed.")
     print("Positronic Membrane is now ready to begin background execution. Entering Heartbeat Mode...\n")
 

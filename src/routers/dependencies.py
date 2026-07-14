@@ -1,35 +1,24 @@
-import os
-import json
 import logging
-import uuid
-import re
 import sqlite3
-import asyncio
-import time
-from datetime import datetime, UTC
-from pathlib import Path
-from typing import Optional, List, Dict, Any
 from collections import defaultdict
+from datetime import UTC, datetime
 from functools import lru_cache
+from typing import Any, Dict, Optional
 
-from fastapi import Request, HTTPException, status, WebSocket, WebSocketDisconnect, Query
+from fastapi import Depends, HTTPException, Request, status
 from pydantic import BaseModel
 
-from src.database import (
-    log_episodic_memory,
-    get_recent_episodic_memories,
-    get_constitution
-)
+import src.config
+from src.auth import decode_access_token
+from src.memory_orchestrator import MemoryOrchestrator
+from src.role_bootstrap import RoleBootstrap
+
+logger = logging.getLogger("JanusWebServer")
+
 
 def get_connection(*args, **kwargs):
     import src.database
     return src.database.get_connection(*args, **kwargs)
-from src.memory_orchestrator import MemoryOrchestrator
-from src.role_bootstrap import RoleBootstrap
-from src.auth import decode_access_token, create_access_token
-import src.config
-
-logger = logging.getLogger("JanusWebServer")
 
 ROLE_HIERARCHY = {
     'observer': 0,
@@ -146,17 +135,17 @@ def get_current_party(request: Request) -> Dict[str, Any]:
     api_key_header = request.headers.get("X-API-Key")
     auth_header = request.headers.get("Authorization")
     fingerprint_header = request.headers.get("X-Device-Fingerprint")
-    
+
     party_id = None
     role = None
-    
+
     # 1. Check X-API-Key
     if api_key_header:
         res = resolve_party_by_api_key(api_key_header)
         if res:
             party_id = res["party_id"]
             role = res["role"]
-            
+
     # 2. Check Bearer Token (JWT)
     if not party_id and auth_header and auth_header.startswith("Bearer "):
         token = auth_header[7:]
@@ -168,15 +157,15 @@ def get_current_party(request: Request) -> Dict[str, Any]:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail=f"Invalid JWT access token: {e}"
-            )
-            
+            ) from e
+
     # 3. Check X-Device-Fingerprint
     if not party_id and fingerprint_header:
         res = resolve_party_by_fingerprint(fingerprint_header)
         if res:
             party_id = res["party_id"]
             role = res["role"]
-            
+
     # Fallback to legacy X-Party-ID header for backward compatibility
     if not party_id:
         party_id = request.headers.get("X-Party-ID")
@@ -196,13 +185,13 @@ def get_current_party(request: Request) -> Dict[str, Any]:
     if not src.config.REQUIRE_AUTH and not auth_header and not api_key_header and not fingerprint_header and not request.headers.get("X-Party-ID"):
         party_id = "local_user"
         role = "admin"
-                
+
     if not party_id or not role:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Unauthorized: Missing or invalid authentication token/header."
         )
-        
+
     # Update last_seen in SQLite
     conn = get_connection()
     try:
@@ -213,7 +202,7 @@ def get_current_party(request: Request) -> Dict[str, Any]:
         logger.error(f"Failed to update last_seen for {party_id}: {e}")
     finally:
         conn.close()
-        
+
     return {"party_id": party_id, "role": role}
 
 
@@ -229,13 +218,12 @@ def require_role(minimum_role: str):
     # We must construct a callable that FastAPI can resolve as a dependency
     return dependency
 
-from fastapi import Depends
 
 async def get_websocket_party(token: Optional[str] = None) -> Dict[str, Any]:
     """Helper to verify WebSocket connection JWT token or fallback to local user when auth is not required."""
     party_id = None
     role = None
-    
+
     if token:
         try:
             payload = decode_access_token(token)
@@ -243,15 +231,15 @@ async def get_websocket_party(token: Optional[str] = None) -> Dict[str, Any]:
             role = payload.get("role")
         except Exception as e:
             logger.warning(f"WebSocket JWT decode failed: {e}")
-            raise HTTPException(status_code=401, detail=f"Invalid JWT: {e}")
-            
+            raise HTTPException(status_code=401, detail=f"Invalid JWT: {e}") from e
+
     if not party_id and not src.config.REQUIRE_AUTH:
         party_id = "local_user"
         role = "admin"
-        
+
     if not party_id or not role:
         raise HTTPException(status_code=401, detail="Unauthorized WebSocket connection")
-        
+
     return {"party_id": party_id, "role": role}
 
 

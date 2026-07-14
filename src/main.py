@@ -1,15 +1,16 @@
-import sys
-import os
 import asyncio
 import logging
+import os
+import sys
 import threading
 import webbrowser
+
 from src.config import run_config_check
+from src.daemon import run_heartbeat_loop
 from src.database import init_db, is_setup_complete
 from src.logging_config import setup_logging
-from src.setup_wizard import run_socratic_wizard
-from src.daemon import run_heartbeat_loop
 from src.persona import run_persona_chat
+from src.setup_wizard import run_socratic_wizard
 from src.web_server import run_server
 
 logger = logging.getLogger("JanusMain")

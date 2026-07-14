@@ -12,13 +12,15 @@ def cleanup_episodic_memory():
     # 2. Prevent daily duplicates by checking last run time
     last_run_row = sdk['db'].query("SELECT config_value FROM system_config WHERE config_key = 'memory.last_cleanup_time';")
     import datetime
-    now_str = datetime.datetime.utcnow().isoformat()
+    now_str = datetime.datetime.now(datetime.timezone.utc).isoformat()
     if last_run_row:
         try:
             last_run_val = last_run_row[0].get('config_value') if isinstance(last_run_row[0], dict) else last_run_row[0][0]
             if last_run_val:
                 last_run_time = datetime.datetime.fromisoformat(last_run_val)
-                if (datetime.datetime.utcnow() - last_run_time).total_seconds() < 86400:
+                if last_run_time.tzinfo is None:
+                    last_run_time = last_run_time.replace(tzinfo=datetime.timezone.utc)
+                if (datetime.datetime.now(datetime.timezone.utc) - last_run_time).total_seconds() < 86400:
                     return f"Episodic memory cleanup skipped. Last run was at {last_run_val}."
         except Exception:
             pass

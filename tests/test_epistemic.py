@@ -2,9 +2,7 @@
 import json
 from unittest.mock import MagicMock, patch
 
-import pytest
-
-from src.database import get_connection, init_db
+from src.database import get_connection
 from src.epistemic import (
     Neo4jKnowledgeStore,
     _phase1_ingest,
@@ -13,7 +11,6 @@ from src.epistemic import (
     _phase4_assimilate,
     run_epistemic_pipeline,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers

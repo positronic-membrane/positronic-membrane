@@ -1,45 +1,22 @@
-import os
 import logging
+import os
 from pathlib import Path
 
-from fastapi import FastAPI, Request, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse
 
 import src.config
-from src.routers.dependencies import (
-    ROLE_HIERARCHY,
-    memory_orch,
+from src.metrics import increment_http_requests_total
+from src.routers.dependencies import (  # noqa: F401 -- unused here; re-exported so tests can patch/reach these via the web_server module
     bootstrap,
+    get_connection,
+    get_current_party,
     ip_request_history,
-    ChatRequest,
-    SandboxActionRequest,
-    ConstitutionAmendRequest,
-    ConstitutionDeleteRequest,
-    RegistryUpdateRequest,
-    RegistryRulesUpdateRequest,
-    PartyRegisterRequest,
-    MemorySetRequest,
-    ModificationCreateRequest,
-    PartyRoleUpdateRequest,
-    TokenRequest,
-    verify_role,
+    memory_orch,
     resolve_party_by_api_key,
     resolve_party_by_fingerprint,
-    get_current_party,
-    require_role,
-    get_websocket_party,
-    process_sandbox_updates,
-    get_connection,
 )
-from src.persona import (
-    detect_metacognitive_intent,
-    generate_persona_response,
-    generate_metacognitive_narrative,
-    generate_persona_response_autonomous,
-    handle_web_slash_command
-)
-from src.metrics import increment_http_requests_total
 
 logger = logging.getLogger("JanusWebServer")
 
@@ -57,21 +34,23 @@ app.add_middleware(
 
 # Simple IP-based Rate Limiter (Sliding Window)
 import time
+
 from fastapi.responses import JSONResponse
+
 
 @app.middleware("http")
 async def rate_limit_middleware(request: Request, call_next):
     client_ip = request.client.host if request.client else "unknown"
-    
+
     # Skip rate limiting for non-API routes (static files, index page, etc.)
     if request.url.path.startswith("/api/"):
         now = time.time()
         requests_limit = getattr(src.config, "RATE_LIMIT_REQUESTS", 60)
         window = getattr(src.config, "RATE_LIMIT_WINDOW", 60)
-        
+
         # Filter request timestamps outside the window
         ip_request_history[client_ip] = [t for t in ip_request_history[client_ip] if now - t < window]
-        
+
         if len(ip_request_history[client_ip]) >= requests_limit:
             return JSONResponse(
                 status_code=429,
@@ -100,7 +79,7 @@ async def request_logging_middleware(request: Request, call_next):
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 # Import routers
-from src.routers import auth, chat, sandbox, constitution, goals, health, governor, metrics
+from src.routers import auth, chat, constitution, goals, governor, health, metrics, sandbox
 
 # Register routers
 app.include_router(auth.router)

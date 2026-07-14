@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -98,7 +98,7 @@ def test_circuit_cooldown_auto_reset():
         DynamicSkillExecutor.execute("flaky_skill", {})
     assert check_circuit("flaky_skill") is False
 
-    stale_tripped_at = (datetime.utcnow() - timedelta(minutes=30)).strftime("%Y-%m-%d %H:%M:%S")
+    stale_tripped_at = (datetime.now(timezone.utc) - timedelta(minutes=30)).strftime("%Y-%m-%d %H:%M:%S")
     conn = get_connection(read_only_constitution=False)
     conn.execute(
         "UPDATE circuit_breaker_state SET tripped_at = ? WHERE skill_id = ?;",

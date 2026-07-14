@@ -1,14 +1,16 @@
-import time
-import logging
-import uuid
 import json
-from datetime import datetime, timedelta
+import logging
+import time
+import uuid
+from abc import ABC, abstractmethod
+from datetime import datetime, timedelta, timezone
 from typing import Optional
+
 import chromadb
 from openai import OpenAI
+
 import src.config
 from src.llm import query_agent
-from abc import ABC, abstractmethod
 
 logger = logging.getLogger("JanusMemory")
 
@@ -61,11 +63,11 @@ class PgVectorCollectionWrapper(VectorStoreAdapter):
         if embeddings is None:
             from src.memory import get_embeddings
             embeddings = get_embeddings(documents)
-            
+
         conn = get_connection(read_only_constitution=False)
         try:
             with conn.cursor() as cur:
-                for doc_id, doc, meta, emb in zip(ids, documents, metadatas, embeddings):
+                for doc_id, doc, meta, emb in zip(ids, documents, metadatas, embeddings, strict=True):
                     emb_str = "[" + ",".join(map(str, emb)) + "]"
                     meta_str = json.dumps(meta)
                     cur.execute(
@@ -80,7 +82,7 @@ class PgVectorCollectionWrapper(VectorStoreAdapter):
         from src.database import get_connection
         emb = query_embeddings[0]
         emb_str = "[" + ",".join(map(str, emb)) + "]"
-        
+
         where_clause, params = self._build_where_clause(where)
         sql = f"""
             SELECT id, document, metadata, (embedding <=> %s::vector) AS distance
@@ -90,7 +92,7 @@ class PgVectorCollectionWrapper(VectorStoreAdapter):
             LIMIT %s
         """
         all_params = [emb_str, self.name] + params + [n_results]
-        
+
         conn = get_connection(read_only_constitution=True)
         try:
             with conn.cursor() as cur:
@@ -98,7 +100,7 @@ class PgVectorCollectionWrapper(VectorStoreAdapter):
                 rows = cur.fetchall()
         finally:
             conn.close()
-            
+
         ids = []
         documents = []
         metadatas = []
@@ -116,7 +118,7 @@ class PgVectorCollectionWrapper(VectorStoreAdapter):
                 meta = {}
             metadatas.append(meta)
             distances.append(row[3])
-            
+
         return {
             "ids": [ids],
             "documents": [documents],
@@ -127,19 +129,19 @@ class PgVectorCollectionWrapper(VectorStoreAdapter):
     def get(self, ids=None, where=None) -> dict:
         from src.database import get_connection
         where_clause, params = self._build_where_clause(where)
-        
+
         if ids:
             id_placeholders = ",".join(["%s"] * len(ids))
             where_clause += f" AND id IN ({id_placeholders})"
             params.extend(ids)
-            
+
         sql = f"""
             SELECT id, document, metadata
             FROM janus_embeddings
             WHERE collection_name = %s {where_clause}
         """
         all_params = [self.name] + params
-        
+
         conn = get_connection(read_only_constitution=True)
         try:
             with conn.cursor() as cur:
@@ -147,7 +149,7 @@ class PgVectorCollectionWrapper(VectorStoreAdapter):
                 rows = cur.fetchall()
         finally:
             conn.close()
-            
+
         ret_ids = []
         documents = []
         metadatas = []
@@ -163,7 +165,7 @@ class PgVectorCollectionWrapper(VectorStoreAdapter):
             elif not isinstance(meta, dict):
                 meta = {}
             metadatas.append(meta)
-            
+
         return {
             "ids": ret_ids,
             "documents": documents,
@@ -175,7 +177,7 @@ class PgVectorCollectionWrapper(VectorStoreAdapter):
         conn = get_connection(read_only_constitution=False)
         try:
             with conn.cursor() as cur:
-                for item_id, meta in zip(ids, metadatas):
+                for item_id, meta in zip(ids, metadatas, strict=True):
                     cur.execute(
                         "SELECT metadata FROM janus_embeddings WHERE collection_name = %s AND id = %s",
                         (self.name, item_id)
@@ -205,11 +207,11 @@ class PgVectorCollectionWrapper(VectorStoreAdapter):
         if embeddings is None:
             from src.memory import get_embeddings
             embeddings = get_embeddings(documents)
-            
+
         conn = get_connection(read_only_constitution=False)
         try:
             with conn.cursor() as cur:
-                for doc_id, doc, meta, emb in zip(ids, documents, metadatas, embeddings):
+                for doc_id, doc, meta, emb in zip(ids, documents, metadatas, embeddings, strict=True):
                     emb_str = "[" + ",".join(map(str, emb)) + "]"
                     meta_str = json.dumps(meta)
                     cur.execute(
@@ -318,7 +320,7 @@ def add_memory(content: str, metadata: dict, memory_id: str, collection_name: st
     logger.info(f"Ingesting semantic memory [{memory_id}] into collection '{collection_name}'...")
     embeddings = get_embeddings([content])
     embedding = embeddings[0]
-    
+
     collection = get_collection(collection_name)
     collection.add(
         documents=[content],
@@ -336,21 +338,21 @@ def query_memories(query_text: str, limit: int = 5, collection_name: str = "janu
     logger.info(f"Querying semantic memory in '{collection_name}' for: '{query_text}'")
     embeddings = get_embeddings([query_text])
     embedding = embeddings[0]
-    
+
     collection = get_collection(collection_name)
     results = collection.query(
         query_embeddings=[embedding],
         n_results=limit
     )
-    
+
     formatted = []
     if results and "documents" in results and results["documents"] and len(results["documents"]) > 0:
         docs = results["documents"][0]
         metas = results["metadatas"][0] if "metadatas" in results and results["metadatas"] else [{}] * len(docs)
         ids = results["ids"][0] if "ids" in results and results["ids"] else [str(i) for i in range(len(docs))]
         distances = results["distances"][0] if "distances" in results and results["distances"] else [0.0] * len(docs)
-        
-        for doc, meta, memory_id, dist in zip(docs, metas, ids, distances):
+
+        for doc, meta, memory_id, dist in zip(docs, metas, ids, distances, strict=True):
             if dist <= src.config.MEMORY_RELEVANCE_THRESHOLD:
                 formatted.append({
                     "id": memory_id,
@@ -358,7 +360,7 @@ def query_memories(query_text: str, limit: int = 5, collection_name: str = "janu
                     "metadata": meta,
                     "distance": dist
                 })
-            
+
     logger.info(f"Memory query returned {len(formatted)} matches.")
     return formatted
 
@@ -370,43 +372,44 @@ def consolidate_memories(batch_size: int = 5):
     """
     logger.info("Checking for detailed memories to consolidate...")
     details_collection = get_collection("janus_details")
-    
+
     # Retrieve unconsolidated detailed memories
     try:
         results = details_collection.get(where={"consolidated": "false"})
     except Exception as e:
         logger.error(f"Failed to retrieve unconsolidated memories: {e}")
         return
-        
+
     if not results or "documents" not in results or not results["documents"]:
         logger.info("No unconsolidated memories found in janus_details.")
         return
-        
+
     documents = results["documents"]
     ids = results["ids"]
     metadatas = results["metadatas"]
-    
+
     # Process in batches
     for i in range(0, len(ids), batch_size):
         batch_ids = ids[i:i+batch_size]
         batch_docs = documents[i:i+batch_size]
         batch_metas = metadatas[i:i+batch_size]
-        
+
         logger.info(f"Consolidating batch of {len(batch_ids)} detailed memories...")
         memories_summary = "\n".join([f"- {doc}" for doc in batch_docs])
-        
+
         archivist_prompt = f"""
-        You are the Archivist. Synthesize the following granular background memory entries into a single, cohesive, high-level Primary Concept (under 2 sentences).
-        
+        You are the Archivist. Synthesize the following granular background memory entries into a single,
+        cohesive, high-level Primary Concept (under 2 sentences).
+
         GRANULAR BACKGROUND MEMORIES:
         {memories_summary}
-        
+
         Respond with the Primary Concept directly. Do not include agent names, prefixes, or JSON.
         """
-        
+
         try:
             primary_concept = query_agent("archivist", archivist_prompt).strip()
-            
+
             # Save Primary Concept to janus_long_term
             concept_id = f"concept_{uuid.uuid4()}"
             concept_metadata = {
@@ -415,7 +418,7 @@ def consolidate_memories(batch_size: int = 5):
                 "timestamp": time.time()
             }
             add_memory(primary_concept, concept_metadata, concept_id, "janus_long_term")
-            
+
             # Update detail metadatas to consolidated = "true"
             updated_metas = []
             for meta in batch_metas:
@@ -423,10 +426,10 @@ def consolidate_memories(batch_size: int = 5):
                 meta["consolidated"] = "true"
                 meta["primary_concept_id"] = concept_id
                 updated_metas.append(meta)
-                
+
             details_collection.update(ids=batch_ids, metadatas=updated_metas)
             logger.info(f"Consolidated batch successfully. Created Primary Concept: '{primary_concept}'")
-            
+
         except Exception as e:
             logger.error(f"Error during consolidation batch: {e}", exc_info=True)
 
@@ -438,12 +441,12 @@ def update_curiosity_topics(new_topics: list, similarity_threshold: float = 0.8)
     """
     logger.info(f"Processing {len(new_topics)} new curiosity topics for semantic clustering...")
     curiosity_collection = get_collection("janus_curiosity")
-    
-    for i, topic in enumerate(new_topics):
+
+    for _i, topic in enumerate(new_topics):
         topic = topic.strip()
         if not topic:
             continue
-            
+
         # Generate embedding
         try:
             embeddings = get_embeddings([topic])
@@ -451,7 +454,7 @@ def update_curiosity_topics(new_topics: list, similarity_threshold: float = 0.8)
         except Exception as e:
             logger.error(f"Failed to generate embedding for curiosity topic '{topic}': {e}")
             continue
-            
+
         # Search for similar active curiosity topics
         similar_found = False
         try:
@@ -460,13 +463,13 @@ def update_curiosity_topics(new_topics: list, similarity_threshold: float = 0.8)
                 n_results=1,
                 where={"resolved": "false"}
             )
-            
+
             if results and "distances" in results and results["distances"] and results["distances"][0]:
                 distance = results["distances"][0][0]
                 matched_id = results["ids"][0][0]
                 matched_doc = results["documents"][0][0]
                 matched_meta = results["metadatas"][0][0]
-                
+
                 # Check cosine distance threshold (distance <= 1.0 - threshold)
                 if distance <= (1.0 - similarity_threshold):
                     logger.info(f"Semantically merged topic '{topic}' with existing '{matched_doc}' (distance: {distance:.3f})")
@@ -478,7 +481,7 @@ def update_curiosity_topics(new_topics: list, similarity_threshold: float = 0.8)
                     similar_found = True
         except Exception as e:
             logger.error(f"Error querying similar curiosity topics: {e}")
-            
+
         if not similar_found:
             # Add as a new curiosity topic
             topic_id = f"cur_{uuid.uuid4()}"
@@ -502,33 +505,33 @@ def get_active_curiosity_topics(limit: int = 5) -> list:
     """
     logger.info("Retrieving active curiosity topics...")
     curiosity_collection = get_collection("janus_curiosity")
-    
+
     try:
         results = curiosity_collection.get(where={"resolved": "false"})
     except Exception as e:
         logger.error(f"Failed to fetch active curiosity topics: {e}")
         return []
-        
+
     if not results or "documents" not in results or not results["documents"]:
         return []
-        
+
     docs = results["documents"]
     metas = results["metadatas"]
     ids = results["ids"]
-    
+
     # Pack into list of dicts for sorting
     packed = []
-    for doc, meta, topic_id in zip(docs, metas, ids):
+    for doc, meta, topic_id in zip(docs, metas, ids, strict=True):
         packed.append({
             "id": topic_id,
             "document": doc,
             "relevance_count": meta.get("relevance_count", 1) if meta else 1,
             "timestamp": meta.get("timestamp", 0.0) if meta else 0.0
         })
-        
+
     # Sort: relevance_count DESC, timestamp DESC
     packed.sort(key=lambda x: (x["relevance_count"], x["timestamp"]), reverse=True)
-    
+
     return [item["document"] for item in packed[:limit]]
 
 def orchestrate_workspace_snapshot(changes: dict) -> None:
@@ -538,12 +541,12 @@ def orchestrate_workspace_snapshot(changes: dict) -> None:
     """
     import json
     from pathlib import Path
-    
+
     logger.info(f"MemoryOrchestrator intercepting changes: {changes}")
-    
+
     snapshots_dir = src.config.ROOT_DIR / ".janus_snapshots"
     snapshots_dir.mkdir(exist_ok=True)
-    
+
     # Read content for added and modified files
     contents = {}
     for filepath in changes.get("added", []) + changes.get("modified", []):
@@ -553,7 +556,7 @@ def orchestrate_workspace_snapshot(changes: dict) -> None:
                 contents[str(rel_path)] = f.read()
         except Exception as e:
             logger.error(f"Failed to read file content for snapshot {filepath}: {e}")
-            
+
     # Relativize the added/removed/modified lists
     rel_changes = {
         "added": [],
@@ -568,13 +571,13 @@ def orchestrate_workspace_snapshot(changes: dict) -> None:
             except ValueError:
                 # If file is not in workspace root, use basename
                 rel_changes[key].append(Path(path).name)
-                
+
     snapshot_data = {
         "timestamp": time.time(),
         "changes": rel_changes,
         "contents": contents
     }
-    
+
     snapshot_filename = f"snapshot_{int(time.time())}_{uuid.uuid4().hex[:8]}.json"
     snapshot_path = snapshots_dir / snapshot_filename
     try:
@@ -597,15 +600,15 @@ def index_skills_to_vector_db():
         rows = cursor.fetchall()
     finally:
         conn.close()
-        
+
     if not rows:
         logger.info("No active skills found to index.")
         return
-        
+
     ids = []
     documents = []
     metadatas = []
-    
+
     for skill_id, name, description, schema, role in rows:
         doc = f"Skill: {name}\nDescription: {description}\nParameters Schema: {schema}"
         ids.append(skill_id)
@@ -615,7 +618,7 @@ def index_skills_to_vector_db():
             "required_role": role,
             "name": name
         })
-        
+
     try:
         embeddings = get_embeddings(documents)
         collection = get_collection("janus_skills")
@@ -639,7 +642,8 @@ def _summarize_and_delete(conn, cursor, rows, batch_label: str):
     memories_summary = "\n".join([f"[{row[3]}] {row[1]}: {row[2]}" for row in rows])
 
     archivist_prompt = f"""
-    You are the Archivist. Synthesize the following sequence of {batch_label} log entries into a single, cohesive, high-level Primary Concept summary (under 2 sentences).
+    You are the Archivist. Synthesize the following sequence of {batch_label} log entries into a single,
+    cohesive, high-level Primary Concept summary (under 2 sentences).
 
     EPISODIC LOG ENTRIES:
     {memories_summary}
@@ -767,7 +771,7 @@ def _compress_user_visible_chat(min_rows: Optional[int] = None, min_age_days: Op
         return
 
     num_beyond_window = count - min_rows
-    cutoff_str = (datetime.utcnow() - timedelta(days=min_age_days)).strftime('%Y-%m-%d %H:%M:%S')
+    cutoff_str = (datetime.now(timezone.utc) - timedelta(days=min_age_days)).strftime('%Y-%m-%d %H:%M:%S')
 
     try:
         # Bounding by id ASC + LIMIT num_beyond_window restricts the candidate

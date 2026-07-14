@@ -1,4 +1,5 @@
 import pytest
+
 from src.self_modification import stage_and_test, stage_and_test_multi
 
 

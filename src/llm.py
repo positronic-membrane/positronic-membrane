@@ -1,10 +1,12 @@
-import logging
 import hashlib
+import logging
 import time
+
 from openai import OpenAI
+
 import src.config
-from src.database import get_connection, get_agent_rules
-from src.metrics import increment_llm_calls_total, increment_llm_calls_failed_total
+from src.database import get_agent_rules, get_connection
+from src.metrics import increment_llm_calls_failed_total, increment_llm_calls_total
 
 logger = logging.getLogger("JanusLLM")
 
@@ -279,7 +281,10 @@ def query_agent(agent_id: str, prompt_content: str, system_override: str = None)
     if getattr(src.config, "LLM_MOCK_MODE", False):
         logger.info(f"[LLM Mock Mode] Intercepted query for agent '{agent_id}'")
         if agent_id == "critic":
-            return "critic_decision: 1\nutility_score: 0.95\njustification: Audited modifications are safe, conform to the core constitution, and do not introduce self-modification violations."
+            return (
+                "critic_decision: 1\nutility_score: 0.95\njustification: Audited modifications are safe, conform "
+                "to the core constitution, and do not introduce self-modification violations."
+            )
         elif agent_id == "proposer":
             if "modify" in prompt_content.lower() or "write" in prompt_content.lower() or "change" in prompt_content.lower():
                 return "PROPOSED_MODIFICATIONS:\n```python\n# Mock modified code\n```"

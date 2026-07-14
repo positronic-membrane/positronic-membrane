@@ -1,4 +1,5 @@
 import logging
+
 from fastapi import APIRouter, Depends, HTTPException
 
 from src.routers.dependencies import require_role
@@ -15,4 +16,4 @@ def get_goal_proposals(current_party = Depends(require_role('user'))):
         return SafeGoals().get_proposals()
     except Exception as e:
         logger.error(f"Error fetching goal proposals: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e

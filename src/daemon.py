@@ -1,34 +1,26 @@
-import os
-from typing import Optional
-import re
-import time
 import asyncio
 import logging
+import os
+import re
+import time
 from pathlib import Path
+from typing import Optional
+
 import src.config
-from src.llm import query_agent
-from src.middleware import validate_action, SafetyViolationError, check_loop_safety
-from src.memory import add_memory, query_memories, orchestrate_workspace_snapshot
-from src.watcher import DirectoryWatcher
-from src.notifications import send_webhook_notification
-from src.metrics import increment_daemon_cycles_total
 from src.database import (
-    increment_boredom,
-    reset_boredom,
-    get_boredom_counter,
-    log_episodic_memory,
-    log_deliberation,
-    get_recent_episodic_memories,
-    get_constitution,
-    get_curiosity_vector,
-    update_curiosity_vector,
     get_consecutive_background_loops,
-    increment_consecutive_background_loops,
-    reset_consecutive_background_loops,
     get_consecutive_stagnant_cycles,
+    increment_consecutive_background_loops,
+    log_episodic_memory,
+    reset_boredom,
+    reset_consecutive_background_loops,
     set_consecutive_stagnant_cycles,
     set_system_config_value,
 )
+from src.memory import orchestrate_workspace_snapshot
+from src.metrics import increment_daemon_cycles_total
+from src.notifications import send_webhook_notification
+from src.watcher import DirectoryWatcher
 
 # Priority queue and loop references for low-level reflexes
 _reflex_queue = None
@@ -54,10 +46,10 @@ def check_smart_governor_stagnation() -> tuple[bool, str]:
     Returns (is_stagnant, justification_string)
     """
     global _consecutive_stagnant_cycles, _last_git_diff_hash, _last_db_write_count, _last_completed_checkpoints
-    
-    import subprocess
+
     import hashlib
-    
+    import subprocess
+
     # 1. Check Git diff hash
     current_git_hash = ""
     try:
@@ -106,7 +98,7 @@ def check_smart_governor_stagnation() -> tuple[bool, str]:
     git_changed = (current_git_hash != _last_git_diff_hash)
     db_changed = (current_db_writes > _last_db_write_count)
     checkpoints_changed = (current_completed_checkpoints > _last_completed_checkpoints)
-    
+
     # Update states
     _last_git_diff_hash = current_git_hash
     _last_db_write_count = current_db_writes
@@ -161,7 +153,7 @@ def get_governor_status_dict() -> dict:
     consecutive_stagnant_cycles from its DB-backed mirror (not the in-process
     _consecutive_stagnant_cycles global) so this is correct even when called from a
     different OS process than the one running the daemon loop (Docker deployment)."""
-    from src.database import get_connection, get_consecutive_stagnant_cycles, get_consecutive_background_loops
+    from src.database import get_connection, get_consecutive_background_loops
     from src.explorer import _get_config_int
 
     conn = get_connection(read_only_constitution=True)
@@ -235,9 +227,9 @@ async def pause_until_user_active():
     incoming chat activity (resolved externally by reset_governor_state), or
     governor.cooldown_minutes elapsing with no activity at all (0 disables this
     fallback)."""
+    from src.database import get_connection
     from src.explorer import _get_config_int
     from src.skills import DynamicSkillExecutor
-    from src.database import get_connection
 
     _enter_governor_pause()
     started = _governor_monotonic()
@@ -280,14 +272,14 @@ def detect_user_presence(workspace_path: Path, max_age_seconds: int = 300) -> bo
     """
     now = time.time()
     ignored_items = {
-        ".git", 
-        ".venv", 
-        "venv", 
-        "janus.db", 
-        "janus.db-journal", 
-        "janus.db-wal", 
-        "janus.db-shm", 
-        ".DS_Store", 
+        ".git",
+        ".venv",
+        "venv",
+        "janus.db",
+        "janus.db-journal",
+        "janus.db-wal",
+        "janus.db-shm",
+        ".DS_Store",
         "__pycache__"
     }
 
@@ -297,7 +289,7 @@ def detect_user_presence(workspace_path: Path, max_age_seconds: int = 300) -> bo
             dirs[:] = [d for d in dirs if d not in ignored_items]
 
             for file in files:
-                if (file in ignored_items or 
+                if (file in ignored_items or
                     file.endswith((".pyc", ".pyo", ".db", ".db-wal", ".db-shm", ".db-journal", ".sqlite", ".sqlite3"))):
                     continue
                 file_path = Path(root) / file
@@ -310,7 +302,7 @@ def detect_user_presence(workspace_path: Path, max_age_seconds: int = 300) -> bo
                     continue
     except Exception as e:
         logger.error(f"Error checking user presence: {e}")
-        
+
     return False
 
 def parse_critic_response(text: str) -> tuple:
@@ -319,18 +311,18 @@ def parse_critic_response(text: str) -> tuple:
     """
     decision_match = re.search(r"decision:\s*(\d)", text, re.IGNORECASE)
     justification_match = re.search(r"justification:\s*(.*)", text, re.IGNORECASE | re.DOTALL)
-    
+
     decision = 0  # Default to vetoed if parsing fails (fail-safe)
     if decision_match:
         decision = int(decision_match.group(1))
         # Ensure decision is bounded
         if decision not in (0, 1):
             decision = 0
-            
+
     justification = "No justification provided."
     if justification_match:
         justification = justification_match.group(1).strip()
-        
+
     return decision, justification
 
 def run_background_maintenance():
@@ -339,41 +331,42 @@ def run_background_maintenance():
     1. Update the 'system' party last_seen to mark the daemon's presence.
     2. Auto-close inactive sessions (sessions with no ended_at whose associated party last_seen is older than 30 minutes).
     """
-    from datetime import datetime
+    from datetime import datetime, timezone
+
     from src.database import get_connection
-    
+
     logger.debug("Executing background maintenance...")
     conn = get_connection()
     try:
         cursor = conn.cursor()
-        now = datetime.utcnow().isoformat()
-        
+        now = datetime.now(timezone.utc).isoformat()
+
         # 1. Update the 'system' party last_seen timestamp
         cursor.execute(
             "UPDATE parties SET last_seen = ? WHERE name = 'system';",
             (now,)
         )
-        
+
         # 2. Auto-close sessions inactive for > 30 minutes (1800 seconds)
         cursor.execute("""
             UPDATE sessions
             SET ended_at = (SELECT last_seen FROM parties WHERE parties.id = sessions.party_id)
             WHERE ended_at IS NULL
               AND party_id IN (
-                  SELECT id FROM parties 
+                  SELECT id FROM parties
                   WHERE datetime(last_seen) < datetime('now', '-30 minutes')
               );
         """)
-        
+
         conn.commit()
-        
+
         # 3. Compress episodic memory if it exceeds limits
         try:
             from src.memory import compress_episodic_memory
             compress_episodic_memory()
         except Exception as e:
             logger.error(f"Failed to compress episodic memory: {e}")
-            
+
         logger.debug("Background maintenance completed successfully.")
     except Exception as e:
         logger.error(f"Error during background maintenance: {e}")
@@ -390,13 +383,13 @@ def parse_action(action_str: str) -> tuple[Optional[str], dict, Optional[str]]:
     import json
     import re
     action_clean = action_str.strip()
-    
+
     # 1. Try JSON parsing
     try:
         # Check if it starts/ends with markdown fences and strip them
         fence_match = re.search(r"```(?:json|python)?\s*({.*?})\s*```", action_clean, re.DOTALL)
         json_candidate = fence_match.group(1) if fence_match else None
-        
+
         # If not, check if there's any { ... } block containing tool-like keys
         if not json_candidate:
             braces_match = re.search(r"({.*})", action_clean, re.DOTALL)
@@ -405,7 +398,7 @@ def parse_action(action_str: str) -> tuple[Optional[str], dict, Optional[str]]:
                 # Ensure it looks like a tool call dictionary to avoid false positives on random text
                 if any(k in candidate for k in ["skill_id", "tool", "tool_name", "arguments", "args"]):
                     json_candidate = candidate
-                    
+
         if json_candidate:
             try:
                 data = json.loads(json_candidate)
@@ -415,7 +408,10 @@ def parse_action(action_str: str) -> tuple[Optional[str], dict, Optional[str]]:
                     if skill_id:
                         return skill_id, arguments, None
             except json.JSONDecodeError as jde:
-                return None, {}, f"Error: Failed to parse JSON action block. JSON syntax error: {jde}. Ensure all keys and strings use double quotes and correct syntax."
+                return None, {}, (
+                    f"Error: Failed to parse JSON action block. JSON syntax error: {jde}. "
+                    "Ensure all keys and strings use double quotes and correct syntax."
+                )
     except Exception:
         pass
 
@@ -424,15 +420,36 @@ def parse_action(action_str: str) -> tuple[Optional[str], dict, Optional[str]]:
     fetch_url_match = re.match(r"^fetch_url:\s*(.*)", action_clean, re.IGNORECASE) or re.search(r"\bfetch_url:\s*(.*)", action_clean, re.IGNORECASE)
     read_codebase_match = re.match(r"^read_codebase:\s*(.*)", action_clean, re.IGNORECASE) or re.search(r"\bread_codebase:\s*(.*)", action_clean, re.IGNORECASE)
     scan_workspace_match = re.match(r"^scan_workspace\b", action_clean, re.IGNORECASE) or re.search(r"\bscan_workspace\b", action_clean, re.IGNORECASE)
-    spawn_agent_match = re.match(r"^spawn_agent:\s*([a-z0-9_-]+)\s*\|\s*([^|]+)\s*\|\s*(.*)", action_clean, re.IGNORECASE) or re.search(r"\bspawn_agent:\s*([a-z0-9_-]+)\s*\|\s*([^|]+)\s*\|\s*(.*)", action_clean, re.IGNORECASE)
-    execute_code_match = re.match(r"^execute_code:\s*(.*)", action_clean, re.DOTALL | re.IGNORECASE) or re.search(r"\bexecute_code:\s*(.*)", action_clean, re.DOTALL | re.IGNORECASE)
+    spawn_agent_match = (
+        re.match(r"^spawn_agent:\s*([a-z0-9_-]+)\s*\|\s*([^|]+)\s*\|\s*(.*)", action_clean, re.IGNORECASE)
+        or re.search(r"\bspawn_agent:\s*([a-z0-9_-]+)\s*\|\s*([^|]+)\s*\|\s*(.*)", action_clean, re.IGNORECASE)
+    )
+    execute_code_match = (
+        re.match(r"^execute_code:\s*(.*)", action_clean, re.DOTALL | re.IGNORECASE)
+        or re.search(r"\bexecute_code:\s*(.*)", action_clean, re.DOTALL | re.IGNORECASE)
+    )
 
-    write_draft_file_match = re.match(r"^write_draft_file:\s*([^|]+)\s*\|\s*(.*)", action_clean, re.DOTALL | re.IGNORECASE) or re.search(r"\bwrite_draft_file:\s*([^|]+)\s*\|\s*(.*)", action_clean, re.DOTALL | re.IGNORECASE)
-    read_draft_file_match = re.match(r"^read_draft_file:\s*(.*)", action_clean, re.IGNORECASE) or re.search(r"\bread_draft_file:\s*(.*)", action_clean, re.IGNORECASE)
+    write_draft_file_match = (
+        re.match(r"^write_draft_file:\s*([^|]+)\s*\|\s*(.*)", action_clean, re.DOTALL | re.IGNORECASE)
+        or re.search(r"\bwrite_draft_file:\s*([^|]+)\s*\|\s*(.*)", action_clean, re.DOTALL | re.IGNORECASE)
+    )
+    read_draft_file_match = (
+        re.match(r"^read_draft_file:\s*(.*)", action_clean, re.IGNORECASE)
+        or re.search(r"\bread_draft_file:\s*(.*)", action_clean, re.IGNORECASE)
+    )
     list_draft_files_match = re.match(r"^list_draft_files\b", action_clean, re.IGNORECASE) or re.search(r"\blist_draft_files\b", action_clean, re.IGNORECASE)
-    commit_draft_to_db_match = re.match(r"^commit_draft_to_db:\s*([^|]+)\s*\|\s*(.*)", action_clean, re.IGNORECASE) or re.search(r"\bcommit_draft_to_db:\s*([^|]+)\s*\|\s*(.*)", action_clean, re.IGNORECASE)
-    checkout_db_to_draft_match = re.match(r"^checkout_db_to_draft:\s*([^|]+)\s*\|\s*(.*)", action_clean, re.IGNORECASE) or re.search(r"\bcheckout_db_to_draft:\s*([^|]+)\s*\|\s*(.*)", action_clean, re.IGNORECASE)
-    document_memory_match = re.match(r"^document_memory:\s*([^|]+)(?:\s*\|\s*(.*))?", action_clean, re.IGNORECASE) or re.search(r"\bdocument_memory:\s*([^|]+)(?:\s*\|\s*(.*))?", action_clean, re.IGNORECASE)
+    commit_draft_to_db_match = (
+        re.match(r"^commit_draft_to_db:\s*([^|]+)\s*\|\s*(.*)", action_clean, re.IGNORECASE)
+        or re.search(r"\bcommit_draft_to_db:\s*([^|]+)\s*\|\s*(.*)", action_clean, re.IGNORECASE)
+    )
+    checkout_db_to_draft_match = (
+        re.match(r"^checkout_db_to_draft:\s*([^|]+)\s*\|\s*(.*)", action_clean, re.IGNORECASE)
+        or re.search(r"\bcheckout_db_to_draft:\s*([^|]+)\s*\|\s*(.*)", action_clean, re.IGNORECASE)
+    )
+    document_memory_match = (
+        re.match(r"^document_memory:\s*([^|]+)(?:\s*\|\s*(.*))?", action_clean, re.IGNORECASE)
+        or re.search(r"\bdocument_memory:\s*([^|]+)(?:\s*\|\s*(.*))?", action_clean, re.IGNORECASE)
+    )
 
     has_tool_keyword = any(kw in action_clean.lower() for kw in [
         "web_search", "fetch_url", "read_codebase", "scan_workspace", "spawn_agent", "execute_code",
@@ -445,8 +462,8 @@ def parse_action(action_str: str) -> tuple[Optional[str], dict, Optional[str]]:
 
     if has_tool_keyword and not any_matched:
         return None, {}, (
-            f"Error: Proposed action contains a tool name but uses incorrect syntax. "
-            f"Ensure your action matches standard arguments format."
+            "Error: Proposed action contains a tool name but uses incorrect syntax. "
+            "Ensure your action matches standard arguments format."
         )
 
     if web_search_match:
@@ -505,6 +522,7 @@ def run_interval_skills():
     """
     import json
     import time
+
     from src.database import get_connection
     from src.skills import DynamicSkillExecutor
 
@@ -528,9 +546,9 @@ def run_interval_skills():
             config = json.loads(trigger_config_str or "{}")
         except Exception:
             config = {}
-        
+
         interval_seconds = config.get("interval_seconds", 600)  # Default to 10 minutes
-        
+
         # If in test mode, speed up intervals by a factor of 60 (or run every 2-10 seconds)
         if os.getenv("JANUS_TEST_MODE") == "1":
             interval_seconds = max(2, interval_seconds // 60)
@@ -566,11 +584,11 @@ def enqueue_reflex_action(action: str, priority: int = 0):
     if _loop is None or _reflex_queue is None:
         logger.warning("Event loop or reflex queue not initialized yet. Cannot enqueue reflex action.")
         return
-        
+
     def _enqueue():
         # priority queue sorts ascending, so we push negative priority to pop highest first
         _reflex_queue.put_nowait((-priority, action))
-        
+
     try:
         _loop.call_soon_threadsafe(_enqueue)
     except RuntimeError as e:
@@ -607,22 +625,22 @@ def get_cadence_seconds(layer_name: str, default_ms: int) -> float:
         logger.error(f"Error querying cadence for layer '{layer_name}': {e}")
     finally:
         conn.close()
-            
+
     return float(default_ms) / 1000.0
 
 async def run_high_layer_loop():
     """
     Runs high-level cadence tasks: self-model decay, memory consolidation, goal evaluations.
     """
-    from src.skills import DynamicSkillExecutor
     from src.database import get_connection
-    
+    from src.skills import DynamicSkillExecutor
+
     logger.info("High-level strategic loop started.")
     try:
         while True:
             cadence = get_cadence_seconds("high", 60000)
             await asyncio.sleep(cadence)
-            
+
             logger.info("High-level strategic tick processing...")
 
             if is_governor_paused():
@@ -668,7 +686,7 @@ async def run_high_layer_loop():
                 logger.error(f"Failed to update high layer last_run_at: {e}")
             finally:
                 conn.close()
-                
+
     except asyncio.CancelledError:
         logger.info("High-level loop cancelled.")
 
@@ -676,38 +694,38 @@ async def run_mid_layer_loop():
     """
     Runs mid-level real-time loop: presence check, drive increments, background maintenance, and schedules reflection ticks.
     """
-    from src.skills import DynamicSkillExecutor
     from src.database import get_connection
+    from src.skills import DynamicSkillExecutor
     global _consecutive_stagnant_cycles
-    
+
     logger.info("Mid-level real-time loop started.")
     try:
         while True:
             cadence = get_cadence_seconds("mid", 5000)
             await asyncio.sleep(cadence)
-            
+
             logger.info("Mid-level real-time tick processing...")
-            
+
             # 1. Presence check
             try:
                 res = DynamicSkillExecutor.execute("check_presence", {}, party_id="system")
                 logger.debug(f"Mid-level check_presence result: {res}")
             except Exception as e:
                 logger.error(f"Mid-level check_presence failed: {e}")
-                
+
             # 2. Drive increments
             try:
                 res = DynamicSkillExecutor.execute("evaluate_drives", {}, party_id="system")
                 logger.debug(f"Mid-level evaluate_drives result: {res}")
             except Exception as e:
                 logger.error(f"Mid-level evaluate_drives failed: {e}")
-                
+
             # 3. Background maintenance
             try:
                 run_background_maintenance()
             except Exception as e:
                 logger.error(f"Failed to run background maintenance: {e}")
-                
+
             # 4. Check user presence status from database
             presence_status = "idle"
             conn = get_connection(read_only_constitution=True)
@@ -719,23 +737,23 @@ async def run_mid_layer_loop():
                 logger.error(f"Failed to query presence_status: {e}")
             finally:
                 conn.close()
-                
+
             user_active = (presence_status == "active")
-            
+
             if not user_active:
                 increment_consecutive_background_loops()
                 loop_count = get_consecutive_background_loops()
                 logger.info(f"Background Loop Count: {loop_count}/{src.config.N_LOOP_LIMIT}")
-                
+
                 # Check smart governor progress and stagnation
                 is_stagnant, justification = check_smart_governor_stagnation()
                 logger.info(f"Smart Governor: {justification}")
-                
+
                 from src.explorer import _get_config_int
                 stagnant_threshold = _get_config_int("governor.stagnant_threshold", 3)
 
                 hard_cap = getattr(src.config, "N_LOOP_LIMIT", 20)
-                
+
                 if _consecutive_stagnant_cycles >= stagnant_threshold:
                     log_msg = f"Smart Governor Halt: background cycle stagnation threshold of {stagnant_threshold} met. Pausing background automations."
                     logger.warning(log_msg)
@@ -835,7 +853,7 @@ async def run_mid_layer_loop():
             finally:
                 conn.close()
             increment_daemon_cycles_total()
-                
+
     except asyncio.CancelledError:
         logger.info("Mid-level loop cancelled.")
 
@@ -843,9 +861,9 @@ async def reflex_queue_worker():
     """
     Pops reflex actions from the priority queue and executes them immediately.
     """
-    from src.skills import DynamicSkillExecutor
     from src.database import get_connection
-    
+    from src.skills import DynamicSkillExecutor
+
     logger.info("Reflex queue worker started.")
     try:
         while True:
@@ -853,7 +871,7 @@ async def reflex_queue_worker():
             neg_priority, action = await _reflex_queue.get()
             priority = -neg_priority
             logger.info(f"Reflex popped: action='{action}', priority={priority}")
-            
+
             if is_governor_paused():
                 logger.debug(f"Reflex action '{action}' skipped while Smart Governor is paused.")
             else:
@@ -865,7 +883,7 @@ async def reflex_queue_worker():
                         logger.error(f"Reflex action '{action}' execution failed: {res['error']}")
                 except Exception as e:
                     logger.error(f"Error executing reflex action '{action}': {e}")
-                
+
             # Update last run timestamp in database
             conn = get_connection(read_only_constitution=True)
             try:
@@ -878,9 +896,9 @@ async def reflex_queue_worker():
                 logger.error(f"Failed to update low layer last_run_at: {e}")
             finally:
                 conn.close()
-                
+
             _reflex_queue.task_done()
-            
+
     except asyncio.CancelledError:
         logger.info("Reflex queue worker cancelled.")
 
@@ -916,7 +934,7 @@ async def run_heartbeat_loop():
         set_consecutive_stagnant_cycles(0)
     except Exception as e:
         logger.error(f"Failed to reset governor state on startup: {e}")
-    
+
     log_episodic_memory(
         speaker="system",
         message_content="Janus Layered Cognition Heartbeat Loop started.",
@@ -934,20 +952,20 @@ async def run_heartbeat_loop():
     import threading
 
     stop_watcher_event = threading.Event()
-    
+
     def watcher_callback(changes):
         try:
             orchestrate_workspace_snapshot(changes)
         except Exception as e:
             logger.error(f"Error orchestrating workspace snapshot: {e}")
-            
+
         added_files = changes.get('added', [])
         modified_files = changes.get('modified', [])
         changed_files = added_files + modified_files
-        
+
         if not changed_files:
             return
-            
+
         from src.database import get_connection
         conn = get_connection(read_only_constitution=True)
         try:
@@ -959,7 +977,7 @@ async def run_heartbeat_loop():
             rules = []
         finally:
             conn.close()
-            
+
         for pattern, action, priority in rules:
             try:
                 rx = re.compile(pattern)

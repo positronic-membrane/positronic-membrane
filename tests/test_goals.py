@@ -220,7 +220,10 @@ def test_evaluate_goals_skill():
     # Verify episodic log is recorded
     conn = get_connection()
     try:
-        row = conn.execute("SELECT speaker, message_content FROM episodic_memory WHERE context_type = 'background_thought' ORDER BY id DESC LIMIT 1;").fetchone()
+        row = conn.execute(
+            "SELECT speaker, message_content FROM episodic_memory "
+            "WHERE context_type = 'background_thought' ORDER BY id DESC LIMIT 1;"
+        ).fetchone()
         assert row is not None
         assert row[0] == "system"
         assert "Autonomous Goal Achievement" in row[1]

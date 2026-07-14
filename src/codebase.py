@@ -1,16 +1,16 @@
-import os
 import ast
-import time
 import logging
+import os
 from pathlib import Path
+
 import src.config
-from src.memory import add_memory, query_memories, get_collection
+from src.memory import add_memory, query_memories
 
 logger = logging.getLogger("JanusCodebase")
 
 def parse_python_structure(file_content: str) -> str:
     """
-    Parses Python source code and extracts class names, methods, 
+    Parses Python source code and extracts class names, methods,
     signatures, and top-level function names using Abstract Syntax Trees (AST).
     """
     try:
@@ -28,7 +28,7 @@ def parse_python_structure(file_content: str) -> str:
             class_doc = ast.get_docstring(node)
             class_desc = f" - {class_doc.strip().splitlines()[0]}" if class_doc else ""
             summary.append(f"class {node.name}{class_desc}:")
-            
+
             methods = []
             for subnode in node.body:
                 if isinstance(subnode, ast.FunctionDef):
@@ -43,7 +43,7 @@ def parse_python_structure(file_content: str) -> str:
                 summary.extend(methods)
             else:
                 summary.append("    * (no methods defined)")
-                
+
         elif isinstance(node, ast.FunctionDef):
             func_doc = ast.get_docstring(node)
             func_desc = f" - {func_doc.strip().splitlines()[0]}" if func_doc else ""
@@ -67,16 +67,16 @@ def generate_file_summary(file_path: Path) -> str:
         return f"Failed to read file: {e}"
 
     rel_path = file_path.relative_to(src.config.get_effective_workspace_root())
-    
+
     if file_path.suffix == ".py":
         structure = parse_python_structure(content)
         return f"File: {rel_path}\nLanguage: Python\nStructure:\n{structure}"
-        
+
     elif file_path.suffix in (".md", ".txt", ".css", ".json", ".env", ".example"):
         # For markdown/text, get the first 500 characters or lines
         snippet = content[:800].strip()
         return f"File: {rel_path}\nSnippet:\n{snippet}..."
-        
+
     else:
         return f"File: {rel_path}\nBinary or unsupported text type ({file_path.suffix}). Size: {len(content)} bytes."
 
@@ -87,9 +87,9 @@ def index_codebase(workspace_dir: Path = None):
     """
     if workspace_dir is None:
         workspace_dir = src.config.get_effective_workspace_root()
-        
+
     logger.info(f"Scanning and indexing codebase at: {workspace_dir} ...")
-    
+
     ignored_dirs = {".git", ".venv", "venv", "__pycache__", "data", ".pytest_cache", ".janus_sandboxes", ".janus_snapshots"}
     ignored_files = {".DS_Store", "janus.db", "janus.db-journal", "janus.db-wal", "janus.db-shm"}
     # Extensions that produce no useful summary and would trigger expensive embedding calls
@@ -106,13 +106,13 @@ def index_codebase(workspace_dir: Path = None):
         for file in files:
             if file in ignored_files or Path(file).suffix in ignored_extensions:
                 continue
-                
+
             file_path = Path(root) / file
             rel_path = file_path.relative_to(workspace_dir)
-            
+
             # Generate file structure summary
             summary_doc = generate_file_summary(file_path)
-            
+
             # Save into janus_codebase vector DB
             memory_id = f"code_{rel_path.as_posix().replace('/', '_')}"
             metadata = {
@@ -120,7 +120,7 @@ def index_codebase(workspace_dir: Path = None):
                 "file_name": file,
                 "last_modified": os.path.getmtime(file_path)
             }
-            
+
             try:
                 add_memory(
                     content=summary_doc,
@@ -131,7 +131,7 @@ def index_codebase(workspace_dir: Path = None):
                 indexed_count += 1
             except Exception as e:
                 logger.error(f"Failed to index codebase file {rel_path}: {e}")
-                
+
     logger.info(f"Codebase indexing complete. Indexed {indexed_count} files in 'janus_codebase'.")
 
 def query_codebase_context(query_text: str, limit: int = 3) -> str:
@@ -143,7 +143,7 @@ def query_codebase_context(query_text: str, limit: int = 3) -> str:
         matches = query_memories(query_text, limit=limit, collection_name="janus_codebase")
         if not matches:
             return "No matching codebase files found."
-            
+
         context_blocks = []
         for match in matches:
             context_blocks.append(f"--- Codebase Context ---\n{match['content']}\n")

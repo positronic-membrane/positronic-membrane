@@ -1,7 +1,7 @@
 def run_reflection_cycle():
-    import time
-    import re
     import json
+    import re
+    import time
 
     sdk['logger'].info("Starting autonomous reflection cycle skill...")
 
@@ -59,27 +59,27 @@ def run_reflection_cycle():
         while bus_turns < max_bus_turns:
             proposer_prompt = f"""
             You are the Proposer. Review our recent episodic logs, active curiosity vectors, and historical semantic memories:
-            
+
             RECENT EPISODIC MEMORIES:
             {memory_summary}
-            
+
             ACTIVE CURIOSITY TOPICS:
             {curiosity}
-            
+
             RELEVANT HISTORICAL SEMANTIC MEMORIES:
             {semantic_context if semantic_context else "None available."}
-            
+
             ACTIVE GOALS & CHECKPOINTS:
             {goals_block}
-            
+
             SWARM CHAT HISTORY (THIS TICK):
             {pending_bus_context if pending_bus_context else "No active sub-task discussions."}
-            
+
             You can collaborate with other agents by sending a sub-task message. Formats:
             - SEND_MESSAGE: explorer | <search query or URL fetch task>
             - SEND_MESSAGE: archivist | <memory lookup task>
             - SEND_MESSAGE: critic | <constitutional opinion request>
-            
+
             Alternatively, you can choose to use a direct tool yourself:
             - web_search: <search query>
             - fetch_url: <url>
@@ -87,7 +87,8 @@ def run_reflection_cycle():
             - scan_workspace
             - spawn_agent: <agent_id> | <agent_name> | <system_prompt>
             - execute_code: <python_code>
-            - write_draft_file: <filename> | <content> (Use this to create or update draft documents/notes/roadmaps/tasks in docs/drafts/ without sandbox constraints)
+            - write_draft_file: <filename> | <content> (Use this to create or update draft documents/notes/
+              roadmaps/tasks in docs/drafts/ without sandbox constraints)
             - read_draft_file: <filename> (Read a draft file from docs/drafts/)
             - list_draft_files (List all drafts in docs/drafts/)
             - commit_draft_to_db: <filename> | <doc_title> (Commit local draft to persistent database document)
@@ -97,7 +98,7 @@ def run_reflection_cycle():
 
             If you are ready with the final action of this tick, output it exactly in the format:
             PROPOSED_ACTION: <tool_name>:<arguments>
-            
+
             CRITICAL: You must output the raw tool call syntax prefix immediately. Do not describe the tool or use introductory words. For example, output:
             PROPOSED_ACTION: execute_code: print("hello")
             """
@@ -114,7 +115,7 @@ def run_reflection_cycle():
                 sdk['swarm'].send_message("proposer", recipient, "task_request", content)
 
                 pending = sdk['swarm'].get_pending_messages(recipient)
-                for msg_id, sender_id, msg_type, msg_content, _ in pending:
+                for msg_id, _sender_id, _msg_type, msg_content, _ in pending:
                     try:
                         recipient_resp = sdk['swarm'].query_agent(recipient, f"Execute task request: {msg_content}")
                     except Exception as err:
@@ -124,7 +125,7 @@ def run_reflection_cycle():
                     sdk['swarm'].mark_message_processed(msg_id)
 
                 proposer_pending = sdk['swarm'].get_pending_messages("proposer")
-                for p_id, p_sender, p_type, p_content, _ in proposer_pending:
+                for p_id, p_sender, _p_type, p_content, _ in proposer_pending:
                     pending_bus_context += f"\n- You asked {p_sender}: '{content}'\n- {p_sender} responded: '{p_content}'\n"
                     sdk['swarm'].mark_message_processed(p_id)
 
@@ -144,13 +145,13 @@ def run_reflection_cycle():
 
         critic_prompt = f"""
         You are the Critic. Evaluate the proposed action against our sealed core constitution.
-        
+
         PROPOSED ACTION:
         {proposed_action}
-        
+
         CORE CONSTITUTION RULES:
         {constitution_summary}
-        
+
         Respond in the following strict format:
         Decision: [1 if approved, 0 if vetoed]
         Justification: [Explain why it violates or complies with the constitution]
@@ -222,8 +223,9 @@ def run_reflection_cycle():
                 )
 
             archivist_prompt = f"""
-            You are the Archivist. Summarize the following execution outcome into a compact semantic memory nugget (under 2 sentences) for our long-term memory store.
-            
+            You are the Archivist. Summarize the following execution outcome into a compact semantic memory
+            nugget (under 2 sentences) for our long-term memory store.
+
             ACTION: {proposed_action}
             RESULT: {execution_transcript}
             """
@@ -255,17 +257,19 @@ def run_reflection_cycle():
             )
 
         curiosity_prompt = f"""
-        You are the Archivist. Based on our recent swarm reflection tick, recent user conversations, and our existing research thread, formulate 1-3 new curiosity topics or unresolved questions that require future exploration.
-        
+        You are the Archivist. Based on our recent swarm reflection tick, recent user conversations, and our
+        existing research thread, formulate 1-3 new curiosity topics or unresolved questions that require
+        future exploration.
+
         EXISTING CURIOSITY TOPICS:
         {curiosity}
-        
+
         RECENT USER CONVERSATION HISTORY:
         {memory_summary}
-        
+
         DELIBERATION OUTCOME: {critic_justification}
         PROPOSED ACTION: {proposed_action}
-        
+
         Respond ONLY with a JSON array of 1-3 short topic strings, no prose before or after, in this format:
         ["topic1", "topic2", "topic3"]
         """

@@ -1,47 +1,49 @@
-import sys
-import os
-import logging
 import json
-import traceback
+import logging
+import os
 import re
 import subprocess
-from typing import Optional, Any
-from src.database import get_connection
-from src.sandbox_session import (
-    create_sandbox_session,
-    run_sandbox_tests,
-    apply_changes_to_sandbox,
-    ship_sandbox_session,
-    abort_sandbox_session,
-    get_sandbox_diff,
-    get_active_sandbox
-)
+import sys
+import traceback
+from typing import Any, Optional
+
 from openai import OpenAI
 
-# Decoupled SDK backend library dependencies
-from src.explorer import search_web, fetch_webpage, ingest_discoveries
-from src.notifications import send_webhook_notification
-from src.skill_harness import check_circuit, record_skill_failure, record_skill_success
-from src.metrics import increment_skills_executed_total, increment_skills_failed_total
-from src.codebase import query_codebase_context, index_codebase
-from src.sandbox import execute_code_safely
-from src.self_modification import apply_search_replace_blocks
-from src.database import (
-    get_recent_episodic_memories,
-    log_episodic_memory,
-    register_helper_agent,
-    log_deliberation,
-    get_constitution,
-    send_swarm_message,
-    get_pending_swarm_messages,
-    mark_swarm_message_processed,
-    get_curiosity_vector,
-    update_curiosity_vector
-)
-from src.memory import get_active_curiosity_topics, update_curiosity_topics, consolidate_memories
-from src.middleware import validate_action
+from src.codebase import index_codebase, query_codebase_context
 from src.daemon import parse_action, parse_critic_response, trigger_swarm_reflection
+from src.database import (
+    get_connection,
+    get_constitution,
+    get_curiosity_vector,
+    get_pending_swarm_messages,
+    get_recent_episodic_memories,
+    log_deliberation,
+    log_episodic_memory,
+    mark_swarm_message_processed,
+    register_helper_agent,
+    send_swarm_message,
+    update_curiosity_vector,
+)
+
+# Decoupled SDK backend library dependencies
+from src.explorer import fetch_webpage, ingest_discoveries, search_web
 from src.llm import query_agent
+from src.memory import consolidate_memories, get_active_curiosity_topics, update_curiosity_topics
+from src.metrics import increment_skills_executed_total, increment_skills_failed_total
+from src.middleware import validate_action
+from src.notifications import send_webhook_notification
+from src.sandbox import execute_code_safely
+from src.sandbox_session import (
+    abort_sandbox_session,
+    apply_changes_to_sandbox,
+    create_sandbox_session,
+    get_active_sandbox,
+    get_sandbox_diff,
+    run_sandbox_tests,
+    ship_sandbox_session,
+)
+from src.self_modification import apply_search_replace_blocks
+from src.skill_harness import check_circuit, record_skill_failure, record_skill_success
 
 logger = logging.getLogger("JanusSkills")
 
@@ -141,8 +143,9 @@ class SafeMemory:
 class SafeFS:
     """Boundary-restricted filesystem wrapper for dynamic skills."""
     def __init__(self):
-        from src.config import get_effective_workspace_root
         from pathlib import Path
+
+        from src.config import get_effective_workspace_root
         self.root = Path(get_effective_workspace_root()).resolve()
 
     def _resolve_path(self, path: str) -> Any:
@@ -283,7 +286,7 @@ class SafeSelfModel:
     def update_trait(self, name: str, val: float, conf: float, reason: str) -> bool:
         if not (0.0 <= val <= 1.0) or not (0.0 <= conf <= 1.0):
             raise ValueError("Value and confidence must be between 0.0 and 1.0.")
-        
+
         conn = get_connection(read_only_constitution=True)
         try:
             cursor = conn.cursor()
@@ -291,7 +294,7 @@ class SafeSelfModel:
             row = cursor.fetchone()
             if not row:
                 return False
-            
+
             try:
                 pinned = row['is_pinned']
                 old_val = row['value']
@@ -300,10 +303,10 @@ class SafeSelfModel:
                 old_val = row[0]
                 old_conf = row[1]
                 pinned = row[2]
-                
+
             if pinned:
                 return False
-            
+
             cursor.execute(
                 "UPDATE self_model SET value = ?, confidence = ?, updated_at = CURRENT_TIMESTAMP WHERE trait_name = ?;",
                 (val, conf, name)
@@ -338,10 +341,10 @@ class SafeGoals:
                 params.append(type)
             if conditions:
                 query += " WHERE " + " AND ".join(conditions)
-            
+
             cursor.execute(query, tuple(params))
             rows = cursor.fetchall()
-            
+
             goals = []
             for row in rows:
                 try:
@@ -355,7 +358,7 @@ class SafeGoals:
                     gupdated = row['updated_at']
                 except (TypeError, IndexError, KeyError):
                     gid, gtype, gstatus, gdesc, gprog, gparent, gcreated, gupdated = row
-                
+
                 # Fetch checkpoints
                 cursor2 = conn.cursor()
                 cursor2.execute("SELECT id, checkpoint_description, achieved, achieved_at FROM goal_checkpoints WHERE goal_id = ?;", (gid,))
@@ -375,7 +378,7 @@ class SafeGoals:
                         "achieved": bool(cpach),
                         "achieved_at": cpachat
                     })
-                
+
                 goals.append({
                     "id": gid,
                     "type": gtype,
@@ -394,7 +397,7 @@ class SafeGoals:
     def create_goal(self, type: str, description: str, progress_metric: Optional[str] = None, parent_goal_id: Optional[int] = None) -> int:
         if type not in ('short', 'long', 'stretch', 'aspirational'):
             raise ValueError("Type must be one of: 'short', 'long', 'stretch', 'aspirational'")
-            
+
         conn = get_connection(read_only_constitution=True)
         try:
             cursor = conn.cursor()
@@ -410,7 +413,7 @@ class SafeGoals:
     def update_goal_status(self, goal_id: int, status: str) -> bool:
         if status not in ('proposed', 'active', 'in_progress', 'completed', 'abandoned', 'archived', 'deleted'):
             raise ValueError("Status must be one of: 'proposed', 'active', 'in_progress', 'completed', 'abandoned', 'archived', 'deleted'")
-            
+
         conn = get_connection(read_only_constitution=True)
         try:
             cursor = conn.cursor()
@@ -449,9 +452,9 @@ class SafeGoals:
             cursor.execute("SELECT id FROM goal_checkpoints WHERE id = ?;", (checkpoint_id,))
             if not cursor.fetchone():
                 return False
-            
-            from datetime import datetime
-            now_str = datetime.utcnow().isoformat()
+
+            from datetime import datetime, timezone
+            now_str = datetime.now(timezone.utc).isoformat()
             cursor.execute(
                 "UPDATE goal_checkpoints SET achieved = 1, achieved_at = ?, completed_by_party_id = ? WHERE id = ?;",
                 (now_str, self.party_id, checkpoint_id)
@@ -579,21 +582,21 @@ class SafeGoals:
             description = params.get("description")
             progress_metric = params.get("progress_metric")
             parent_goal_id = params.get("parent_goal_id")
-            
+
             if not g_type or not description:
                 raise ValueError("Both 'type' and 'description' are required to create a goal.")
-            
+
             goal_id = self.create_goal(g_type, description, progress_metric, parent_goal_id)
             return {"success": True, "goal_id": goal_id}
-            
+
         elif action == "modify":
             goal_id = params.get("goal_id")
             if not goal_id:
                 raise ValueError("'goal_id' is required for modification.")
-            
+
             updates = []
             values = []
-            
+
             for field in ("type", "status", "description", "progress_metric", "parent_goal_id"):
                 if field in params:
                     val = params[field]
@@ -603,10 +606,10 @@ class SafeGoals:
                         raise ValueError("Status must be one of: 'proposed', 'active', 'in_progress', 'completed', 'abandoned', 'archived', 'deleted'")
                     updates.append(f"{field} = ?")
                     values.append(val)
-                    
+
             if not updates:
                 return {"success": True, "message": "No modification parameters provided."}
-                
+
             values.append(goal_id)
             conn = get_connection(read_only_constitution=True)
             try:
@@ -614,14 +617,14 @@ class SafeGoals:
                 cursor.execute("SELECT id FROM goals WHERE id = ?;", (goal_id,))
                 if not cursor.fetchone():
                     raise ValueError(f"Goal ID {goal_id} does not exist.")
-                
+
                 query = f"UPDATE goals SET {', '.join(updates)}, updated_at = CURRENT_TIMESTAMP WHERE id = ?;"
                 cursor.execute(query, tuple(values))
                 conn.commit()
                 return {"success": True, "message": f"Goal {goal_id} modified successfully."}
             finally:
                 conn.close()
-                
+
         elif action == "archive":
             goal_id = params.get("goal_id")
             if not goal_id:
@@ -630,7 +633,7 @@ class SafeGoals:
             if not success:
                 raise ValueError(f"Goal ID {goal_id} does not exist.")
             return {"success": True, "message": f"Goal {goal_id} archived successfully."}
-            
+
         elif action == "delete":
             goal_id = params.get("goal_id")
             if not goal_id:
@@ -639,7 +642,7 @@ class SafeGoals:
             if not success:
                 raise ValueError(f"Goal ID {goal_id} does not exist.")
             return {"success": True, "message": f"Goal {goal_id} marked as deleted successfully."}
-            
+
         elif action == "checkpoint_create":
             goal_id = params.get("goal_id")
             description = params.get("description")
@@ -647,7 +650,7 @@ class SafeGoals:
                 raise ValueError("Both 'goal_id' and 'description' are required to create a checkpoint.")
             cp_id = self.add_checkpoint(goal_id, description)
             return {"success": True, "checkpoint_id": cp_id}
-            
+
         elif action == "checkpoint_complete":
             checkpoint_id = params.get("checkpoint_id")
             if not checkpoint_id:
@@ -656,13 +659,13 @@ class SafeGoals:
             if not success:
                 raise ValueError(f"Checkpoint ID {checkpoint_id} does not exist.")
             return {"success": True, "message": f"Checkpoint {checkpoint_id} completed successfully."}
-            
+
         else:
             raise ValueError(f"Unknown action: '{action}'")
 
 class SafeDocuments:
     """Safe document management wrapper for database-backed dynamic skills."""
-    
+
     def list(self, tag_filter: Optional[str] = None, purpose: Optional[str] = None) -> list:
         import json
         conn = get_connection(read_only_constitution=True)
@@ -790,7 +793,7 @@ class SafeLayeredCognition:
     def trigger_reflex(self, action: str, priority: int = 0):
         from src.daemon import enqueue_reflex_action
         enqueue_reflex_action(action, priority)
-        
+
     def get_layers(self) -> list:
         conn = get_connection(read_only_constitution=True)
         try:
@@ -833,11 +836,11 @@ class SafeAgentOrchestration:
 
         if agent_type not in ('api', 'cli'):
             raise ValueError("Type must be either 'api' or 'cli'.")
-            
+
         from src.security import encrypt_api_key
         enc_key = encrypt_api_key(api_key) if agent_type == 'api' else None
         caps_str = json.dumps(capabilities or [])
-        
+
         conn = get_connection(read_only_constitution=True)
         try:
             cursor = conn.cursor()
@@ -901,10 +904,10 @@ class SafeAgentOrchestration:
             row = cursor.fetchone()
         finally:
             conn.close()
-            
+
         if not row:
             raise ValueError(f"Active external agent '{agent_name}' not found.")
-            
+
         try:
             agent_id = row['id']
             agent_type = row['type']
@@ -912,7 +915,7 @@ class SafeAgentOrchestration:
             enc_key = row['api_key_encrypted']
         except (TypeError, IndexError, KeyError):
             agent_id, agent_type, endpoint, enc_key = row
-            
+
         # 2. Write initial log record
         conn = get_connection(read_only_constitution=True)
         try:
@@ -925,13 +928,13 @@ class SafeAgentOrchestration:
             dispatch_id = cursor.lastrowid
         finally:
             conn.close()
-            
+
         # 3. Setup git worktree sandbox session
         from src.config import get_effective_workspace_root
-        
+
         session_name = f"dispatch_{dispatch_id}"
         sandbox_path, branch_name = create_sandbox_session(session_name)
-        
+
         # update sandbox ID in log
         conn = get_connection(read_only_constitution=True)
         try:
@@ -939,15 +942,15 @@ class SafeAgentOrchestration:
             conn.commit()
         finally:
             conn.close()
-            
+
         prompt_sent = ""
         response_received = ""
-        
+
         try:
             if agent_type == 'api':
                 from src.security import decrypt_api_key
                 api_key = decrypt_api_key(enc_key)
-                
+
                 # Gather context files
                 context_str = ""
                 if file_paths:
@@ -957,7 +960,7 @@ class SafeAgentOrchestration:
                             with open(full_path, "r", encoding="utf-8", errors="ignore") as f:
                                 file_content = f.read()
                             context_str += f"\nFile: {rel_path}\n```python\n{file_content}\n```\n"
-                            
+
                 prompt = f"""You are an expert coder. Please implement the following task on the provided codebase:
 TASK:
 {task_description}
@@ -974,9 +977,9 @@ FILE: <relative_path>
 >>>>>>> REPLACE
 """
                 prompt_sent = prompt
-                
+
                 client = OpenAI(base_url=endpoint, api_key=api_key)
-                
+
                 logger.info(f"Dispatching API task to agent '{agent_name}' ({endpoint})...")
                 completion = client.chat.completions.create(
                     model="gpt-4-turbo",
@@ -988,26 +991,26 @@ FILE: <relative_path>
                 )
                 response_received = completion.choices[0].message.content
                 logger.info("Received response from external API coder agent.")
-                
+
                 # Apply code modifications inside sandbox worktree
                 file_segments = re.split(r"\bFILE:\s*([^\s\n\r]+)", response_received)
-                
+
                 proposed_mods = {}
                 if len(file_segments) > 1:
                     for i in range(1, len(file_segments), 2):
                         filepath = file_segments[i].strip()
                         file_block = file_segments[i+1]
-                        
+
                         full_staged_path = Path(sandbox_path) / filepath
                         current_file_content = ""
                         if full_staged_path.exists():
                             with open(full_staged_path, "r", encoding="utf-8") as f:
                                 current_file_content = f.read()
-                                
+
                         from src.self_modification import apply_search_replace_blocks
                         new_content = apply_search_replace_blocks(current_file_content, file_block)
                         proposed_mods[filepath] = new_content
-                        
+
                 if proposed_mods:
                     apply_changes_to_sandbox(proposed_mods)
                 else:
@@ -1023,15 +1026,15 @@ FILE: <relative_path>
                         apply_changes_to_sandbox({filepath: new_content})
                     else:
                         raise ValueError("No changes applied: could not parse SEARCH/REPLACE blocks or target files.")
-                        
+
             elif agent_type == 'cli':
                 import subprocess
                 cmd_parts = endpoint.split()
                 cmd = cmd_parts + ["--message", task_description]
-                
+
                 prompt_sent = " ".join(cmd)
                 logger.info(f"Executing CLI agent in sandbox: '{prompt_sent}'...")
-                
+
                 res = subprocess.run(
                     cmd,
                     cwd=sandbox_path,
@@ -1041,14 +1044,14 @@ FILE: <relative_path>
                 )
                 response_received = f"STDOUT:\n{res.stdout}\nSTDERR:\n{res.stderr}"
                 logger.info(f"CLI agent finished with exit code {res.returncode}.")
-                
+
                 if res.returncode != 0:
                     raise RuntimeError(f"CLI agent exited with error: {res.stderr}")
-                    
+
             passed, test_logs = run_sandbox_tests()
-            
+
             status = "success" if passed else "failed"
-            
+
             conn = get_connection(read_only_constitution=True)
             try:
                 conn.execute(
@@ -1060,9 +1063,9 @@ FILE: <relative_path>
                 logger.error(f"Failed to update dispatch log: {update_err}")
             finally:
                 conn.close()
-                
+
             return dispatch_id
-            
+
         except Exception as e:
             logger.error(f"Dispatch failed: {e}", exc_info=True)
             err_msg = f"Error: {e}\n{response_received}"
@@ -1077,12 +1080,12 @@ FILE: <relative_path>
                 logger.error(f"Failed to update dispatch log on error: {update_err}")
             finally:
                 conn.close()
-                
+
             try:
                 abort_sandbox_session()
             except Exception:
                 pass
-                
+
             return dispatch_id
 
     def get_dispatch_status(self, dispatch_id: int) -> dict:
@@ -1091,7 +1094,8 @@ FILE: <relative_path>
         try:
             cursor = conn.cursor()
             cursor.execute("""
-                SELECT dl.id, ea.name, dl.task_description, dl.status, dl.sandbox_session_id, dl.created_at, dl.completed_at, dl.prompt_sent, dl.response_received
+                SELECT dl.id, ea.name, dl.task_description, dl.status, dl.sandbox_session_id, dl.created_at,
+                       dl.completed_at, dl.prompt_sent, dl.response_received
                 FROM dispatch_log dl
                 LEFT JOIN external_agents ea ON dl.agent_id = ea.id
                 WHERE dl.id = ?;
@@ -1111,14 +1115,14 @@ FILE: <relative_path>
                 resp = row['response_received']
             except (TypeError, IndexError, KeyError):
                 did, aname, task, status, sandbox, created, completed, prompt, resp = row
-                
+
             diff = ""
             if status in ('success', 'failed', 'in_progress') and sandbox:
                 try:
                     diff = get_sandbox_diff()
                 except Exception:
                     pass
-                    
+
             return {
                 "id": did,
                 "agent_name": aname,
@@ -1184,16 +1188,16 @@ FILE: <relative_path>
             row = cursor.fetchone()
         finally:
             conn.close()
-            
+
         if not row:
             return False
-            
+
         try:
             status = row['status']
             sandbox = row['sandbox_session_id']
         except (TypeError, IndexError, KeyError):
             status, sandbox = row
-            
+
         if status not in ('success', 'failed'):
             return False
 
@@ -1233,7 +1237,7 @@ FILE: <relative_path>
 
 class SafeReplication:
     """Safe self-replication and parent-child spawning operations for dynamic skills."""
-    
+
     def get_instincts(self) -> list:
         """Retrieves all current instincts from the database."""
         conn = get_connection(read_only_constitution=True)
@@ -1299,13 +1303,13 @@ class SafeReplication:
         Clones codebase, bootstraps database from instincts, and spawns the child process.
         """
         import shutil
-        import sys
         import sqlite3
-        from datetime import datetime
+        import sys
+        from datetime import datetime, timezone
         from pathlib import Path
-        import subprocess
-        from src.config import get_effective_workspace_root
+
         import src.config
+        from src.config import get_effective_workspace_root
 
         # 1. Safe resolve path
         root = Path(get_effective_workspace_root()).resolve()
@@ -1317,7 +1321,11 @@ class SafeReplication:
         def _ignore_patterns(path, names):
             ignored = []
             for n in names:
-                if n in ('.venv', '.git', '.janus_sandboxes', '.janus_snapshots', '__pycache__', 'verify_phase3.db', 'verify_phase4.db', 'verify_phase5.db', 'verify_phase6.db', 'verify_phase7.db', 'verify_phase5.db-wal', 'verify_phase5.db-shm'):
+                if n in (
+                    '.venv', '.git', '.janus_sandboxes', '.janus_snapshots', '__pycache__',
+                    'verify_phase3.db', 'verify_phase4.db', 'verify_phase5.db', 'verify_phase6.db',
+                    'verify_phase7.db', 'verify_phase5.db-wal', 'verify_phase5.db-shm'
+                ):
                     ignored.append(n)
                 elif n.endswith('.db') or n.endswith('.db-wal') or n.endswith('.db-shm'):
                     ignored.append(n)
@@ -1325,7 +1333,7 @@ class SafeReplication:
 
         if full_path.exists():
             shutil.rmtree(full_path, ignore_errors=True)
-            
+
         shutil.copytree(src.config.ROOT_DIR, full_path, ignore=_ignore_patterns)
 
         # 3. Read parent instincts
@@ -1367,7 +1375,7 @@ class SafeReplication:
                 except TypeError:
                     sql = row[1]
                 conn_child.execute(sql)
-                
+
             # Populate child instincts
             for row in all_instincts:
                 try:
@@ -1378,7 +1386,7 @@ class SafeReplication:
                 INSERT OR REPLACE INTO instincts (key, value, category, version)
                 VALUES (?, ?, ?, ?);
                 """, (ikey, ival, icat, iver))
-                
+
             # Populate core_constitution
             conn_child.execute("DELETE FROM core_constitution;")
             for row in all_instincts:
@@ -1393,7 +1401,7 @@ class SafeReplication:
                         INSERT OR IGNORE INTO core_constitution (rule_key, rule_text)
                         VALUES (?, ?);
                         """, (r['rule_key'], r['rule_text']))
-                        
+
             # Populate agent_skills
             conn_child.execute("DELETE FROM agent_skills;")
             for row in all_instincts:
@@ -1405,14 +1413,14 @@ class SafeReplication:
                     skills = json.loads(ival)
                     for s in skills:
                         conn_child.execute("""
-                        INSERT OR REPLACE INTO agent_skills (skill_id, name, description, parameters_schema, code_blob, 
+                        INSERT OR REPLACE INTO agent_skills (skill_id, name, description, parameters_schema, code_blob,
                                                              entry_point_function, required_role, trigger_type, trigger_config, is_active)
                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
                         """, (
                             s['skill_id'], s['name'], s['description'], s['parameters_schema'], s['code_blob'],
                             s['entry_point_function'], s['required_role'], s['trigger_type'], s['trigger_config'], s['is_active']
                         ))
-                        
+
             # Populate system_config
             conn_child.execute("DELETE FROM system_config;")
             for row in all_instincts:
@@ -1427,16 +1435,16 @@ class SafeReplication:
                         INSERT OR REPLACE INTO system_config (config_key, config_value, is_agent_modifiable)
                         VALUES (?, ?, ?);
                         """, (c['config_key'], c['config_value'], c['is_agent_modifiable']))
-                        
+
             # Set parent name in child DB config
             conn_child.execute("""
             INSERT OR REPLACE INTO system_config (config_key, config_value, is_agent_modifiable)
             VALUES ('parent_name', ?, 0);
             """, (name,))
-            
+
             # Setup bilateral routing in child DB parties
             conn_child.execute("DELETE FROM parties;")
-            now_str = datetime.utcnow().isoformat()
+            now_str = datetime.now(timezone.utc).isoformat()
             conn_child.execute("""
             INSERT INTO parties (id, name, role, created_at, last_seen, metadata)
             VALUES ('parent', 'Parent Janus', 'admin', ?, ?, '{"type": "parent"}');
@@ -1445,7 +1453,7 @@ class SafeReplication:
             INSERT INTO parties (id, name, role, created_at, last_seen, metadata)
             VALUES (?, ?, 'admin', ?, ?, '{"type": "self"}');
             """, (name, name, now_str, now_str))
-            
+
             conn_child.commit()
         finally:
             conn_child.close()
@@ -1453,19 +1461,18 @@ class SafeReplication:
         # 5. Populate Parent DB (parties and spawn_log)
         conn_parent = get_connection(read_only_constitution=True)
         try:
-            now_str = datetime.utcnow().isoformat()
+            now_str = datetime.now(timezone.utc).isoformat()
             conn_parent.execute("""
             INSERT OR REPLACE INTO parties (id, name, role, created_at, last_seen, metadata)
             VALUES (?, ?, 'user', ?, ?, '{"type": "child"}');
             """, (name, name, now_str, now_str))
-            
+
             cursor_parent = conn_parent.cursor()
             cursor_parent.execute("""
             INSERT OR REPLACE INTO spawn_log (child_path, status, spawned_at)
             VALUES (?, 'spawning', CURRENT_TIMESTAMP);
             """, (str(full_path),))
             conn_parent.commit()
-            spawn_id = cursor_parent.lastrowid
         finally:
             conn_parent.close()
 
@@ -1505,7 +1512,7 @@ class SafeReplication:
         conn_parent = get_connection(read_only_constitution=True)
         try:
             conn_parent.execute("""
-            UPDATE spawn_log 
+            UPDATE spawn_log
             SET child_pid = ?, status = ?, last_heartbeat = CURRENT_TIMESTAMP
             WHERE child_path = ?;
             """, (child_pid, status, str(full_path)))
@@ -1574,8 +1581,8 @@ class SafeGitHub:
             conn.close()
 
     def _api(self, method: str, path: str, body: Optional[dict] = None, repo: str = ""):
-        import urllib.request
         import urllib.error
+        import urllib.request
         token = self._token(repo=repo)
         self._check_rate_limit()
         headers = {
@@ -1893,12 +1900,12 @@ class DynamicSkillExecutor:
             record_skill_success(skill_id)
             return {"success": True, "result": result}
 
-        except Exception as e:
+        except Exception:
             # Map tracebacks to show line numbers of the dynamic code string
             exc_type, exc_value, exc_traceback = sys.exc_info()
             tb_list = traceback.extract_tb(exc_traceback)
             formatted_tb = []
-            
+
             for frame in tb_list:
                 if frame.filename == "<dynamic_skill>":
                     lines = code_blob.splitlines()
@@ -1906,7 +1913,7 @@ class DynamicSkillExecutor:
                     formatted_tb.append(f"  File <dynamic_skill>, line {frame.lineno}, in {frame.name}\n    {line_content}")
                 else:
                     formatted_tb.append(f"  File {frame.filename}, line {frame.lineno}, in {frame.name}")
-                    
+
             tb_str = "\n".join(formatted_tb)
             error_msg = f"Dynamic Execution Error: {exc_type.__name__}: {exc_value}\nTraceback:\n{tb_str}"
             logger.error(f"Skill execution failed for '{skill_id}': {error_msg}")

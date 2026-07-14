@@ -222,8 +222,8 @@ def test_llm_calls_total_increments_on_success(mock_create):
 
 @patch("openai.resources.chat.completions.Completions.create")
 def test_llm_calls_failed_total_increments_on_retry_exhaustion(mock_create, monkeypatch):
-    from src.metrics import _get_counter
     import src.llm
+    from src.metrics import _get_counter
 
     monkeypatch.setattr(src.llm.time, "sleep", lambda *_a, **_kw: None)
     mock_create.side_effect = RuntimeError("connection refused")
@@ -239,8 +239,8 @@ def test_llm_calls_failed_total_increments_on_retry_exhaustion(mock_create, monk
 
 
 def test_llm_calls_failed_total_increments_on_billing_violation():
-    from src.metrics import _get_counter
     from src.llm import BillingViolationError
+    from src.metrics import _get_counter
 
     conn = get_connection(read_only_constitution=False)
     conn.execute(

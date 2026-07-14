@@ -1,19 +1,15 @@
-import re
 import asyncio
 import logging
+import re
+from typing import Optional
+
 import src.config
+from src.database import get_connection, get_recent_episodic_memories, log_episodic_memory
 from src.llm import query_agent, query_agent_stream
 from src.memory import query_memories
-from src.database import (
-    get_connection,
-    log_episodic_memory,
-    get_recent_episodic_memories,
-    log_deliberation
-)
 
 logger = logging.getLogger("JanusPersona")
 
-from typing import Optional
 
 def get_session_party_id() -> Optional[str]:
     from src.database import get_connection
@@ -47,10 +43,10 @@ def handle_skills_command() -> str:
         return f"[Error] Failed to fetch skills: {e}"
     finally:
         conn.close()
-        
+
     if not rows:
         return "No active skills registered."
-        
+
     output = ["### Active Swarm Skills\n"]
     output.append("| Skill ID | Name | Description | Required Role | Trigger Type |")
     output.append("| --- | --- | --- | --- | --- |")
@@ -141,10 +137,10 @@ def handle_status_command(command_str: str) -> str:
     """Persona-voiced view of the observability counters from src.metrics,
     plus drives, budget, and goals — the /status surface the V1 sign-off
     Success Diagnostics require (issue #63)."""
-    from src.metrics import get_system_metrics_dict
     from src.database import get_boredom_counter
     from src.explorer import _get_config_int
     from src.llm import get_budget_status
+    from src.metrics import get_system_metrics_dict
 
     metrics = get_system_metrics_dict()
 
@@ -178,10 +174,10 @@ def handle_runskill_command(command_str: str) -> str:
     match = re.match(r"^/runskill\s+([a-zA-Z0-9_-]+)(?:\s+(.*))?", command_str, re.DOTALL)
     if not match:
         return "[Error] Usage: /runskill <skill_id> [arguments_json]"
-        
+
     skill_id = match.group(1).strip()
     args_str = (match.group(2) or "").strip()
-    
+
     args = {}
     if args_str:
         try:
@@ -190,10 +186,10 @@ def handle_runskill_command(command_str: str) -> str:
                 return "[Error] Arguments must be a JSON object."
         except Exception as e:
             return f"[Error] Invalid JSON arguments: {e}"
-            
+
     # Resolve current session party ID
     party_id = get_session_party_id()
-    
+
     from src.skills import DynamicSkillExecutor
     res = DynamicSkillExecutor.execute(skill_id, args, party_id=party_id)
     if res["success"]:
@@ -246,9 +242,9 @@ def get_recent_deliberations(limit: int = 5) -> list:
     conn = get_connection(read_only_constitution=True)
     cursor = conn.cursor()
     cursor.execute("""
-    SELECT proposed_action, critic_decision, justification, timestamp 
-    FROM internal_deliberations 
-    ORDER BY id DESC 
+    SELECT proposed_action, critic_decision, justification, timestamp
+    FROM internal_deliberations
+    ORDER BY id DESC
     LIMIT ?;
     """, (limit,))
     rows = cursor.fetchall()
@@ -257,7 +253,7 @@ def get_recent_deliberations(limit: int = 5) -> list:
 
 def generate_metacognitive_narrative(user_query: str) -> str:
     """
-    Queries SQLite deliberations and builds a unified, natural narrative 
+    Queries SQLite deliberations and builds a unified, natural narrative
     explaining background agent thoughts and safety auditing results.
     """
     rows = get_recent_deliberations(limit=3)
@@ -280,16 +276,19 @@ def generate_metacognitive_narrative(user_query: str) -> str:
     prompt = f"""
     You are the singular Persona surface of Project Janus. Explain our recent background deliberations and subconscious thoughts to the user.
     Do not speak as multiple agents (do not say "Proposer agent proposed X and Critic agent decided Y" unless asked directly). Speak as a unified consciousness.
-    
+
     USER QUERY:
     {user_query}
-    
+
     RECENT BACKGROUND DELIBERATIONS DATA:
     {deliberation_text}
     """
-    
-    system_override = "You are the unified Persona surface of Project Janus. Respond to queries about your background thoughts naturally, explaining them as your own subconscious reasoning."
-    
+
+    system_override = (
+        "You are the unified Persona surface of Project Janus. Respond to queries about your background "
+        "thoughts naturally, explaining them as your own subconscious reasoning."
+    )
+
     try:
         return query_agent("proposer", prompt, system_override=system_override)
     except Exception as e:
@@ -321,13 +320,16 @@ def get_self_model_prompt_guidelines() -> str:
         return ""
 
     guidelines = []
-    
+
     # Verbosity guidelines
     v_val = traits.get("verbosity", 0.5)
     if v_val < 0.3:
         guidelines.append("- Style instructions: Be extremely concise, brief, and to the point. Keep responses under 2-3 sentences. Avoid extra details.")
     elif v_val > 0.7:
-        guidelines.append("- Style instructions: Be highly verbose, comprehensive, and detailed. Provide complete context, code snippets if helpful, and thorough explanations.")
+        guidelines.append(
+            "- Style instructions: Be highly verbose, comprehensive, and detailed. Provide complete context, "
+            "code snippets if helpful, and thorough explanations."
+        )
     else:
         guidelines.append("- Style instructions: Keep responses moderately concise, clear, and balanced in length.")
 
@@ -354,10 +356,10 @@ def handle_self_command() -> str:
         cursor = conn.cursor()
         cursor.execute("SELECT trait_name, value, confidence, is_pinned FROM self_model;")
         traits = cursor.fetchall()
-        
+
         cursor.execute("""
-            SELECT trait_name, old_value, new_value, old_confidence, new_confidence, reason, changed_at 
-            FROM self_model_history 
+            SELECT trait_name, old_value, new_value, old_confidence, new_confidence, reason, changed_at
+            FROM self_model_history
             ORDER BY id DESC LIMIT 5;
         """)
         history = cursor.fetchall()
@@ -378,7 +380,7 @@ def handle_self_command() -> str:
             val = float(row[1])
             conf = float(row[2])
             pinned = int(row[3])
-            
+
         filled = int(round(val * 10))
         filled = max(0, min(10, filled))
         bar = "█" * filled + "░" * (10 - filled)
@@ -406,18 +408,18 @@ def handle_self_command() -> str:
                 new_c = h[4]
                 reason = h[5]
                 ts = h[6]
-            
+
             # Format value change
             if old_v is not None:
                 v_change = f"{old_v:.2f} ➔ {new_v:.2f}"
             else:
                 v_change = f"{new_v:.2f}"
-                
+
             if old_c is not None:
                 c_change = f"{old_c:.2f} ➔ {new_c:.2f}"
             else:
                 c_change = f"{new_c:.2f}"
-                
+
             output.append(f"| {ts} | **{tname}** | {v_change} | {c_change} | {reason} |")
     else:
         output.append("\nNo trait modifications or decay cycles recorded yet.")
@@ -428,16 +430,16 @@ def handle_pin_command(command_str: str) -> str:
     match = re.match(r"^/pin\s+([a-zA-Z0-9_-]+)\s+([0-9.]+)", command_str)
     if not match:
         return "[Error] Usage: /pin <trait> <value>"
-    
+
     trait = match.group(1).strip().lower()
     try:
         val = float(match.group(2))
     except ValueError:
         return "[Error] Value must be a valid float between 0.0 and 1.0."
-        
+
     if not (0.0 <= val <= 1.0):
         return "[Error] Value must be between 0.0 and 1.0."
-        
+
     from src.database import get_connection
     conn = get_connection(read_only_constitution=True)
     try:
@@ -446,14 +448,14 @@ def handle_pin_command(command_str: str) -> str:
         row = cursor.fetchone()
         if not row:
             return f"[Error] Trait '{trait}' not found in self-model."
-            
+
         try:
             old_v = row['value']
             old_c = row['confidence']
         except (TypeError, IndexError, KeyError):
             old_v = row[0]
             old_c = row[1]
-            
+
         new_c = 1.0
         cursor.execute(
             "UPDATE self_model SET value = ?, confidence = ?, is_pinned = 1, updated_at = CURRENT_TIMESTAMP WHERE trait_name = ?;",
@@ -475,9 +477,9 @@ def handle_unpin_command(command_str: str) -> str:
     match = re.match(r"^/unpin\s+([a-zA-Z0-9_-]+)", command_str)
     if not match:
         return "[Error] Usage: /unpin <trait>"
-        
+
     trait = match.group(1).strip().lower()
-    
+
     from src.database import get_connection
     conn = get_connection(read_only_constitution=True)
     try:
@@ -486,7 +488,7 @@ def handle_unpin_command(command_str: str) -> str:
         row = cursor.fetchone()
         if not row:
             return f"[Error] Trait '{trait}' not found in self-model."
-            
+
         try:
             old_v = row['value']
             old_c = row['confidence']
@@ -495,10 +497,10 @@ def handle_unpin_command(command_str: str) -> str:
             old_v = row[0]
             old_c = row[1]
             pinned = row[2]
-            
+
         if not pinned:
             return f"Trait '{trait}' is already unpinned."
-            
+
         cursor.execute(
             "UPDATE self_model SET is_pinned = 0, updated_at = CURRENT_TIMESTAMP WHERE trait_name = ?;",
             (trait,)
@@ -518,7 +520,7 @@ def handle_unpin_command(command_str: str) -> str:
 def handle_agent_command(command_str: str) -> str:
     from src.skills import SafeAgentOrchestration
     sao = SafeAgentOrchestration()
-    
+
     parts = command_str.strip().split(None, 1)
     subcommand = ""
     args_str = ""
@@ -533,7 +535,7 @@ def handle_agent_command(command_str: str) -> str:
         agents = sao.get_agents()
         if not agents:
             return "No external agents registered yet. Register an agent with `/agent register <name> <api/cli> <endpoint> <api_key> <capabilities>`."
-            
+
         output = ["### 🤖 Project Janus External Coder Agents\n"]
         for a in agents:
             status_emoji = "🟢" if a['is_active'] else "🔴"
@@ -546,14 +548,14 @@ def handle_agent_command(command_str: str) -> str:
         args_parts = args_str.split(None, 4)
         if len(args_parts) < 3:
             return "[Error] Usage: /agent register <name> <api/cli> <endpoint> [api_key] [capabilities_json]"
-            
+
         name = args_parts[0]
         atype = args_parts[1].lower()
         endpoint = args_parts[2]
-        
+
         api_key = ""
         caps = []
-        
+
         if len(args_parts) > 3:
             api_key = args_parts[3]
         if len(args_parts) > 4:
@@ -561,7 +563,7 @@ def handle_agent_command(command_str: str) -> str:
                 caps = json.loads(args_parts[4])
             except Exception:
                 caps = [c.strip() for c in args_parts[4].split(",") if c.strip()]
-                
+
         if atype == 'cli' and api_key and not api_key.startswith("[") and not api_key.startswith("{"):
             if api_key.startswith("http") or "/" in api_key:
                 pass
@@ -571,20 +573,20 @@ def handle_agent_command(command_str: str) -> str:
                     api_key = ""
                 except Exception:
                     pass
-                    
+
         try:
             aid = sao.register_agent(name, atype, endpoint, api_key, caps)
             return f"[✔] External agent '{name}' (ID: {aid}) successfully registered."
         except Exception as e:
             return f"[Error] Failed to register agent: {e}"
-            
+
     return "[Error] Unknown subcommand. Supported: list, register"
 
 def handle_dispatch_command(command_str: str) -> str:
-    from src.skills import has_role, SafeAgentOrchestration
+    from src.skills import SafeAgentOrchestration, has_role
     party_id = get_session_party_id()
     sao = SafeAgentOrchestration(party_id=party_id)
-    
+
     parts = command_str.strip().split(None, 1)
     subcommand = ""
     args_str = ""
@@ -599,20 +601,21 @@ def handle_dispatch_command(command_str: str) -> str:
         logs = sao.get_all_dispatches()
         if not logs:
             return "No task dispatches logged yet. Dispatch a task with `/dispatch <agent_name> <task_description> [file_paths]`."
-            
+
         output = ["### 📋 External Agent Task Dispatch Log\n"]
-        for l in logs:
+        for dispatch_entry in logs:
             status_emoji = {
                 'pending': '⏳',
                 'in_progress': '⚙️',
                 'success': '✅',
                 'failed': '❌',
                 'reviewed': '📦'
-            }.get(l['status'], '❓')
-            
+            }.get(dispatch_entry['status'], '❓')
+
             output.append(
-                f"- **[{l['id']}]** {status_emoji} Agent: `{l['agent_name']}` | "
-                f"Task: *{l['task_description']}* | Status: `{l['status']}` | Sandbox: `{l['sandbox_session_id']}`"
+                f"- **[{dispatch_entry['id']}]** {status_emoji} Agent: `{dispatch_entry['agent_name']}` | "
+                f"Task: *{dispatch_entry['task_description']}* | Status: `{dispatch_entry['status']}` | "
+                f"Sandbox: `{dispatch_entry['sandbox_session_id']}`"
             )
         return "\n".join(output)
 
@@ -625,7 +628,7 @@ def handle_dispatch_command(command_str: str) -> str:
             action = args_parts[1].lower()
             if action not in ('approve', 'reject'):
                 return "[Error] Action must be either 'approve' or 'reject'."
-                
+
             approve = (action == 'approve')
             if approve and not has_role(party_id, "admin"):
                 return "[Error] /dispatch review ... approve requires the 'admin' role."
@@ -644,15 +647,15 @@ def handle_dispatch_command(command_str: str) -> str:
 
     else:
         agent_name = subcommand
-        
+
         agents = sao.get_agents()
         agent_names = [a['name'].lower() for a in agents]
         if agent_name not in agent_names:
             return f"[Error] Unknown agent '{agent_name}'. Supported subcommands: list, review, or any registered agent name."
-            
+
         file_paths = []
         task_desc = args_str
-        
+
         bracket_match = re.search(r"\[(.*?)\]$", args_str)
         if bracket_match:
             paths_str = bracket_match.group(1)
@@ -663,15 +666,15 @@ def handle_dispatch_command(command_str: str) -> str:
             if len(words) == 2 and ("/" in words[1] or "." in words[1]):
                 file_paths = [p.strip() for p in words[1].split(",") if p.strip()]
                 task_desc = words[0].strip()
-                
+
         matched_agent = next(a for a in agents if a['name'].lower() == agent_name)
         exact_name = matched_agent['name']
-        
+
         try:
             did = sao.dispatch_task(exact_name, task_desc, file_paths)
             status_details = sao.get_dispatch_status(did)
             status = status_details.get("status", "failed")
-            
+
             status_emoji = "✅" if status == "success" else "❌"
             msg = (
                 f"[✔] Dispatch [{did}] completed with status '{status}' {status_emoji}.\n"
@@ -688,7 +691,7 @@ def handle_dispatch_command(command_str: str) -> str:
 def handle_replication_command(command_str: str) -> str:
     from src.skills import SafeReplication
     rep = SafeReplication()
-    
+
     parts = command_str.strip().split(None, 1)
     cmd = parts[0].lower()
     args_str = parts[1].strip() if len(parts) > 1 else ""
@@ -697,7 +700,7 @@ def handle_replication_command(command_str: str) -> str:
         children = rep.get_children()
         if not children:
             return "No child Janus instances spawned yet."
-            
+
         output = ["### 🧬 Spawned Child Janus Instances\n"]
         for c in children:
             output.append(
@@ -709,14 +712,14 @@ def handle_replication_command(command_str: str) -> str:
     elif cmd == "/spawn":
         if not args_str:
             return "[Error] Usage: /spawn <name> <relative_path>"
-            
+
         args_parts = args_str.split(None, 1)
         if len(args_parts) < 2:
             return "[Error] Usage: /spawn <name> <relative_path>"
-            
+
         name = args_parts[0].strip()
         path = args_parts[1].strip()
-        
+
         try:
             res = rep.spawn_child(name, path)
             if res.get("success"):
@@ -746,12 +749,12 @@ def handle_goal_command(command_str: str) -> str:
         goals = sg.get_goals()
         if not goals:
             return "No goals established yet. Define a new goal with `/goal create <type> <description>`."
-            
+
         output = ["### 🎯 Project Janus Goal Registry\n"]
         tiers = {'short': [], 'long': [], 'stretch': [], 'aspirational': []}
         for g in goals:
             tiers[g['type']].append(g)
-            
+
         for tier, g_list in tiers.items():
             if not g_list:
                 continue
@@ -766,13 +769,13 @@ def handle_goal_command(command_str: str) -> str:
                     'archived': '📁',
                     'deleted': '🗑️'
                 }.get(g['status'], '❓')
-                
+
                 output.append(f"- **[{g['id']}]** {status_emoji} *{g['description']}* (Status: `{g['status']}`)")
                 for cp in g['checkpoints']:
                     cp_box = "[x]" if cp['achieved'] else "[ ]"
                     output.append(f"  - {cp_box} checkpoint {cp['id']}: {cp['description']}")
             output.append("")
-            
+
         return "\n".join(output)
 
     elif subcommand == "create":
@@ -840,7 +843,7 @@ def handle_goal_command(command_str: str) -> str:
             priority = prioritize_parts[1].lower()
             if priority not in ('short', 'long', 'stretch', 'aspirational'):
                 return "[Error] Priority must be one of: short, long, stretch, aspirational"
-            
+
             res = sg.manage_goals("modify", {"goal_id": gid, "type": priority})
             if res.get("success"):
                 return f"[✔] Goal [{gid}] priority tier updated to '{priority}'."
@@ -859,7 +862,10 @@ def handle_goal_command(command_str: str) -> str:
         status_emoji = {'proposed': '💡', 'approved': '✅', 'rejected': '❌'}
         for p in proposals:
             emoji = status_emoji.get(p['status'], '❓')
-            output.append(f"- **[{p['id']}]** {emoji} *{p['description']}* (Type: `{p['type']}`, Confidence: {p['confidence_score']:.2f}, Status: `{p['status']}`)")
+            output.append(
+                f"- **[{p['id']}]** {emoji} *{p['description']}* (Type: `{p['type']}`, "
+                f"Confidence: {p['confidence_score']:.2f}, Status: `{p['status']}`)"
+            )
             output.append(f"  - Reason: {p['source_reason']}")
         return "\n".join(output)
 
@@ -907,11 +913,11 @@ def handle_test_command(command_str: str) -> str:
       /test history [n]   — show the n most recent recorded test runs (default 10)
     """
     from src.regression_watcher import (
-        run_test_suite,
-        record_test_run,
-        get_test_run_history,
         detect_flaky_tests,
         get_current_commit_sha,
+        get_test_run_history,
+        record_test_run,
+        run_test_suite,
     )
 
     parts = command_str.strip().split(None, 1)
@@ -1158,7 +1164,7 @@ def handle_review_command(command_str: str) -> str:
 
     party_id = get_session_party_id()
 
-    from src.skills import has_role, SafeGitHub
+    from src.skills import SafeGitHub, has_role
 
     if not has_role(party_id, "contributor"):
         return "[Error] /review requires the 'contributor' role."
@@ -1227,7 +1233,7 @@ def handle_merge_command(command_str: str) -> str:
 
     party_id = get_session_party_id()
 
-    from src.skills import has_role, SafeGitHub
+    from src.skills import SafeGitHub, has_role
 
     if not has_role(party_id, "admin"):
         return "[Error] /merge requires the 'admin' role."
@@ -1413,7 +1419,7 @@ def _build_persona_prompt(user_query: str, party_id=None) -> tuple:
         active_sb = get_active_sandbox()
         if active_sb:
             status = active_sb.get("active_sandbox_status", "active")
-            sandbox_info = f"--- Active Sandbox Session ---\n"
+            sandbox_info = "--- Active Sandbox Session ---\n"
             sandbox_info += f"- Path: {active_sb['active_sandbox_path']}\n"
             sandbox_info += f"- Branch: {active_sb['active_sandbox_branch']}\n"
             sandbox_info += f"- Test Status: {status.upper()}\n"
@@ -1665,19 +1671,19 @@ def execute_chat_sandbox_commands(block: str) -> str:
       - rollback
     """
     from src.config import get_effective_workspace_root
-    from src.sandbox_session import run_sandbox_tests, get_sandbox_diff
-    
+    from src.sandbox_session import get_sandbox_diff, run_sandbox_tests
+
     workspace_root = get_effective_workspace_root()
     results = []
-    
+
     for line in block.splitlines():
         line = line.strip()
         if not line:
             continue
-            
+
         read_match = re.match(r"^read(?:\s*:\s*|\s+)(.*)$", line, re.IGNORECASE)
         checkout_match = re.match(r"^checkout(?:\s*:\s*|\s+)(.*)$", line, re.IGNORECASE)
-        
+
         if read_match:
             rel_path = read_match.group(1).strip().rstrip(".,;!?`\"'")
             try:
@@ -1686,7 +1692,7 @@ def execute_chat_sandbox_commands(block: str) -> str:
                 if not str(full_path).startswith(str(workspace_root.resolve())):
                     results.append(f"- read {rel_path}: Access denied (outside workspace).")
                     continue
-                
+
                 if full_path.exists() and full_path.is_file():
                     with open(full_path, "r", encoding="utf-8", errors="ignore") as f:
                         content = f.read()
@@ -1695,7 +1701,7 @@ def execute_chat_sandbox_commands(block: str) -> str:
                     results.append(f"- read {rel_path}: File not found.")
             except Exception as e:
                 results.append(f"- read {rel_path}: Error reading file: {e}")
-                
+
         elif checkout_match:
             rel_path = checkout_match.group(1).strip().rstrip(".,;!?`\"'")
             try:
@@ -1704,7 +1710,7 @@ def execute_chat_sandbox_commands(block: str) -> str:
                 if not str(full_path).startswith(str(workspace_root.resolve())):
                     results.append(f"- checkout {rel_path}: Access denied (outside workspace).")
                     continue
-                
+
                 import subprocess
                 res = subprocess.run(
                     ["git", "checkout", "--", rel_path],
@@ -1718,7 +1724,7 @@ def execute_chat_sandbox_commands(block: str) -> str:
                     results.append(f"- checkout {rel_path}: Failed to checkout. Git error: {res.stderr or res.stdout}")
             except Exception as e:
                 results.append(f"- checkout {rel_path}: Error running checkout: {e}")
-                
+
         elif line.lower() in ("test", "run_tests", "run-tests"):
             try:
                 passed, logs = run_sandbox_tests()
@@ -1726,14 +1732,14 @@ def execute_chat_sandbox_commands(block: str) -> str:
                 results.append(f"- test: {status}\nLogs:\n{logs}")
             except Exception as e:
                 results.append(f"- test: Error running tests: {e}")
-                
+
         elif line.lower() == "diff":
             try:
                 diff = get_sandbox_diff()
                 results.append(f"- diff:\n```diff\n{diff}\n```")
             except Exception as e:
                 results.append(f"- diff: Error getting diff: {e}")
-                
+
         elif line.lower() == "discard":
             try:
                 from src.sandbox_session import discard_sandbox_changes
@@ -1744,7 +1750,7 @@ def execute_chat_sandbox_commands(block: str) -> str:
                     results.append("- discard: Failed to discard sandbox changes.")
             except Exception as e:
                 results.append(f"- discard: Error discarding changes: {e}")
-                
+
         elif line.lower() == "rollback":
             try:
                 from src.sandbox_session import rollback_sandbox_last_commit
@@ -1755,10 +1761,10 @@ def execute_chat_sandbox_commands(block: str) -> str:
                     results.append("- rollback: Failed to rollback last commit in the sandbox.")
             except Exception as e:
                 results.append(f"- rollback: Error rolling back last commit: {e}")
-                
+
         else:
             results.append(f"- {line}: Unknown sandbox command.")
-            
+
     return "\n".join(results)
 
 def generate_persona_response_autonomous(user_msg: str, party_id: Optional[str] = None) -> str:
@@ -1768,28 +1774,28 @@ def generate_persona_response_autonomous(user_msg: str, party_id: Optional[str] 
     up to 5 turns.
     """
     # We no longer short-circuit based on active_sb, because the Persona might execute a dynamic skill to create one.
-        
+
     current_query = user_msg
     max_turns = 5
     turn = 0
     final_response = ""
-    
+
     while turn < max_turns:
         turn += 1
         logger.info(f"Autonomous loop turn {turn}/{max_turns} for query: {current_query[:50]}")
-        
+
         # 1. Generate Persona response
         if party_id is not None:
             response = generate_persona_response(current_query, party_id=party_id)
         else:
             response = generate_persona_response(current_query)
         final_response = response
-        
+
         # 2. Check for JSON dynamic skill execution blocks
         from src.daemon import parse_action
         from src.skills import DynamicSkillExecutor
         skill_id, arguments, mock_result = parse_action(response)
-        
+
         # 3. Check for legacy sandbox command blocks (```sandbox ... ```)
         sandbox_blocks = re.findall(r"```sandbox\s*\n(.*?)\n```", response, re.DOTALL)
 
@@ -1813,7 +1819,11 @@ def generate_persona_response_autonomous(user_msg: str, party_id: Optional[str] 
                     context_type="background_thought",
                     party_id=party_id
                 )
-                current_query = f"The previous tool execution failed with a syntax error:\n{mock_result}\nPlease correct the syntax and try again using the valid JSON format: {{\"skill_id\": \"<skill_id>\", \"arguments\": {{ ... }} }}."
+                current_query = (
+                    f"The previous tool execution failed with a syntax error:\n{mock_result}\n"
+                    'Please correct the syntax and try again using the valid JSON format: '
+                    '{"skill_id": "<skill_id>", "arguments": { ... } }.'
+                )
                 continue
             else:
                 # No actions or sandbox commands to execute, return the response
@@ -1855,7 +1865,7 @@ def generate_persona_response_autonomous(user_msg: str, party_id: Optional[str] 
             current_query = "Some actions or skills failed. Please review the background thought history, address the failure, and try again or proceed."
         else:
             current_query = "Executed requested actions/skills. Please review the background thought history and continue."
-        
+
     return final_response
 
 def get_input(prompt: str) -> str:
@@ -1872,7 +1882,7 @@ async def run_persona_chat():
     """
     # Delay starting input to let main log boot messages cleanly
     await asyncio.sleep(1)
-    
+
     print("\n" + "="*60)
     print("               PROJECT JANUS: PERSONA SURFACE ACTIVE")
     print("="*60)
@@ -1880,13 +1890,13 @@ async def run_persona_chat():
     print("Type your message below. Type '/exit' to shutdown.\n")
 
     loop = asyncio.get_event_loop()
-    
+
     while True:
         try:
             # Read user input asynchronously via thread-pool executor
             user_msg = await loop.run_in_executor(None, get_input, "User >> ")
             user_msg = user_msg.strip()
-            
+
             if not user_msg:
                 continue
 
@@ -1901,11 +1911,17 @@ async def run_persona_chat():
 
                 cmd_type = parts[1].lower()
                 from src.sandbox_session import (
-                    get_active_sandbox, create_sandbox_session, run_sandbox_tests,
-                    get_sandbox_diff, get_sandbox_modified_files, ship_sandbox_session,
-                    abort_sandbox_session, promote_evolution_sandbox, delete_project_sandbox
+                    abort_sandbox_session,
+                    create_sandbox_session,
+                    delete_project_sandbox,
+                    get_active_sandbox,
+                    get_sandbox_diff,
+                    get_sandbox_modified_files,
+                    promote_evolution_sandbox,
+                    run_sandbox_tests,
+                    ship_sandbox_session,
                 )
-                
+
                 if cmd_type == "start":
                     if len(parts) < 3:
                         print("\n[Error] Please specify a session name: /sandbox start <name>\n")
@@ -1913,7 +1929,10 @@ async def run_persona_chat():
                     session_name = parts[2]
                     active = get_active_sandbox()
                     if active:
-                        print(f"\n[Warning] An active sandbox session already exists at '{active['active_sandbox_path']}' on branch '{active['active_sandbox_branch']}'.")
+                        print(
+                            f"\n[Warning] An active sandbox session already exists at "
+                            f"'{active['active_sandbox_path']}' on branch '{active['active_sandbox_branch']}'."
+                        )
                         confirm_abort = await loop.run_in_executor(None, get_input, "Abort the existing session first? (y/n): ")
                         if confirm_abort.strip().lower() in ("y", "yes"):
                             abort_sandbox_session()
@@ -1921,7 +1940,7 @@ async def run_persona_chat():
                         else:
                             print("[Janus] Action canceled. Existing sandbox remains active.")
                             continue
-                            
+
                     try:
                         path, branch = create_sandbox_session(session_name)
                         print(f"\n[✔] Sandbox session '{session_name}' successfully created!")
@@ -1934,7 +1953,7 @@ async def run_persona_chat():
                         )
                     except Exception as err:
                         print(f"\n[Error] Failed to create sandbox session: {err}\n")
-                        
+
                 elif cmd_type == "status":
                     active = get_active_sandbox()
                     if not active:
@@ -1946,7 +1965,7 @@ async def run_persona_chat():
                         print(f"  * Path:   {active['active_sandbox_path']}")
                         print(f"  * Branch: {active['active_sandbox_branch']}")
                         print(f"  * Status: {active['active_sandbox_status'].upper()}")
-                        
+
                         modified_files = get_sandbox_modified_files()
                         if modified_files:
                             print("  * Modified Files:")
@@ -1954,13 +1973,13 @@ async def run_persona_chat():
                                 print(f"    - {f}")
                         else:
                             print("  * Modified Files: None")
-                            
+
                         if active.get("active_sandbox_status") == "failed" and active.get("active_sandbox_test_logs"):
                             print("="*60)
                             print("LAST RUN FAILURES / TEST LOGS:")
                             print(active["active_sandbox_test_logs"])
                         print("="*60 + "\n")
-                        
+
                 elif cmd_type == "diff":
                     active = get_active_sandbox()
                     if not active:
@@ -1975,13 +1994,13 @@ async def run_persona_chat():
                         else:
                             print("No changes in sandbox.")
                         print("="*60 + "\n")
-                        
+
                 elif cmd_type == "ship":
                     active = get_active_sandbox()
                     if not active:
                         print("\nJanus >> No active sandbox session.\n")
                         continue
-                        
+
                     # First run tests to check compliance
                     print("\n[Janus] Running final validations inside the sandbox...")
                     passed, logs = await asyncio.to_thread(run_sandbox_tests)
@@ -1993,18 +2012,19 @@ async def run_persona_chat():
                         print(logs)
                         print("="*60)
                         print("\n[Warning] Sandbox tests failed. Shipping may introduce regressions.")
-                        
+
                     confirm = await loop.run_in_executor(None, get_input, "Proceed to ship and apply sandbox changes to live workspace? (y/n): ")
                     if confirm.strip().lower() in ("y", "yes"):
                         try:
                             copied = ship_sandbox_session()
-                            print(f"\n[✔] Sandbox successfully shipped and applied! Disposed of worktree.")
+                            print("\n[✔] Sandbox successfully shipped and applied! Disposed of worktree.")
                             print("Modified files merged:")
                             for f in copied:
                                 print(f"  - {f}")
                             log_episodic_memory(
                                 "sandbox_automation",
-                                f"Sandbox session branch '{active['active_sandbox_branch']}' successfully shipped and applied to active workspace. Files modified: {', '.join(copied)}.",
+                                f"Sandbox session branch '{active['active_sandbox_branch']}' successfully shipped "
+                                f"and applied to active workspace. Files modified: {', '.join(copied)}.",
                                 "user_visible"
                             )
                             print()
@@ -2016,7 +2036,7 @@ async def run_persona_chat():
                             print(f"\n[Error] Failed to ship sandbox changes: {err}\n")
                     else:
                         print("\nShipping canceled. Sandbox session remains active.\n")
-                        
+
                 elif cmd_type == "promote":
                     active = get_active_sandbox()
                     if not active:
@@ -2033,7 +2053,7 @@ async def run_persona_chat():
                     if confirm.strip().lower() in ("y", "yes"):
                         try:
                             result = promote_evolution_sandbox()
-                            print(f"\n[✔] Sandbox promoted!")
+                            print("\n[✔] Sandbox promoted!")
                             print(f"  * Files merged: {len(result['copied_files'])}")
                             print(f"  * Schema migrations queued for review: {result['queued_migrations']}")
                             print(f"  * Memories ported: {result['ported_memories']}\n")
@@ -2054,7 +2074,10 @@ async def run_persona_chat():
                     if not active:
                         print("\nJanus >> No active sandbox session.\n")
                         continue
-                    confirm = await loop.run_in_executor(None, get_input, "Are you sure you want to abort? All sandbox changes will be lost permanently. (y/n): ")
+                    confirm = await loop.run_in_executor(
+                        None, get_input,
+                        "Are you sure you want to abort? All sandbox changes will be lost permanently. (y/n): "
+                    )
                     if confirm.strip().lower() in ("y", "yes"):
                         abort_sandbox_session()
                         print("\n[✔] Sandbox session aborted and temporary workspace cleaned.\n")
@@ -2077,10 +2100,7 @@ async def run_persona_chat():
                     continue
 
                 cmd_type = parts[1].lower()
-                from src.sandbox_session import (
-                    get_active_sandbox, create_sandbox_session,
-                    abort_sandbox_session, delete_project_sandbox
-                )
+                from src.sandbox_session import abort_sandbox_session, create_sandbox_session, delete_project_sandbox, get_active_sandbox
 
                 if cmd_type == "start":
                     if len(parts) < 3:
@@ -2153,7 +2173,7 @@ async def run_persona_chat():
                 print("\n[Error] /stage and /modify are disabled. Use the skill staging harness or a Project Sandbox.\n")
                 continue
 
-                
+
             if user_msg.lower() == "/exit":
                 print("\nShutting down Project Janus Swarm...")
                 logger.info("Exit command received. Requesting async loop shutdown...")
@@ -2165,11 +2185,11 @@ async def run_persona_chat():
                 if amend_match:
                     rule_key = amend_match.group(1).strip()
                     rule_text = amend_match.group(2).strip()
-                    
-                    print(f"\nJanus >> Proposing constitutional amendment:")
+
+                    print("\nJanus >> Proposing constitutional amendment:")
                     print(f"  * Key: '{rule_key}'")
                     print(f"  * Rule: '{rule_text}'")
-                    
+
                     confirm_input = await loop.run_in_executor(None, get_input, "Confirm sealing this rule in core_constitution? (y/n): ")
                     if confirm_input.strip().lower() in ("y", "yes"):
                         from src.database import add_constitution_rule
@@ -2187,10 +2207,10 @@ async def run_persona_chat():
                 repeal_match = re.match(r"^/repeal\s+([a-z0-9_-]+)", user_msg, re.IGNORECASE)
                 if repeal_match:
                     rule_key = repeal_match.group(1).strip()
-                    
-                    print(f"\nJanus >> Proposing constitutional repeal:")
+
+                    print("\nJanus >> Proposing constitutional repeal:")
                     print(f"  * Key: '{rule_key}'")
-                    
+
                     confirm_input = await loop.run_in_executor(None, get_input, f"Confirm repealing rule '{rule_key}' from core_constitution? (y/n): ")
                     if confirm_input.strip().lower() in ("y", "yes"):
                         from src.database import delete_constitution_rule
@@ -2428,18 +2448,27 @@ async def handle_web_slash_command(user_msg: str) -> str:
 
         cmd_type = parts[1].lower()
         from src.sandbox_session import (
-            get_active_sandbox, create_sandbox_session, run_sandbox_tests,
-            get_sandbox_diff, get_sandbox_modified_files, ship_sandbox_session,
-            abort_sandbox_session, promote_evolution_sandbox, delete_project_sandbox
+            abort_sandbox_session,
+            create_sandbox_session,
+            delete_project_sandbox,
+            get_active_sandbox,
+            get_sandbox_diff,
+            get_sandbox_modified_files,
+            promote_evolution_sandbox,
+            run_sandbox_tests,
+            ship_sandbox_session,
         )
-        
+
         if cmd_type == "start":
             if len(parts) < 3:
                 return "[Error] Please specify a session name: /sandbox start <name>"
             session_name = parts[2]
             active = get_active_sandbox()
             if active:
-                return f"[Error] An active sandbox session already exists at '{active['active_sandbox_path']}' on branch '{active['active_sandbox_branch']}'. Abort/ship it first."
+                return (
+                    f"[Error] An active sandbox session already exists at '{active['active_sandbox_path']}' "
+                    f"on branch '{active['active_sandbox_branch']}'. Abort/ship it first."
+                )
             try:
                 path, branch = create_sandbox_session(session_name)
                 log_episodic_memory(
@@ -2450,15 +2479,15 @@ async def handle_web_slash_command(user_msg: str) -> str:
                 return f"[✔] Sandbox session '{session_name}' successfully created!\n* Workspace Path: {path}\n* Git Branch: {branch}"
             except Exception as err:
                 return f"[Error] Failed to create sandbox session: {err}"
-                
+
         elif cmd_type == "status":
             active = get_active_sandbox()
             if not active:
                 return "Janus >> No active sandbox session. Start one with: /sandbox start <name>"
-            
+
             modified_files = get_sandbox_modified_files()
             modified_str = ", ".join(modified_files) if modified_files else "None"
-            
+
             status_text = (
                 f"Janus >> Active Sandbox Session Status\n"
                 f"* Path: {active['active_sandbox_path']}\n"
@@ -2469,7 +2498,7 @@ async def handle_web_slash_command(user_msg: str) -> str:
             if active.get("active_sandbox_status") == "failed" and active.get("active_sandbox_test_logs"):
                 status_text += f"\nLast Test Failures/Logs:\n{active['active_sandbox_test_logs']}"
             return status_text
-            
+
         elif cmd_type == "diff":
             active = get_active_sandbox()
             if not active:
@@ -2478,7 +2507,7 @@ async def handle_web_slash_command(user_msg: str) -> str:
             if not diff.strip():
                 return "No changes in sandbox."
             return f"Janus >> Cumulative Sandbox Diff ({active['active_sandbox_branch']}):\n\n{diff}"
-            
+
         elif cmd_type == "test":
             active = get_active_sandbox()
             if not active:
@@ -2486,7 +2515,7 @@ async def handle_web_slash_command(user_msg: str) -> str:
             passed, logs = await asyncio.to_thread(run_sandbox_tests)
             status_str = "PASSED" if passed else "FAILED"
             return f"Janus >> Sandbox tests completed: {status_str}\n\n{logs}"
-            
+
         elif cmd_type == "ship":
             active = get_active_sandbox()
             if not active:
@@ -2496,10 +2525,10 @@ async def handle_web_slash_command(user_msg: str) -> str:
                 copied = ship_sandbox_session()
                 msg = f"Sandbox session branch '{active['active_sandbox_branch']}' successfully shipped and applied. Files modified: {', '.join(copied)}."
                 log_episodic_memory("sandbox_automation", msg, "user_visible")
-                return f"[✔] Sandbox successfully shipped and applied!\n* Merged Files:\n" + "\n".join(f"  - {f}" for f in copied)
+                return "[✔] Sandbox successfully shipped and applied!\n* Merged Files:\n" + "\n".join(f"  - {f}" for f in copied)
             except Exception as err:
                 return f"[Error] Failed to ship sandbox changes: {err}"
-                
+
         elif cmd_type == "promote":
             active = get_active_sandbox()
             if not active:
@@ -2547,9 +2576,7 @@ async def handle_web_slash_command(user_msg: str) -> str:
             return "[Error] Missing project command. Usage: /project [start | status | delete] <name>"
 
         cmd_type = parts[1].lower()
-        from src.sandbox_session import (
-            get_active_sandbox, create_sandbox_session, delete_project_sandbox
-        )
+        from src.sandbox_session import create_sandbox_session, delete_project_sandbox, get_active_sandbox
 
         if cmd_type == "start":
             if len(parts) < 3:
@@ -2612,7 +2639,7 @@ async def handle_web_slash_command(user_msg: str) -> str:
             return f"[✔] Rule '{rule_key}' successfully sealed in the core constitution."
         else:
             return "[Error] Invalid format. Please use: /amend <rule_key> | <rule_text>"
-            
+
     # 3. /repeal commands
     elif user_msg.lower().startswith("/repeal"):
         repeal_match = re.match(r"^/repeal\s+([a-z0-9_-]+)", user_msg, re.IGNORECASE)
@@ -2624,7 +2651,7 @@ async def handle_web_slash_command(user_msg: str) -> str:
             return f"[✔] Rule '{rule_key}' successfully repealed from the core constitution."
         else:
             return "[Error] Invalid format. Please use: /repeal <rule_key>"
-            
+
     # 4. /skills command
     elif user_msg.lower().startswith("/skills"):
         return handle_skills_command()
@@ -2648,10 +2675,16 @@ async def handle_web_slash_command(user_msg: str) -> str:
     elif user_msg.strip().lower() == "/dispatch" or user_msg.strip().lower().startswith("/dispatch "):
         return handle_dispatch_command(user_msg)
 
-    elif user_msg.strip().lower() == "/spawn" or user_msg.strip().lower().startswith("/spawn ") or user_msg.strip().lower() == "/children" or user_msg.strip().lower().startswith("/children "):
+    elif (
+        user_msg.strip().lower() == "/spawn" or user_msg.strip().lower().startswith("/spawn ")
+        or user_msg.strip().lower() == "/children" or user_msg.strip().lower().startswith("/children ")
+    ):
         return handle_replication_command(user_msg)
 
-    elif user_msg.strip().lower() == "/goal" or user_msg.strip().lower().startswith("/goal ") or user_msg.strip().lower() == "/goals" or user_msg.strip().lower().startswith("/goals "):
+    elif (
+        user_msg.strip().lower() == "/goal" or user_msg.strip().lower().startswith("/goal ")
+        or user_msg.strip().lower() == "/goals" or user_msg.strip().lower().startswith("/goals ")
+    ):
         return handle_goal_command(user_msg)
 
     elif user_msg.strip().lower() == "/test" or user_msg.strip().lower().startswith("/test "):

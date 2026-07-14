@@ -33,7 +33,7 @@ class DatabaseManager:
     def __init__(self, db_path):
         '''Initialize connection.'''
         pass
-        
+
     def query(self, sql):
         pass
 

@@ -9,7 +9,7 @@ context isolation per GEMINI.md privacy rules.
 import json
 import sqlite3
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from src.database import get_connection
@@ -33,7 +33,7 @@ class MemoryOrchestrator:
         Returns the memory record ID.
         """
         memory_id = str(uuid.uuid4())
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         value_json = json.dumps(value)
 
         # If no party_id, use a sentinel 'global' party or store without party
@@ -148,7 +148,7 @@ class MemoryOrchestrator:
         # plain TEXT column read back with lexicographic comparisons (e.g.
         # src.memory's age-based compression cutoff), so a differently
         # formatted timestamp in the same column would sort incorrectly.
-        now = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
+        now = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
 
         conn = self._get_connection()
         try:

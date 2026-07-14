@@ -5,11 +5,11 @@ Handles the first-run ceremony that creates the root administrator party.
 Prevents lock-out by ensuring exactly one boot sequence exists.
 """
 
-import uuid
 import secrets
-import sys
-from datetime import datetime
+import uuid
+from datetime import datetime, timezone
 from typing import Optional, Tuple
+
 from src.database import get_connection
 
 
@@ -45,7 +45,7 @@ class RoleBootstrap:
             raise RuntimeError("Bootstrap already completed: parties table is not empty.")
 
         party_id = str(uuid.uuid4())
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         key = enrollment_key or self.generate_enrollment_key()
 
         conn = self._get_connection()

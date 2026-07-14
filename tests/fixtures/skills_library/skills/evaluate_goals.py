@@ -8,11 +8,11 @@ def evaluate_goals():
         gid = row.get('id') if isinstance(row, dict) else row[0]
         gtype = row.get('type') if isinstance(row, dict) else row[1]
         gdesc = row.get('description') if isinstance(row, dict) else row[3]
-        
+
         # Don't auto-complete aspirational goals
         if gtype == 'aspirational':
             continue
-            
+
         # Check checkpoints for this goal
         cps = sdk['db'].query("SELECT id, achieved FROM goal_checkpoints WHERE goal_id = ?;", (gid,))
         if cps:
@@ -23,7 +23,7 @@ def evaluate_goals():
                 if not ach:
                     all_done = False
                     break
-            
+
             if all_done:
                 sdk['db'].query("UPDATE goals SET status = 'completed', updated_at = CURRENT_TIMESTAMP WHERE id = ?;", (gid,))
                 # Log episodic memory

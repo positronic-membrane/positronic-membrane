@@ -9,7 +9,7 @@ import json
 import os
 import sqlite3
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 
 import pytest
 
@@ -96,7 +96,7 @@ def bootstrap(db_conn):
 def sample_party(db_conn):
     """Create a sample party in the in-memory database for tests."""
     party_id = str(uuid.uuid4())
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     db_conn.execute(
         'INSERT INTO parties (id, name, role, created_at) VALUES (?, ?, ?, ?)',
         (party_id, 'TestParty', 'admin', now)
@@ -109,7 +109,7 @@ def sample_party(db_conn):
 def sample_session(db_conn, sample_party):
     """Create a sample session in the in-memory database."""
     session_id = str(uuid.uuid4())
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     db_conn.execute(
         'INSERT INTO sessions (id, party_id, started_at) VALUES (?, ?, ?)',
         (session_id, sample_party, now)
@@ -204,7 +204,7 @@ class TestMemoryOrchestrator:
     def test_get_all_keys_isolated(self, memory_orch, db_conn, sample_party):
         """Test that keys from different parties are isolated."""
         other_party = str(uuid.uuid4())
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         db_conn.execute(
             'INSERT INTO parties (id, name, role, created_at) VALUES (?, ?, ?, ?)',
             (other_party, 'OtherParty', 'user', now)
@@ -263,11 +263,11 @@ class TestMemoryOrchestrator:
 
     def test_get_episodic_memories(self, memory_orch, db_conn, sample_party, sample_session):
         """Test retrieving episodic memories for a party."""
-        id1 = memory_orch.log_episodic_memory(
+        memory_orch.log_episodic_memory(
             party_id=sample_party, session_id=sample_session,
             message_content='First', speaker='user'
         )
-        id2 = memory_orch.log_episodic_memory(
+        memory_orch.log_episodic_memory(
             party_id=sample_party, session_id=sample_session,
             message_content='Second', speaker='assistant'
         )
@@ -418,7 +418,7 @@ class TestDatabaseSchema:
 
     def test_episodic_memory_auto_increment(self, db_conn, sample_party):
         """Verify episodic_memory id is auto-increment integer."""
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         db_conn.execute(
             'INSERT INTO episodic_memory (message_content, speaker, timestamp, party_id, context_type) VALUES (?, ?, ?, ?, ?)',
             ('test', 'user', now, sample_party, 'user_visible')
@@ -430,7 +430,7 @@ class TestDatabaseSchema:
     def test_foreign_key_cascade(self, db_conn):
         """Verify that deleting a party cascades to memories."""
         party_id = str(uuid.uuid4())
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         db_conn.execute(
             'INSERT INTO parties (id, name, role, created_at) VALUES (?, ?, ?, ?)',
             (party_id, 'CascadeTest', 'user', now)
@@ -515,7 +515,7 @@ class TestWebServerEndpoints:
     def test_register_party(self, api_client, db_conn):
         """Test party registration as admin."""
         admin_id = str(uuid.uuid4())
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         db_conn.execute(
             'INSERT INTO parties (id, name, role, created_at) VALUES (?, ?, ?, ?)',
             (admin_id, 'AdminUser', 'admin', now)
@@ -535,7 +535,7 @@ class TestWebServerEndpoints:
     def test_write_and_read_memory(self, api_client, db_conn):
         """Test writing and reading memory via API."""
         party_id = str(uuid.uuid4())
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         db_conn.execute(
             'INSERT INTO parties (id, name, role, created_at) VALUES (?, ?, ?, ?)',
             (party_id, 'TestUser', 'user', now)
@@ -560,7 +560,7 @@ class TestWebServerEndpoints:
     def test_register_party_with_metadata(self, api_client, db_conn):
         """Test registering a party with metadata and retrieving it."""
         admin_id = str(uuid.uuid4())
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         db_conn.execute(
             'INSERT INTO parties (id, name, role, created_at) VALUES (?, ?, ?, ?)',
             (admin_id, 'AdminUser2', 'admin', now)

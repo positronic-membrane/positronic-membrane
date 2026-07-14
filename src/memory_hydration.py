@@ -1,5 +1,6 @@
 import logging
 from typing import Optional
+
 from src.database import get_connection, get_recent_episodic_memories
 from src.memory import query_memories
 
