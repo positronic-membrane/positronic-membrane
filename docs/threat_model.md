@@ -39,6 +39,7 @@ write access.
 | Role/privilege | `has_role()` / `require_admin()` hierarchy | `src/auth.py`, `src/skills.py` |
 | Untrusted code execution | Three separate sandboxes (ad-hoc snippets, self-mod staging, sandbox sessions) | `src/sandbox.py`, `src/self_modification.py`, `src/sandbox_session.py` |
 | **External-author content → prompt/action** (this issue) | `is_trusted_github_author()` + `quarantine_wrap()` | `src/middleware.py` |
+| Agent-status comment ingestion (issue #70) | `is_trusted_github_author()` + `quarantine_wrap()` | `src/agent_sync.py` |
 
 ## The new invariant (issue #107)
 
@@ -78,6 +79,16 @@ wherever it reaches a prompt at all:
   uniformly rather than an allowlist of "known external-content" skills, since
   skill code is synced from an externally-maintained skills-library repo this
   repo doesn't control.
+- Agent-status comment polling (issue #70, `src/agent_sync.py::poll_agent_status`)
+  — comments from non-allowlisted authors are never parsed at all (not
+  filtered-to-placeholder like `/handoff`'s discussion section — fully
+  ignored: no episodic-memory log, no `agent_work_status` row, no
+  escalation). Blocker text from an allowlisted author still reaches
+  `pending_escalations` and, from there, `_build_persona_prompt`'s
+  `<pending_escalations>` block — that text is quarantine-wrapped and
+  length-capped (`_BLOCKER_TEXT_CHAR_LIMIT`, 500 chars) before it gets there,
+  on the same "trust the identity, still quarantine the content" posture as
+  the rest of this document.
 
 `pr_review` also quarantines the *linked issue's* Acceptance Criteria text and
 the PR diff inside the critic prompts (`src/pr_review.py::_evaluate_criterion`,
@@ -102,9 +113,6 @@ issue *title* is quarantined alongside the body rather than left in the raw
 
 ## Explicitly out of scope here
 
-- **Issue #70** (agent-status comment polling): does not exist yet
-  (`src/agent_sync.py` is absent). Its author-allowlist gate ships with #70
-  itself, not retrofitted onto a feature that isn't built.
 - **Issue #101** (conformance suite): "content from non-allowlisted authors is
   never parsed into action" is a conformance-candidate invariant for
   descendant systems to keep — tracked there, not re-derived here.

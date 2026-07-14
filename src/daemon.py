@@ -726,6 +726,21 @@ async def run_mid_layer_loop():
             except Exception as e:
                 logger.error(f"Failed to run background maintenance: {e}")
 
+            # 3.5. External agent status sync (issue #70): polls GitHub issues
+            # carrying agent:* labels for structured status comments, self-throttled
+            # via agent_sync.poll_interval_seconds independently of this 5s tick,
+            # since each poll costs GitHub API calls against the shared 50/hr budget.
+            # Runs unconditionally (not gated by user_active/governor-pause below) —
+            # a reported blocker should surface precisely when background autonomy
+            # is paused, since that's when the operator needs it most.
+            try:
+                from src.agent_sync import poll_agent_status
+                poll_result = poll_agent_status()
+                if poll_result.get("new_blockers"):
+                    logger.info(f"poll_agent_status: {poll_result}")
+            except Exception as e:
+                logger.error(f"Failed to poll agent status: {e}")
+
             # 4. Check user presence status from database
             presence_status = "idle"
             conn = get_connection(read_only_constitution=True)

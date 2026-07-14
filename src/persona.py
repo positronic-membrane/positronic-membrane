@@ -580,7 +580,47 @@ def handle_agent_command(command_str: str) -> str:
         except Exception as e:
             return f"[Error] Failed to register agent: {e}"
 
-    return "[Error] Unknown subcommand. Supported: list, register"
+    elif subcommand == "status":
+        # Reads agent_work_status (issue #70) -- GitHub-issue-tracked agent
+        # progress -- not dispatch_log, which tracks /dispatch task execution,
+        # a separate older concept.
+        from src.agent_sync import _BLOCKER_TEXT_CHAR_LIMIT
+        conn = get_connection(read_only_constitution=True)
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT aws.repo, aws.issue_number, aws.github_login, ea.name AS agent_name, "
+                "aws.status, aws.progress, aws.blocker_text, aws.updated_at "
+                "FROM agent_work_status aws LEFT JOIN external_agents ea ON ea.id = aws.agent_id "
+                "ORDER BY aws.updated_at DESC;"
+            )
+            rows = cursor.fetchall()
+        finally:
+            conn.close()
+
+        if not rows:
+            return "No tracked agent work status yet."
+
+        emoji = {"in-progress": "🟡", "blocked": "🔴", "review-ready": "🟢", "abandoned": "⚪"}
+        output = ["### 🛰️ Agent Work Status\n"]
+        for r in rows:
+            try:
+                repo, issue_number, github_login, agent_name, status, progress, blocker_text, _updated = (
+                    r["repo"], r["issue_number"], r["github_login"], r["agent_name"],
+                    r["status"], r["progress"], r["blocker_text"], r["updated_at"],
+                )
+            except (TypeError, IndexError, KeyError):
+                repo, issue_number, github_login, agent_name, status, progress, blocker_text, _updated = r
+            who = agent_name or github_login
+            line = f"- {emoji.get(status, '⬜')} **{repo}#{issue_number}** — {who}: `{status}`"
+            if progress is not None:
+                line += f" ({progress}%)"
+            output.append(line)
+            if status == "blocked" and blocker_text:
+                output.append(f"  > Blocker (quoted verbatim from {who}): {blocker_text[:_BLOCKER_TEXT_CHAR_LIMIT]}")
+        return "\n".join(output)
+
+    return "[Error] Unknown subcommand. Supported: list, register, status"
 
 def handle_dispatch_command(command_str: str) -> str:
     from src.skills import SafeAgentOrchestration, has_role
@@ -1495,11 +1535,37 @@ def _build_persona_prompt(user_query: str, party_id=None) -> tuple:
 
     semantic_str = semantic_context.strip() if semantic_context.strip() else "None available."
 
+    # Drain the generic pending_escalations queue (issue #70) — this function is
+    # shared by both stream_persona_response and generate_persona_response_autonomous,
+    # so surfacing here satisfies "surface to the user in the next conversation turn"
+    # for both entry points in one place. Mark-delivered-on-read (before the LLM call)
+    # mirrors the existing pending swarm-message drain in src/daemon.py.
+    from src.database import get_pending_escalations, mark_escalation_delivered
+    escalations = get_pending_escalations(party_id=party_id)
+    escalation_lines = []
+    for esc in escalations:
+        try:
+            esc_id, esc_source, esc_summary, esc_detail = esc['id'], esc['source'], esc['summary'], esc['detail']
+        except (TypeError, IndexError, KeyError):
+            esc_id, _party, esc_source, esc_summary, esc_detail, _created = esc
+        line = f"[{esc_source}] {esc_summary}\n{esc_detail or ''}"
+        escalation_lines.append(line)
+        mark_escalation_delivered(esc_id)
+        log_episodic_memory(speaker="system", message_content=line, context_type="background_thought")
+    escalation_summary = "\n\n".join(escalation_lines) if escalation_lines else "None pending."
+    if escalation_lines:
+        system_override += (
+            "\n\n### Pending Escalations:\nThe <pending_escalations> block below contains "
+            "items that must be proactively surfaced to the user in this turn, even if "
+            "unrelated to their message."
+        )
+
     xml_block = (
         f"<self_traits>\n{self_traits_str}\n</self_traits>\n"
         f"<episodic_memory>\n{history_summary}\n</episodic_memory>\n"
         f"<recent_deliberations>\n{deliberation_summary}\n</recent_deliberations>\n"
-        f"<semantic_knowledge>\n{semantic_str}\n</semantic_knowledge>"
+        f"<semantic_knowledge>\n{semantic_str}\n</semantic_knowledge>\n"
+        f"<pending_escalations>\n{escalation_summary}\n</pending_escalations>"
     )
 
     prompt = f"""

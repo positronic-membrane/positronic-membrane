@@ -27,6 +27,19 @@ def setup_test_db(tmp_path):
     yield
     src.config.DB_PATH = orig_db_path
 
+
+@pytest.fixture(autouse=True)
+def _no_real_agent_status_polling():
+    """Issue #70's poll_agent_status() runs unconditionally in every mid-tick
+    (src/daemon.py step 3.5). Without this, any test here that actually drives
+    run_mid_layer_loop()/run_heartbeat_loop() would make real outbound GitHub
+    API calls using whatever GITHUB_ACCESS_TOKEN/GITHUB_REPO happen to be set
+    in the environment. Tests that specifically exercise poll_agent_status
+    re-patch it inside their own `with`/decorator, which takes precedence for
+    the duration of that test."""
+    with patch("src.agent_sync.poll_agent_status", return_value={"skipped": "test-default"}):
+        yield
+
 def test_user_presence_detection(tmp_path):
     """Verify that file modifications indicate user presence, except ignored items."""
     # Empty directory -> no user presence
@@ -791,3 +804,41 @@ async def test_mid_layer_loop_increments_daemon_cycles_total(
         pass
 
     assert _get_counter("metrics.daemon_cycles_total") > before
+
+
+@pytest.mark.asyncio
+@patch("src.daemon.run_interval_skills")
+@patch("src.memory.add_memory")
+@patch("src.memory.query_memories")
+@patch("src.skills.query_agent")
+async def test_mid_layer_loop_calls_poll_agent_status_and_survives_its_errors(
+    mock_query, mock_query_memories, mock_add_memory, mock_interval_skills,
+    tmp_path, monkeypatch
+):
+    """Issue #70: poll_agent_status() must run every mid-tick, wrapped in the
+    same try/except pattern as the other plain-call steps (e.g. step 3's
+    run_background_maintenance()) — an exception inside it must not kill the
+    mid-loop."""
+    import src.daemon
+    from src.daemon import run_mid_layer_loop
+
+    mock_query_memories.return_value = []
+    mock_add_memory.return_value = None
+    mock_query.return_value = ""
+
+    monkeypatch.setenv("JANUS_TEST_MODE", "1")
+    monkeypatch.setattr(src.config, "ROOT_DIR", tmp_path)
+
+    with patch(
+        "src.agent_sync.poll_agent_status",
+        side_effect=[RuntimeError("boom"), {"issues_scanned": 0}, {"issues_scanned": 0}],
+    ) as mock_poll:
+        loop_task = asyncio.create_task(run_mid_layer_loop())
+        await asyncio.sleep(2.5)
+        loop_task.cancel()
+        try:
+            await loop_task
+        except asyncio.CancelledError:
+            pass
+
+    assert mock_poll.call_count >= 2

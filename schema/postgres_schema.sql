@@ -299,12 +299,41 @@ CREATE TABLE IF NOT EXISTS janus_documents (
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+-- 28. Create agent_work_status table (issue #70)
+CREATE TABLE IF NOT EXISTS agent_work_status (
+    id SERIAL PRIMARY KEY,
+    agent_id INTEGER REFERENCES external_agents(id) ON DELETE SET NULL,
+    repo TEXT NOT NULL,
+    issue_number INTEGER NOT NULL,
+    github_login TEXT NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('in-progress', 'blocked', 'review-ready', 'abandoned')),
+    progress INTEGER,
+    blocker_text TEXT,
+    last_comment_id INTEGER NOT NULL,
+    last_comment_url TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(repo, issue_number, github_login)
+);
+
+-- 29. Create pending_escalations table (issue #70)
+CREATE TABLE IF NOT EXISTS pending_escalations (
+    id SERIAL PRIMARY KEY,
+    party_id TEXT,
+    source TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    detail TEXT,
+    status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'delivered')),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    delivered_at TIMESTAMP
+);
+
 -- Seed system party
 INSERT INTO parties (id, name, role, created_at, last_seen, metadata)
 VALUES ('system', 'system', 'observer', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, '{}')
 ON CONFLICT (id) DO NOTHING;
 
--- 28. Setup Postgres roles and schema permissions
+-- 30. Setup Postgres roles and schema permissions
 DO $$
 BEGIN
     IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'janus_admin') THEN
