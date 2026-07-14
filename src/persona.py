@@ -137,6 +137,40 @@ def handle_governor_command(command_str: str) -> str:
     output.append(f"| Cooldown (minutes) | {status['cooldown_minutes']} |")
     return "\n".join(output)
 
+def handle_status_command(command_str: str) -> str:
+    """Persona-voiced view of the observability counters from src.metrics,
+    plus drives, budget, and goals — the /status surface the V1 sign-off
+    Success Diagnostics require (issue #63)."""
+    from src.metrics import get_system_metrics_dict
+    from src.database import get_boredom_counter
+    from src.explorer import _get_config_int
+    from src.llm import get_budget_status
+
+    metrics = get_system_metrics_dict()
+
+    boredom = get_boredom_counter()
+    boredom_threshold = _get_config_int("boredom_threshold", 5)
+
+    daily_budget, accumulated_cost = get_budget_status()
+
+    output = ["### Janus Status\n"]
+    output.append("| Field | Value |")
+    output.append("| --- | --- |")
+    output.append(f"| LLM Calls | {metrics['llm_calls_total']} ({metrics['llm_calls_failed_total']} failed) |")
+    output.append(f"| Skills Executed | {metrics['skills_executed_total']} ({metrics['skills_failed_total']} failed) |")
+    output.append(f"| HTTP Requests | {metrics['http_requests_total']} |")
+    last_cycle = metrics['daemon_last_cycle_timestamp'] or '-'
+    output.append(f"| Daemon Cycles | {metrics['daemon_cycles_total']} (last: {last_cycle}) |")
+    output.append(f"| Episodic Memory Rows | {metrics['episodic_memory_rows']} |")
+    output.append(f"| Active Goals | {metrics['active_goals_count']} |")
+    output.append(
+        f"| Checkpoints Completed | {metrics['goals_checkpoints_completed_total']} "
+        f"({metrics['goals_checkpoints_completed_autonomously']} autonomous) |"
+    )
+    output.append(f"| Boredom | {boredom}/{boredom_threshold} |")
+    output.append(f"| Budget Today | ${accumulated_cost:.4f} / ${daily_budget:.2f} |")
+    return "\n".join(output)
+
 def handle_runskill_command(command_str: str) -> str:
     import json
     import re
@@ -695,8 +729,8 @@ def handle_replication_command(command_str: str) -> str:
 
 def handle_goal_command(command_str: str) -> str:
     from src.skills import SafeGoals
-    sg = SafeGoals()
-    
+    sg = SafeGoals(party_id=get_session_party_id())
+
     parts = command_str.strip().split(None, 1)
     subcommand = ""
     args_str = ""
@@ -2333,6 +2367,11 @@ async def run_persona_chat():
                 print(f"\n{res}\n")
                 continue
 
+            if user_msg_lower == "/status" or user_msg_lower.startswith("/status "):
+                res = handle_status_command(user_msg)
+                print(f"\n{res}\n")
+                continue
+
             if user_msg_lower == "/docs" or user_msg_lower.startswith("/docs "):
                 res = handle_docs_command(user_msg)
                 print(f"\n{res}\n")
@@ -2623,6 +2662,9 @@ async def handle_web_slash_command(user_msg: str) -> str:
 
     elif user_msg.strip().lower() == "/governor" or user_msg.strip().lower().startswith("/governor "):
         return handle_governor_command(user_msg)
+
+    elif user_msg.strip().lower() == "/status" or user_msg.strip().lower().startswith("/status "):
+        return handle_status_command(user_msg)
 
     elif user_msg.strip().lower() == "/docs" or user_msg.strip().lower().startswith("/docs "):
         return handle_docs_command(user_msg)

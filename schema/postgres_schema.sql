@@ -159,7 +159,8 @@ CREATE TABLE IF NOT EXISTS goal_checkpoints (
     goal_id INTEGER NOT NULL REFERENCES goals(id) ON DELETE CASCADE,
     checkpoint_description TEXT NOT NULL,
     achieved INTEGER DEFAULT 0 CHECK(achieved IN (0, 1)),
-    achieved_at TIMESTAMP
+    achieved_at TIMESTAMP,
+    completed_by_party_id TEXT
 );
 
 -- 16. Create cognitive_layers

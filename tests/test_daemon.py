@@ -755,3 +755,39 @@ async def test_mid_layer_loop_explicit_pause_guard_skips_dispatch(
     last_run = conn.execute("SELECT last_run_at FROM cognitive_layers WHERE layer_name = 'mid';").fetchone()
     conn.close()
     assert last_run[0] is not None
+
+
+@pytest.mark.asyncio
+@patch("src.daemon.run_interval_skills")
+@patch("src.memory.add_memory")
+@patch("src.memory.query_memories")
+@patch("src.skills.query_agent")
+async def test_mid_layer_loop_increments_daemon_cycles_total(
+    mock_query, mock_query_memories, mock_add_memory, mock_interval_skills,
+    tmp_path, monkeypatch
+):
+    """Every mid-tick — even while the Smart Loop Governor is paused, per the
+    existing 'always runs' comment on the cognitive_layers update — must
+    increment metrics.daemon_cycles_total (issue #63)."""
+    import src.daemon
+    from src.daemon import run_mid_layer_loop
+    from src.metrics import _get_counter
+
+    mock_query_memories.return_value = []
+    mock_add_memory.return_value = None
+    mock_query.return_value = ""
+
+    monkeypatch.setenv("JANUS_TEST_MODE", "1")
+    monkeypatch.setattr(src.config, "ROOT_DIR", tmp_path)
+
+    before = _get_counter("metrics.daemon_cycles_total")
+
+    loop_task = asyncio.create_task(run_mid_layer_loop())
+    await asyncio.sleep(2.5)
+    loop_task.cancel()
+    try:
+        await loop_task
+    except asyncio.CancelledError:
+        pass
+
+    assert _get_counter("metrics.daemon_cycles_total") > before

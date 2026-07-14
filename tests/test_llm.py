@@ -204,3 +204,54 @@ def test_llm_hyperparameters_calibration(mock_create):
     assert call_args["temperature"] == 0.0
     assert call_args["top_p"] == 1.0
 
+
+@patch("openai.resources.chat.completions.Completions.create")
+def test_llm_calls_total_increments_on_success(mock_create):
+    from src.metrics import _get_counter
+
+    mock_resp = MagicMock()
+    mock_resp.choices = [MagicMock(message=MagicMock(content="ok"))]
+    mock_resp.usage = MagicMock(prompt_tokens=10, completion_tokens=15)
+    mock_create.return_value = mock_resp
+
+    before = _get_counter("metrics.llm_calls_total")
+    query_agent("proposer", "unique prompt for counter test")
+    assert _get_counter("metrics.llm_calls_total") == before + 1
+    assert _get_counter("metrics.llm_calls_failed_total") == 0
+
+
+@patch("openai.resources.chat.completions.Completions.create")
+def test_llm_calls_failed_total_increments_on_retry_exhaustion(mock_create, monkeypatch):
+    from src.metrics import _get_counter
+    import src.llm
+
+    monkeypatch.setattr(src.llm.time, "sleep", lambda *_a, **_kw: None)
+    mock_create.side_effect = RuntimeError("connection refused")
+
+    before_total = _get_counter("metrics.llm_calls_total")
+    before_failed = _get_counter("metrics.llm_calls_failed_total")
+
+    with pytest.raises(RuntimeError):
+        query_agent("proposer", "a prompt that will exhaust retries")
+
+    assert _get_counter("metrics.llm_calls_total") == before_total + 1
+    assert _get_counter("metrics.llm_calls_failed_total") == before_failed + 1
+
+
+def test_llm_calls_failed_total_increments_on_billing_violation():
+    from src.metrics import _get_counter
+    from src.llm import BillingViolationError
+
+    conn = get_connection(read_only_constitution=False)
+    conn.execute(
+        "INSERT OR REPLACE INTO system_config (config_key, config_value, is_agent_modifiable) "
+        "VALUES ('daily_budget_usd', '0', 1);"
+    )
+    conn.commit()
+    conn.close()
+
+    before_failed = _get_counter("metrics.llm_calls_failed_total")
+    with pytest.raises(BillingViolationError):
+        query_agent("proposer", "should be billing-blocked")
+    assert _get_counter("metrics.llm_calls_failed_total") == before_failed + 1
+

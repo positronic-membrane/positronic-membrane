@@ -22,6 +22,7 @@ from openai import OpenAI
 from src.explorer import search_web, fetch_webpage, ingest_discoveries
 from src.notifications import send_webhook_notification
 from src.skill_harness import check_circuit, record_skill_failure, record_skill_success
+from src.metrics import increment_skills_executed_total, increment_skills_failed_total
 from src.codebase import query_codebase_context, index_codebase
 from src.sandbox import execute_code_safely
 from src.self_modification import apply_search_replace_blocks
@@ -319,6 +320,9 @@ class SafeSelfModel:
 
 class SafeGoals:
     """Safe goal management wrapper for dynamic skills."""
+    def __init__(self, party_id: Optional[str] = None):
+        self.party_id = party_id
+
     def get_goals(self, status: Optional[str] = None, type: Optional[str] = None) -> list:
         conn = get_connection(read_only_constitution=True)
         try:
@@ -449,8 +453,8 @@ class SafeGoals:
             from datetime import datetime
             now_str = datetime.utcnow().isoformat()
             cursor.execute(
-                "UPDATE goal_checkpoints SET achieved = 1, achieved_at = ? WHERE id = ?;",
-                (now_str, checkpoint_id)
+                "UPDATE goal_checkpoints SET achieved = 1, achieved_at = ?, completed_by_party_id = ? WHERE id = ?;",
+                (now_str, self.party_id, checkpoint_id)
             )
             conn.commit()
             return True
@@ -1842,6 +1846,8 @@ class DynamicSkillExecutor:
         if not check_circuit(skill_id, tripped_at=tripped_at):
             return {"success": False, "error": f"Circuit breaker tripped for skill '{skill_id}'; execution skipped."}
 
+        increment_skills_executed_total()
+
         # Build execution SDK context
         from src.memory_orchestrator import MemoryOrchestrator
         sdk_context = {
@@ -1852,7 +1858,7 @@ class DynamicSkillExecutor:
             "drives": SafeDrives(),
             "swarm": SafeSwarm(),
             "self_model": SafeSelfModel(),
-            "goals": SafeGoals(),
+            "goals": SafeGoals(party_id),
             "documents": SafeDocuments(),
             "layered_cognition": SafeLayeredCognition(),
             "agent_orchestration": SafeAgentOrchestration(party_id),
@@ -1879,6 +1885,7 @@ class DynamicSkillExecutor:
             func = namespace.get(entry_point)
             if not func or not callable(func):
                 record_skill_failure(skill_id)
+                increment_skills_failed_total()
                 return {"success": False, "error": f"AttributeError: Entry point function '{entry_point}' not found in skill code."}
 
             # Run function with supplied arguments
@@ -1904,4 +1911,5 @@ class DynamicSkillExecutor:
             error_msg = f"Dynamic Execution Error: {exc_type.__name__}: {exc_value}\nTraceback:\n{tb_str}"
             logger.error(f"Skill execution failed for '{skill_id}': {error_msg}")
             record_skill_failure(skill_id)
+            increment_skills_failed_total()
             return {"success": False, "error": error_msg}

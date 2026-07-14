@@ -4,6 +4,7 @@ import time
 from openai import OpenAI
 import src.config
 from src.database import get_connection, get_agent_rules
+from src.metrics import increment_llm_calls_total, increment_llm_calls_failed_total
 
 logger = logging.getLogger("JanusLLM")
 
@@ -64,14 +65,10 @@ class BillingViolationError(Exception):
     pass
 
 
-def _prepare_llm_call(agent_id: str, prompt_content: str, system_override: str = None) -> dict:
-    """
-    Shared setup for query_agent and query_agent_stream.
-    Handles billing check, model resolution, system prompt assembly, cache lookup,
-    and hyperparameter calibration. Returns a context dict; raises on billing violation.
-    Returns cache_hit=<str> when a cached response is available.
-    """
-    # Billing check
+def get_budget_status() -> tuple:
+    """Returns (daily_budget, accumulated_cost_today) read from system_config /
+    llm_call_costs. Shared by _prepare_llm_call's billing check and the /status
+    Persona command so both surfaces agree on the same numbers."""
     daily_budget = 5.00
     accumulated_cost = 0.0
     conn = get_connection(read_only_constitution=True)
@@ -89,8 +86,20 @@ def _prepare_llm_call(agent_id: str, prompt_content: str, system_override: str =
         logger.error(f"Error checking budget configurations: {e}")
     finally:
         conn.close()
+    return daily_budget, accumulated_cost
+
+
+def _prepare_llm_call(agent_id: str, prompt_content: str, system_override: str = None) -> dict:
+    """
+    Shared setup for query_agent and query_agent_stream.
+    Handles billing check, model resolution, system prompt assembly, cache lookup,
+    and hyperparameter calibration. Returns a context dict; raises on billing violation.
+    Returns cache_hit=<str> when a cached response is available.
+    """
+    daily_budget, accumulated_cost = get_budget_status()
 
     if accumulated_cost >= daily_budget:
+        increment_llm_calls_failed_total()
         raise BillingViolationError(
             f"Billing Violation: Daily budget limit of ${daily_budget:.2f} exceeded. "
             f"Accumulated spend today is ${accumulated_cost:.4f}."
@@ -280,6 +289,8 @@ def query_agent(agent_id: str, prompt_content: str, system_override: str = None)
         else:
             return "I am operating in offline mock mode. How can I assist you with the Positronic Membrane codebase?"
 
+    increment_llm_calls_total()
+
     ctx = _prepare_llm_call(agent_id, prompt_content, system_override)
 
     if ctx["cache_hit"] is not None:
@@ -313,6 +324,7 @@ def query_agent(agent_id: str, prompt_content: str, system_override: str = None)
             logger.warning(f"LLM API query attempt {attempt+1} failed: {err}")
             time.sleep(2 ** attempt)
     else:
+        increment_llm_calls_failed_total()
         conn = get_connection(read_only_constitution=True)
         try:
             cursor = conn.cursor()
@@ -348,6 +360,8 @@ def query_agent_stream(agent_id: str, prompt_content: str, system_override: str 
         logger.info(f"[LLM Mock Mode] Intercepted streaming query for agent '{agent_id}'")
         yield "I am operating in offline mock mode. How can I assist you with the Positronic Membrane codebase?"
         return
+
+    increment_llm_calls_total()
 
     ctx = _prepare_llm_call(agent_id, prompt_content, system_override)
 
@@ -397,6 +411,7 @@ def query_agent_stream(agent_id: str, prompt_content: str, system_override: str 
             time.sleep(2 ** attempt)
 
     # All retries failed — fall open to cache or raise
+    increment_llm_calls_failed_total()
     conn = get_connection(read_only_constitution=True)
     try:
         cursor = conn.cursor()

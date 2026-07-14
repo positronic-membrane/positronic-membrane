@@ -52,6 +52,10 @@ ALLOW_LOCAL_SANDBOX_EXEC = os.getenv("ALLOW_LOCAL_SANDBOX_EXEC", "False").lower(
 E2B_API_KEY = os.getenv("E2B_API_KEY", "")
 SPAWN_PROVIDER = os.getenv("SPAWN_PROVIDER", "local")      # "local", "docker", or "ecs"
 
+# Logging / Observability
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
+LOG_FORMAT = os.getenv("LOG_FORMAT", "text")  # "text" or "json"
+
 # Security Configuration
 REQUIRE_AUTH = os.getenv("REQUIRE_AUTH", "True").lower() in ("true", "1", "yes")
 ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "http://localhost:5005,http://127.0.0.1:5005").split(",")
@@ -241,6 +245,14 @@ def validate_config() -> ConfigValidationResult:
 
     if SPAWN_PROVIDER not in ("local", "docker", "ecs"):
         warnings.append(f"SPAWN_PROVIDER='{SPAWN_PROVIDER}' is not one of local/docker/ecs")
+
+    # Logging
+    if (LOG_LEVEL or "").upper() not in ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"):
+        warnings.append(
+            f"LOG_LEVEL='{LOG_LEVEL}' is not one of DEBUG/INFO/WARNING/ERROR/CRITICAL"
+        )
+    if (LOG_FORMAT or "").lower() not in ("text", "json"):
+        warnings.append(f"LOG_FORMAT='{LOG_FORMAT}' is not one of text/json")
 
     # Neo4j partial config
     if NEO4J_URI and not (NEO4J_USERNAME and NEO4J_PASSWORD):

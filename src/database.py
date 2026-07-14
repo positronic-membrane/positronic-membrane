@@ -582,6 +582,22 @@ def init_db():
     );
     """)
 
+    # issue #63: records which party completed a checkpoint ('system' for
+    # autonomous dynamic-skill dispatch, a real party id for human-initiated
+    # /goal complete, NULL for not-yet-completed or pre-migration rows) so the
+    # Goal-Autonomy-Rate DoD metric (tracked in #96/#112) has a raw count to read.
+    # Uses try/except instead of the PRAGMA table_info() introspection idiom
+    # used elsewhere in this function: translate_sqlite_to_postgres() rewrites
+    # any PRAGMA to a no-op "SELECT 1", so table_info-based column detection
+    # silently breaks under DB_TYPE=postgres — this ADD COLUMN is plain,
+    # portable SQL and is made idempotent by swallowing the "already exists"
+    # error instead.
+    try:
+        cursor.execute("ALTER TABLE goal_checkpoints ADD COLUMN completed_by_party_id TEXT;")
+        conn.commit()
+    except Exception:
+        conn.rollback()
+
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS goal_proposals (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -856,6 +872,17 @@ def init_db():
         # (replaced with a placeholder). Not agent-modifiable — loosening this
         # widens the prompt-injection surface into external coding agents.
         ("handoff.filter_untrusted_authors", "1", 0),
+        # Observability baseline (issue #63): DB-backed counters so /metrics,
+        # /api/system/metrics, and /status agree across processes (Docker
+        # deployment runs web_server/daemon separately) and survive restarts,
+        # which self-deploy health comparisons depend on. Not agent-modifiable
+        # so the swarm cannot reset its own failure-rate history.
+        ("metrics.llm_calls_total", "0", 0),
+        ("metrics.llm_calls_failed_total", "0", 0),
+        ("metrics.daemon_cycles_total", "0", 0),
+        ("metrics.skills_executed_total", "0", 0),
+        ("metrics.skills_failed_total", "0", 0),
+        ("metrics.http_requests_total", "0", 0),
     ]
     for key, value, modifiable in default_configs:
         cursor.execute("""
