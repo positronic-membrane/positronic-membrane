@@ -231,6 +231,33 @@ def test_poll_agent_status_non_blocked_transition_does_not_escalate():
     assert count == 0
 
 
+def test_poll_agent_status_tracks_multiple_commenters_on_same_issue():
+    """Regression: agent_work_status is keyed on (repo, issue_number,
+    github_login), so two different trusted agents commenting on the same
+    issue must each get their own persisted row — an earlier trusted comment
+    from agent-a must not be discarded just because agent-b commented more
+    recently on the same issue."""
+    _skip_label_bootstrap()
+    label_payloads = _empty_label_scan_payloads(exclude_label="agent:in-progress", matching_issue_number=70)
+    comments_payload = [
+        _comment(1, "agent-a", _status_body("in-progress", agent="agent-a")),
+        _comment(2, "agent-b", _status_body("in-progress", agent="agent-b")),
+    ]
+
+    with _mock_urlopen(*label_payloads, comments_payload):
+        result = poll_agent_status()
+
+    assert result["status_updates"] == 2
+
+    conn = get_connection()
+    logins = {
+        row[0]
+        for row in conn.execute("SELECT github_login FROM agent_work_status WHERE issue_number = 70;").fetchall()
+    }
+    conn.close()
+    assert logins == {"agent-a", "agent-b"}
+
+
 def test_poll_agent_status_dedupes_same_comment_on_repoll():
     _skip_label_bootstrap()
     _set_poll_interval(0)
@@ -278,6 +305,37 @@ def test_ensure_agent_status_labels_creates_all_once():
     ).fetchone()[0]
     conn.close()
     assert flag == "1"
+
+
+def test_ensure_agent_status_labels_backs_off_after_permanent_failure():
+    """Regression: a token permanently lacking label-write permission (e.g.
+    403 Forbidden) must not retry all 4 label creations on every single poll
+    forever — that would burn most of the shared 50/hr GitHub API budget on
+    calls that can never succeed. The second attempt within the backoff
+    window must make zero API calls."""
+    gh = SafeGitHub(party_id="system")
+
+    def _raise_403(*args, **kwargs):
+        raise urllib.error.HTTPError(
+            url="https://api.github.com/repos/owner/repo/labels", code=403,
+            msg="Forbidden", hdrs=None, fp=None,
+        )
+
+    with patch("urllib.request.urlopen", side_effect=_raise_403):
+        first = ensure_agent_status_labels(gh, REPO)
+    assert first is False
+
+    conn = get_connection()
+    flag = conn.execute(
+        "SELECT config_value FROM system_config WHERE config_key = 'agent_sync.labels_ensured';"
+    ).fetchone()[0]
+    conn.close()
+    assert flag == "0"
+
+    with patch("urllib.request.urlopen") as mock_urlopen:
+        second = ensure_agent_status_labels(gh, REPO)
+        mock_urlopen.assert_not_called()
+    assert second is False
 
 
 def test_ensure_agent_status_labels_noop_once_flag_set():

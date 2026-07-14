@@ -79,15 +79,42 @@ def _parse_status_comment(body: str) -> Optional[dict]:
     return {"status": status, "progress": progress, "blocker": blocker, "agent": agent}
 
 
+_LABEL_RETRY_BACKOFF_SECONDS = 86400  # 1 day
+
+
 def ensure_agent_status_labels(gh: SafeGitHub, repo: str) -> bool:
     """Idempotently creates the agent:* labels on `repo`. Short-circuits to
     zero API calls once system_config['agent_sync.labels_ensured'] is '1' —
     GitHub API calls share a 50/hr budget with everything else SafeGitHub
-    does, so this must not cost 4 calls on every poll forever."""
+    does, so this must not cost 4 calls on every poll forever. If the token
+    permanently lacks label-write permission, every attempt would otherwise
+    fail and retry all 4 calls on every single poll (up to 48/hr at the
+    default cadence, starving the actual issue/comment scanning this feature
+    exists for) — back off to at most one retry attempt per day instead."""
     from src.explorer import _get_config_str
 
     if _get_config_str("agent_sync.labels_ensured", "0") == "1":
         return True
+
+    last_attempted_raw = _get_config_str("agent_sync.labels_last_attempted_at", "")
+    now = time.time()
+    if last_attempted_raw:
+        try:
+            if now - float(last_attempted_raw) < _LABEL_RETRY_BACKOFF_SECONDS:
+                return False
+        except ValueError:
+            pass
+
+    conn = get_connection(read_only_constitution=True)
+    try:
+        conn.execute(
+            "UPDATE system_config SET config_value = ?, updated_at = CURRENT_TIMESTAMP "
+            "WHERE config_key = 'agent_sync.labels_last_attempted_at';",
+            (str(now),),
+        )
+        conn.commit()
+    finally:
+        conn.close()
 
     all_ok = True
     for name, (color, description) in STATUS_LABELS.items():
@@ -244,7 +271,12 @@ def poll_agent_status(repo: Optional[str] = None, party_id: Optional[str] = None
             logger.error(f"Failed to list comments for {repo}#{issue_number}: {e}")
             continue
 
-        latest_trusted_match = None
+        # Track the latest trusted+parsed status PER commenter, not a single
+        # overall latest — multiple agents can legitimately work the same
+        # issue concurrently (agent_work_status is keyed on github_login), so
+        # an earlier comment from agent-a must not be discarded just because
+        # agent-b commented more recently.
+        latest_by_login: dict = {}
         for comment in comments or []:
             if not is_trusted_github_author(comment):
                 skipped_untrusted += 1
@@ -252,49 +284,46 @@ def poll_agent_status(repo: Optional[str] = None, party_id: Optional[str] = None
             parsed = _parse_status_comment(comment.get("body", ""))
             if parsed is None:
                 continue
-            latest_trusted_match = (comment, parsed)
+            login = (comment.get("user") or {}).get("login", "unknown")
+            latest_by_login[login] = (comment, parsed)
 
-        if latest_trusted_match is None:
-            continue
+        for github_login, (comment, parsed) in latest_by_login.items():
+            comment_id = comment.get("id")
+            comment_url = comment.get("html_url", "")
 
-        comment, parsed = latest_trusted_match
-        comment_id = comment.get("id")
-        github_login = (comment.get("user") or {}).get("login", "unknown")
-        comment_url = comment.get("html_url", "")
+            existing = _get_existing_status_row(repo, issue_number, github_login)
+            if existing and existing["last_comment_id"] == comment_id:
+                continue  # already processed this exact comment on a prior poll
 
-        existing = _get_existing_status_row(repo, issue_number, github_login)
-        if existing and existing["last_comment_id"] == comment_id:
-            continue  # already processed this exact comment on a prior poll
-
-        is_new_blocker = parsed["status"] == "blocked" and (
-            existing is None or existing["status"] != "blocked"
-        )
-        agent_id = _resolve_agent_id(parsed.get("agent"))
-        _upsert_status_row(
-            repo=repo, issue_number=issue_number, github_login=github_login,
-            agent_id=agent_id, parsed=parsed, comment_id=comment_id,
-            comment_url=comment_url, existing_id=existing["id"] if existing else None,
-        )
-        status_updates += 1
-
-        who = parsed.get("agent") or github_login
-        summary_line = f"Agent status: {repo}#{issue_number} ({who}) -> {parsed['status']}"
-        if parsed.get("progress") is not None:
-            summary_line += f" ({parsed['progress']}%)"
-        log_episodic_memory(speaker="system", message_content=summary_line, context_type="background_thought")
-
-        if is_new_blocker:
-            new_blockers += 1
-            blocker_text = (parsed.get("blocker") or "")[:_BLOCKER_TEXT_CHAR_LIMIT]
-            detail = quarantine_wrap(
-                blocker_text or "(no blocker description provided)",
-                source="github-issue-comment", author=github_login, trusted=True,
+            is_new_blocker = parsed["status"] == "blocked" and (
+                existing is None or existing["status"] != "blocked"
             )
-            enqueue_escalation(
-                source="agent_status_blocked",
-                summary=f"Agent '{who}' reported a BLOCKER on {repo}#{issue_number}",
-                detail=detail,
+            agent_id = _resolve_agent_id(parsed.get("agent"))
+            _upsert_status_row(
+                repo=repo, issue_number=issue_number, github_login=github_login,
+                agent_id=agent_id, parsed=parsed, comment_id=comment_id,
+                comment_url=comment_url, existing_id=existing["id"] if existing else None,
             )
+            status_updates += 1
+
+            who = parsed.get("agent") or github_login
+            summary_line = f"Agent status: {repo}#{issue_number} ({who}) -> {parsed['status']}"
+            if parsed.get("progress") is not None:
+                summary_line += f" ({parsed['progress']}%)"
+            log_episodic_memory(speaker="system", message_content=summary_line, context_type="background_thought")
+
+            if is_new_blocker:
+                new_blockers += 1
+                blocker_text = (parsed.get("blocker") or "")[:_BLOCKER_TEXT_CHAR_LIMIT]
+                detail = quarantine_wrap(
+                    blocker_text or "(no blocker description provided)",
+                    source="github-issue-comment", author=github_login, trusted=True,
+                )
+                enqueue_escalation(
+                    source="agent_status_blocked",
+                    summary=f"Agent '{who}' reported a BLOCKER on {repo}#{issue_number}",
+                    detail=detail,
+                )
 
     return {
         "issues_scanned": len(labeled_issue_numbers),

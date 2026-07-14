@@ -956,6 +956,10 @@ def init_db():
         # #70). Agent-modifiable (bookkeeping only, not a security gate) — resetting
         # it just re-attempts idempotent label creation on the next poll.
         ("agent_sync.labels_ensured", "0", 1),
+        # Backoff timestamp for retrying label creation after a failed attempt
+        # (issue #70) — bounds a permanent-permission-failure retry storm to
+        # once per day instead of every poll cycle. Agent-modifiable.
+        ("agent_sync.labels_last_attempted_at", "", 1),
     ]
     for key, value, modifiable in default_configs:
         cursor.execute("""
