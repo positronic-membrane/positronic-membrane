@@ -6,7 +6,7 @@ import shutil
 import subprocess
 import sys
 import textwrap
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -476,7 +476,7 @@ def check_circuit(skill_id: str, tripped_at: Optional[str] = None) -> bool:
         return True
 
     cooldown_minutes = _get_config_int("circuit_breaker.cooldown_minutes", DEFAULT_COOLDOWN_MINUTES)
-    cutoff_str = (datetime.utcnow() - timedelta(minutes=cooldown_minutes)).strftime("%Y-%m-%d %H:%M:%S")
+    cutoff_str = (datetime.now(timezone.utc) - timedelta(minutes=cooldown_minutes)).strftime("%Y-%m-%d %H:%M:%S")
     if str(tripped_at) >= cutoff_str:
         return False
 
@@ -503,7 +503,7 @@ def record_skill_failure(skill_id: str) -> None:
     so a second writer only proceeds after seeing the first's committed
     tripped_at)."""
     max_failures = _get_config_int("circuit_breaker.max_failures", DEFAULT_MAX_FAILURES)
-    now_str = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+    now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
     conn = get_connection()
     try:
         conn.execute(

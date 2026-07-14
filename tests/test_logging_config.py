@@ -2,7 +2,7 @@ import json
 import logging
 
 import src.config as config
-from src.logging_config import setup_logging, JsonFormatter
+from src.logging_config import JsonFormatter, setup_logging
 
 
 def teardown_module(module):

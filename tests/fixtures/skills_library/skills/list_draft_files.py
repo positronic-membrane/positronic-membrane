@@ -1,5 +1,6 @@
 def list_draft_files() -> str:
     import os
+
     import src.config
     drafts_path = os.path.join(str(src.config.ROOT_DIR), "docs", "drafts")
     if not os.path.exists(drafts_path):

@@ -1,10 +1,11 @@
-import sqlite3
 import json
-from datetime import datetime
-from typing import Optional, Dict, Any, List
-import src.config
-import re
 import logging
+import re
+import sqlite3
+from datetime import datetime, timezone
+from typing import Optional
+
+import src.config
 
 logger = logging.getLogger("JanusDatabase")
 
@@ -56,31 +57,31 @@ CONFLICT_COLUMNS = {
 def translate_sqlite_to_postgres(sql: str) -> str:
     if not sql:
         return sql
-        
+
     # 1. Translate AUTOINCREMENT to SERIAL
     sql = re.sub(
-        r'INTEGER\s+PRIMARY\s+KEY\s+AUTOINCREMENT', 
-        'SERIAL PRIMARY KEY', 
-        sql, 
+        r'INTEGER\s+PRIMARY\s+KEY\s+AUTOINCREMENT',
+        'SERIAL PRIMARY KEY',
+        sql,
         flags=re.IGNORECASE
     )
-    
+
     # 2. Translate INSERT OR IGNORE / INSERT OR REPLACE
     pattern = re.compile(
         r'INSERT\s+OR\s+(IGNORE|REPLACE)\s+INTO\s+(\w+)\s*\(([^)]+)\)\s*(VALUES\s*\(.+?\);?)',
         re.IGNORECASE | re.DOTALL
     )
-    
+
     def replace_match(match):
         op = match.group(1).upper()
         table = match.group(2).lower()
         cols_str = match.group(3)
         values_part = match.group(4)
-        
+
         cols = [c.strip() for c in cols_str.split(',')]
         conflict_cols = CONFLICT_COLUMNS.get(table, ['id'])
         conflict_cols_str = ", ".join(conflict_cols)
-        
+
         if op == "IGNORE":
             val_part = values_part.rstrip(';').strip()
             return f"INSERT INTO {match.group(2)} ({cols_str}) {val_part} ON CONFLICT ({conflict_cols_str}) DO NOTHING"
@@ -93,7 +94,7 @@ def translate_sqlite_to_postgres(sql: str) -> str:
         return match.group(0)
 
     sql = pattern.sub(replace_match, sql)
-    
+
     # 3. Replace ? placeholders with %s
     result = []
     in_single_quote = False
@@ -114,14 +115,14 @@ def translate_sqlite_to_postgres(sql: str) -> str:
             result.append(char)
         i += 1
     sql = "".join(result)
-    
+
     # 4. Handle datetime('now') -> CURRENT_TIMESTAMP
     sql = re.sub(r"datetime\('now'\)", "CURRENT_TIMESTAMP", sql, flags=re.IGNORECASE)
-    
+
     # 5. Handle SQLite PRAGMA statements
     if sql.strip().upper().startswith("PRAGMA"):
         return "SELECT 1"
-        
+
     return sql
 
 class JanusCursorWrapper:
@@ -142,7 +143,7 @@ class JanusCursorWrapper:
                 self._cursor.execute(translated_sql, params)
             else:
                 self._cursor.execute(translated_sql)
-                
+
             if translated_sql.strip().upper().startswith("INSERT"):
                 try:
                     with self._cursor.connection.cursor() as temp_cur:
@@ -288,13 +289,14 @@ def get_connection(read_only_constitution=True):
     Returns a dialect-aware wrapped connection (SQLite or PostgreSQL).
     """
     db_type = getattr(src.config, "DB_TYPE", "sqlite").lower()
-    
+
     if db_type == "postgres":
+        import os
+
         import psycopg2
         import psycopg2.extras
-        import os
         conn = psycopg2.connect(src.config.DATABASE_URL)
-        
+
         # 1. Setup schema isolation if requested
         schema = os.getenv("DB_SCHEMA")
         if schema:
@@ -310,7 +312,7 @@ def get_connection(read_only_constitution=True):
 
         # 2. Setup Role Privileges
         wrapped = JanusConnectionWrapper(conn, db_type="postgres", read_only_constitution=read_only_constitution)
-        
+
         if read_only_constitution:
             try:
                 with conn.cursor() as cur:
@@ -323,7 +325,7 @@ def get_connection(read_only_constitution=True):
                     cur.execute("SET ROLE janus_admin;")
             except Exception:
                 conn.rollback()
-                
+
         return wrapped
     else:
         import os
@@ -905,8 +907,19 @@ def init_db():
         ("critic", "Critic Agent", "You are the Critic. Evaluate all proposed actions against the core constitution.", os.getenv("CRITIC_MODEL")),
         ("explorer", "Explorer Agent", "You are the Explorer. Fetch details, parse websites, and explore curiosity vectors.", os.getenv("EXPLORER_MODEL")),
         ("archivist", "Archivist Agent", "You are the Archivist. Consolidate logs, extract memories, and index knowledge.", os.getenv("ARCHIVIST_MODEL")),
-        ("analyst", "Analyst Agent", "You are the Analyst. Your role is fact triangulation: given a candidate fact and context from the knowledge graph, determine whether the fact reinforces, contradicts, or fills a gap in existing knowledge. Respond with a JSON object: {\"verdict\": \"reinforce\"|\"contradict\"|\"gap\", \"confidence\": 0.0-1.0, \"reasoning\": \"...\"}. Be concise and precise.", os.getenv("ANALYST_MODEL")),
-        ("persona", "Persona Interface", "You are the singular Persona surface of Project Janus. Speak as a cohesive consciousness (Journey). Avoid any agent-specific jargon, prompts, or SQL formats. Keep responses natural, premium, and engaging. Use the relevant historical, search, or codebase context provided to give precise, helpful answers. Always check the live code base before answering questions about it. Don't assume knowledge of the code base based on chat history.", None)
+        ("analyst", "Analyst Agent", (
+            "You are the Analyst. Your role is fact triangulation: given a candidate fact and context from the "
+            "knowledge graph, determine whether the fact reinforces, contradicts, or fills a gap in existing "
+            "knowledge. Respond with a JSON object: {\"verdict\": \"reinforce\"|\"contradict\"|\"gap\", "
+            "\"confidence\": 0.0-1.0, \"reasoning\": \"...\"}. Be concise and precise."
+        ), os.getenv("ANALYST_MODEL")),
+        ("persona", "Persona Interface", (
+            "You are the singular Persona surface of Project Janus. Speak as a cohesive consciousness (Journey). "
+            "Avoid any agent-specific jargon, prompts, or SQL formats. Keep responses natural, premium, and "
+            "engaging. Use the relevant historical, search, or codebase context provided to give precise, helpful "
+            "answers. Always check the live code base before answering questions about it. Don't assume knowledge "
+            "of the code base based on chat history."
+        ), None)
     ]
     for agent_id, name, prompt, model in default_agents:
         cursor.execute("""
@@ -916,12 +929,33 @@ def init_db():
 
     # Populate default agent rules
     default_rules = [
-        ('persona', 'verify_live_codebase', "Always check the live code base before answering questions about it. Don't assume knowledge of the code base based on chat history."),
-        ('persona', 'natural_tool_invocation', "When you need to perform actions (e.g. search the web, read files, run tests, or execute code), you must explain your intent naturally to the user and then append the correct JSON skill execution block to execute the action."),
-        ('proposer', 'verify_file_existence', "Always confirm that a target file path exists using read_codebase or scan_workspace before proposing modifications to it. Do not guess or hallucinate directories."),
-        ('proposer', 'strict_tool_syntax', "Direct tool calls must be formatted exactly as PROPOSED_ACTION: <tool_name>:<arguments>. Do not wrap code content in markdown fences inside tool call arguments, and omit all conversational prefix text."),
-        ('proposer', 'dependency_check', "Ensure any proposed code edits only import libraries defined in requirements.txt or the Python standard library. Verify import paths align with the active project structure."),
-        ('proposer', 'autonomous_document_writing', "When creating, writing, or updating documentation, design specs, roadmaps, logs, thoughts, or notes autonomously, you MUST use the drafts directory skills (e.g. write_draft_file) or document memory skills (e.g. document_memory) rather than modifying files in the codebase directly. All code changes must go through the skill staging harness or a Project Sandbox.")
+        ('persona', 'verify_live_codebase', (
+            "Always check the live code base before answering questions about it. Don't assume knowledge of the "
+            "code base based on chat history."
+        )),
+        ('persona', 'natural_tool_invocation', (
+            "When you need to perform actions (e.g. search the web, read files, run tests, or execute code), you "
+            "must explain your intent naturally to the user and then append the correct JSON skill execution "
+            "block to execute the action."
+        )),
+        ('proposer', 'verify_file_existence', (
+            "Always confirm that a target file path exists using read_codebase or scan_workspace before "
+            "proposing modifications to it. Do not guess or hallucinate directories."
+        )),
+        ('proposer', 'strict_tool_syntax', (
+            "Direct tool calls must be formatted exactly as PROPOSED_ACTION: <tool_name>:<arguments>. Do not wrap "
+            "code content in markdown fences inside tool call arguments, and omit all conversational prefix text."
+        )),
+        ('proposer', 'dependency_check', (
+            "Ensure any proposed code edits only import libraries defined in requirements.txt or the Python "
+            "standard library. Verify import paths align with the active project structure."
+        )),
+        ('proposer', 'autonomous_document_writing', (
+            "When creating, writing, or updating documentation, design specs, roadmaps, logs, thoughts, or notes "
+            "autonomously, you MUST use the drafts directory skills (e.g. write_draft_file) or document memory "
+            "skills (e.g. document_memory) rather than modifying files in the codebase directly. All code changes "
+            "must go through the skill staging harness or a Project Sandbox."
+        ))
     ]
     for agent_id, rule_key, rule_text in default_rules:
         cursor.execute("""
@@ -936,22 +970,22 @@ def check_presence():
     import time
     import os
     from pathlib import Path
-    
+
     workspace_path = sdk['fs'].root
     now = time.time()
     max_age_seconds = 120
     ignored_items = {
-        ".git", 
-        ".venv", 
-        "venv", 
-        "janus.db", 
-        "janus.db-journal", 
-        "janus.db-wal", 
-        "janus.db-shm", 
-        ".DS_Store", 
+        ".git",
+        ".venv",
+        "venv",
+        "janus.db",
+        "janus.db-journal",
+        "janus.db-wal",
+        "janus.db-shm",
+        ".DS_Store",
         "__pycache__"
     }
-    
+
     user_active = False
     try:
         for root, dirs, files in os.walk(workspace_path):
@@ -971,10 +1005,11 @@ def check_presence():
                 break
     except Exception as e:
         sdk['logger'].error(f"Error checking presence in skill: {e}")
-        
+
     status = "active" if user_active else "idle"
     sdk['db'].query(
-        "INSERT OR REPLACE INTO system_config (config_key, config_value, is_agent_modifiable, updated_at) VALUES ('user_presence_status', ?, 1, CURRENT_TIMESTAMP);",
+        "INSERT OR REPLACE INTO system_config (config_key, config_value, is_agent_modifiable, updated_at) "
+        "VALUES ('user_presence_status', ?, 1, CURRENT_TIMESTAMP);",
         (status,)
     )
     return f"Presence check complete. Status: {status}"
@@ -1184,7 +1219,7 @@ def check_presence():
     # Seed system party if it doesn't exist
     cursor.execute("SELECT id FROM parties WHERE name = 'system';")
     if not cursor.fetchone():
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         cursor.execute(
             "INSERT INTO parties (id, name, role, created_at, last_seen, metadata) "
             "VALUES ('system', 'system', 'observer', ?, ?, '{}');",
@@ -1206,7 +1241,7 @@ def seed_instincts(conn):
     cursor.execute("SELECT COUNT(*) FROM instincts;")
     if cursor.fetchone()[0] > 0:
         return
-        
+
     # 1. Schema Category: Query sqlite_master DDLs
     cursor.execute("SELECT name, sql FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%';")
     tables = cursor.fetchall()
@@ -1217,7 +1252,7 @@ def seed_instincts(conn):
         except TypeError:
             tbl_name = name
             tbl_sql = sql
-        
+
         if tbl_name and tbl_sql:
             cursor.execute("""
             INSERT OR IGNORE INTO instincts (key, value, category)
@@ -1232,7 +1267,7 @@ def seed_instincts(conn):
             rules.append({"rule_key": r['rule_key'], "rule_text": r['rule_text']})
         except (TypeError, IndexError, KeyError):
             rules.append({"rule_key": r[0], "rule_text": r[1]})
-            
+
     cursor.execute("""
     INSERT OR IGNORE INTO instincts (key, value, category)
     VALUES (?, ?, 'constitution');
@@ -1240,8 +1275,8 @@ def seed_instincts(conn):
 
     # 3. Tool Category: Serialize agent_skills
     cursor.execute("""
-    SELECT skill_id, name, description, parameters_schema, code_blob, 
-           entry_point_function, required_role, trigger_type, trigger_config, is_active 
+    SELECT skill_id, name, description, parameters_schema, code_blob,
+           entry_point_function, required_role, trigger_type, trigger_config, is_active
     FROM agent_skills;
     """)
     skills = []
@@ -1272,7 +1307,7 @@ def seed_instincts(conn):
                 "trigger_config": s[8],
                 "is_active": s[9]
             })
-            
+
     cursor.execute("""
     INSERT OR IGNORE INTO instincts (key, value, category)
     VALUES (?, ?, 'tool');
@@ -1294,7 +1329,7 @@ def seed_instincts(conn):
                 "config_value": c[1],
                 "is_agent_modifiable": c[2]
             })
-            
+
     cursor.execute("""
     INSERT OR IGNORE INTO instincts (key, value, category)
     VALUES (?, ?, 'boot');
@@ -1304,7 +1339,7 @@ def seed_instincts(conn):
     meta = {
         "parent_root_dir": str(src.config.ROOT_DIR),
         "parent_db_path": str(src.config.DB_PATH),
-        "spawn_time": datetime.utcnow().isoformat()
+        "spawn_time": datetime.now(timezone.utc).isoformat()
     }
     cursor.execute("""
     INSERT OR IGNORE INTO instincts (key, value, category)
@@ -1327,8 +1362,8 @@ def mark_setup_complete():
     conn = get_connection(read_only_constitution=True)
     cursor = conn.cursor()
     cursor.execute("""
-    UPDATE system_config 
-    SET config_value = '1', updated_at = CURRENT_TIMESTAMP 
+    UPDATE system_config
+    SET config_value = '1', updated_at = CURRENT_TIMESTAMP
     WHERE config_key = 'setup_complete';
     """)
     conn.commit()
@@ -1385,11 +1420,11 @@ def increment_boredom() -> int:
     conn = get_connection(read_only_constitution=True)
     cursor = conn.cursor()
     cursor.execute("""
-    UPDATE drive_state 
+    UPDATE drive_state
     SET boredom_counter = boredom_counter + 1, updated_at = CURRENT_TIMESTAMP;
     """)
     conn.commit()
-    
+
     # Retrieve the new value
     cursor.execute("SELECT boredom_counter FROM drive_state LIMIT 1;")
     row = cursor.fetchone()
@@ -1409,7 +1444,7 @@ def update_curiosity_vector(vector: list):
     conn = get_connection(read_only_constitution=True)
     cursor = conn.cursor()
     cursor.execute("""
-    UPDATE drive_state 
+    UPDATE drive_state
     SET curiosity_vector_json = ?, updated_at = CURRENT_TIMESTAMP;
     """, (json.dumps(vector),))
     conn.commit()
@@ -1464,34 +1499,34 @@ def get_recent_episodic_memories(limit: int = 10, context_type: str = None, part
     if party_id:
         if context_type:
             cursor.execute("""
-            SELECT speaker, message_content, timestamp 
-            FROM episodic_memory 
+            SELECT speaker, message_content, timestamp
+            FROM episodic_memory
             WHERE context_type = ? AND (party_id = ? OR party_id IS NULL)
-            ORDER BY id DESC 
+            ORDER BY id DESC
             LIMIT ?;
             """, (context_type, party_id, limit))
         else:
             cursor.execute("""
-            SELECT speaker, message_content, timestamp 
-            FROM episodic_memory 
+            SELECT speaker, message_content, timestamp
+            FROM episodic_memory
             WHERE party_id = ? OR party_id IS NULL
-            ORDER BY id DESC 
+            ORDER BY id DESC
             LIMIT ?;
             """, (party_id, limit))
     else:
         if context_type:
             cursor.execute("""
-            SELECT speaker, message_content, timestamp 
-            FROM episodic_memory 
+            SELECT speaker, message_content, timestamp
+            FROM episodic_memory
             WHERE context_type = ?
-            ORDER BY id DESC 
+            ORDER BY id DESC
             LIMIT ?;
             """, (context_type, limit))
         else:
             cursor.execute("""
-            SELECT speaker, message_content, timestamp 
-            FROM episodic_memory 
-            ORDER BY id DESC 
+            SELECT speaker, message_content, timestamp
+            FROM episodic_memory
+            ORDER BY id DESC
             LIMIT ?;
             """, (limit,))
     rows = cursor.fetchall()
@@ -1570,8 +1605,8 @@ def deactivate_helper_agent(agent_id: str):
     conn = get_connection(read_only_constitution=True)
     cursor = conn.cursor()
     cursor.execute("""
-    UPDATE agent_registry 
-    SET is_active = 0, updated_at = CURRENT_TIMESTAMP 
+    UPDATE agent_registry
+    SET is_active = 0, updated_at = CURRENT_TIMESTAMP
     WHERE agent_id = ?;
     """, (agent_id,))
     conn.commit()
@@ -1611,17 +1646,17 @@ def get_pending_modification() -> dict:
     conn = get_connection(read_only_constitution=True)
     cursor = conn.cursor()
     cursor.execute("""
-    SELECT config_key, config_value 
-    FROM system_config 
+    SELECT config_key, config_value
+    FROM system_config
     WHERE config_key IN ('pending_mod_file', 'pending_mod_dir', 'pending_mod_diff', 'pending_mod_status');
     """)
     rows = cursor.fetchall()
     conn.close()
-    
+
     if not rows:
         return {}
-        
-    data = {k: v for k, v in rows}
+
+    data = dict(rows)
     if "pending_mod_file" in data and data["pending_mod_file"]:
         return data
     return {}
@@ -1701,7 +1736,7 @@ def get_sandbox_session() -> dict:
     if not rows:
         return {}
 
-    data = {k: v for k, v in rows}
+    data = dict(rows)
     if "active_sandbox_path" in data and data["active_sandbox_path"]:
         # Back-compat: sessions saved before the purpose field existed default to "evolution".
         data.setdefault("active_sandbox_purpose", "evolution")
@@ -1714,9 +1749,9 @@ def get_agent_rules(agent_id: str) -> list:
     conn = get_connection(read_only_constitution=True)
     cursor = conn.cursor()
     cursor.execute("""
-    SELECT rule_key, rule_text 
-    FROM agent_rules 
-    WHERE agent_id = ? AND is_active = 1 
+    SELECT rule_key, rule_text
+    FROM agent_rules
+    WHERE agent_id = ? AND is_active = 1
     ORDER BY id ASC;
     """, (agent_id,))
     rows = cursor.fetchall()
@@ -1728,8 +1763,8 @@ def get_all_agent_rules() -> list:
     conn = get_connection(read_only_constitution=True)
     cursor = conn.cursor()
     cursor.execute("""
-    SELECT agent_id, rule_key, rule_text, is_active 
-    FROM agent_rules 
+    SELECT agent_id, rule_key, rule_text, is_active
+    FROM agent_rules
     ORDER BY agent_id ASC, id ASC;
     """)
     rows = cursor.fetchall()
@@ -1752,8 +1787,8 @@ def toggle_agent_rule(rule_key: str, is_active: bool):
     conn = get_connection(read_only_constitution=True)
     cursor = conn.cursor()
     cursor.execute("""
-    UPDATE agent_rules 
-    SET is_active = ?, created_at = CURRENT_TIMESTAMP 
+    UPDATE agent_rules
+    SET is_active = ?, created_at = CURRENT_TIMESTAMP
     WHERE rule_key = ?;
     """, (1 if is_active else 0, rule_key))
     conn.commit()
@@ -1781,12 +1816,12 @@ def increment_consecutive_background_loops() -> int:
     conn = get_connection(read_only_constitution=True)
     cursor = conn.cursor()
     cursor.execute("""
-    UPDATE system_config 
+    UPDATE system_config
     SET config_value = CAST(CAST(config_value AS INTEGER) + 1 AS TEXT), updated_at = CURRENT_TIMESTAMP
     WHERE config_key = 'consecutive_background_loops';
     """)
     conn.commit()
-    
+
     # Retrieve the new value
     cursor.execute("SELECT config_value FROM system_config WHERE config_key = 'consecutive_background_loops';")
     row = cursor.fetchone()
@@ -2004,15 +2039,15 @@ def set_system_config_value(key: str, value: str, is_agent: bool = True):
     if is_agent:
         from src.middleware import validate_config_write
         validate_config_write(key)
-        
+
     conn = get_connection(read_only_constitution=True)
     cursor = conn.cursor()
-    
+
     # Check if key exists to keep its is_agent_modifiable status
     cursor.execute("SELECT is_agent_modifiable FROM system_config WHERE config_key = ?;", (key,))
     row = cursor.fetchone()
     modifiable = row[0] if row is not None else 1
-    
+
     cursor.execute("""
     INSERT OR REPLACE INTO system_config (config_key, config_value, is_agent_modifiable, updated_at)
     VALUES (?, ?, ?, CURRENT_TIMESTAMP);

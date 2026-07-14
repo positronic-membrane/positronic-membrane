@@ -2,23 +2,24 @@ import json
 import logging
 import sqlite3
 import uuid
-from datetime import datetime, UTC
+from datetime import UTC, datetime
 from typing import Optional
+
 from fastapi import APIRouter, Depends, HTTPException
 
+from src.database import get_constitution, log_episodic_memory
 from src.routers.dependencies import (
     ConstitutionAmendRequest,
     ConstitutionDeleteRequest,
-    RegistryUpdateRequest,
-    RegistryRulesUpdateRequest,
     PartyRegisterRequest,
     PartyRoleUpdateRequest,
-    require_role,
+    RegistryRulesUpdateRequest,
+    RegistryUpdateRequest,
     get_connection,
+    require_role,
     resolve_party_by_api_key,
-    resolve_party_by_fingerprint
+    resolve_party_by_fingerprint,
 )
-from src.database import log_episodic_memory, get_constitution
 
 logger = logging.getLogger("JanusWebServer")
 router = APIRouter()
@@ -30,7 +31,7 @@ def get_constitution_endpoint(current_party = Depends(require_role('user'))):
         rules = get_constitution()
         return [{"key": r[0], "text": r[1]} for r in rules]
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @router.get("/api/registry")
@@ -50,7 +51,7 @@ def get_registry_endpoint(current_party = Depends(require_role('user'))):
             "active": bool(r[4])
         } for r in rows]
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @router.get("/api/registry/rules")
@@ -60,7 +61,7 @@ def get_registry_rules(current_party = Depends(require_role('user'))):
         from src.database import get_all_agent_rules
         return get_all_agent_rules()
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @router.post("/api/constitution/amend")
@@ -76,7 +77,7 @@ def amend_constitution(data: ConstitutionAmendRequest, current_party = Depends(r
         log_episodic_memory("system", f"User sealed constitutional rule via Web UI: '{key}' = '{text}'", "user_visible")
         return {"success": True}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @router.post("/api/constitution/delete")
@@ -91,7 +92,7 @@ def delete_constitution(data: ConstitutionDeleteRequest, current_party = Depends
         log_episodic_memory("system", f"User deleted constitutional rule via Web UI: '{key}'", "user_visible")
         return {"success": True}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @router.post("/api/registry/update")
@@ -105,8 +106,8 @@ def update_registry(data: RegistryUpdateRequest, current_party = Depends(require
         conn = get_connection(read_only_constitution=True)
         cursor = conn.cursor()
         cursor.execute("""
-            UPDATE agent_registry 
-            SET target_model = ?, updated_at = CURRENT_TIMESTAMP 
+            UPDATE agent_registry
+            SET target_model = ?, updated_at = CURRENT_TIMESTAMP
             WHERE agent_id = ?;
         """, (model, agent_id))
         conn.commit()
@@ -114,19 +115,24 @@ def update_registry(data: RegistryUpdateRequest, current_party = Depends(require
         log_episodic_memory("system", f"User updated agent model override for '{agent_id}' to '{model or 'DEFAULT'}'.", "user_visible")
         return {"success": True}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @router.post("/api/registry/rules/update")
 def update_registry_rules(data: RegistryRulesUpdateRequest, current_party = Depends(require_role('contributor'))):
     """Adds, toggles, or deletes agent-specific constitutional auditing rules."""
-    from src.database import add_agent_rule, toggle_agent_rule, delete_agent_rule
+    from src.database import add_agent_rule, delete_agent_rule, toggle_agent_rule
     try:
         if data.action == "add":
             if not data.agent_id or not data.rule_key or not data.rule_text:
                 raise HTTPException(status_code=400, detail="Missing required fields: agent_id, rule_key, rule_text")
             add_agent_rule(data.agent_id.strip(), data.rule_key.strip(), data.rule_text.strip())
-            log_episodic_memory("system", f"User added agent rule via Web UI: [{data.agent_id.strip()}] '{data.rule_key.strip()}' = '{data.rule_text.strip()}'", "user_visible")
+            log_episodic_memory(
+                "system",
+                f"User added agent rule via Web UI: [{data.agent_id.strip()}] '{data.rule_key.strip()}' = "
+                f"'{data.rule_text.strip()}'",
+                "user_visible"
+            )
         elif data.action == "toggle":
             if not data.rule_key:
                 raise HTTPException(status_code=400, detail="Missing rule_key")
@@ -142,7 +148,7 @@ def update_registry_rules(data: RegistryRulesUpdateRequest, current_party = Depe
             raise HTTPException(status_code=400, detail=f"Invalid rule update action: {data.action}")
         return {"success": True}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @router.get("/api/v1/party/{target_party_id}")
@@ -209,7 +215,7 @@ def register_party(data: PartyRegisterRequest, current_party = Depends(require_r
             "metadata": data.metadata
         }
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Failed to create party: {e}")
+        raise HTTPException(status_code=400, detail=f"Failed to create party: {e}") from e
     finally:
         conn.close()
 

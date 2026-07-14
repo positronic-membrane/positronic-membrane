@@ -1,17 +1,12 @@
-import uuid
 import sqlite3
-from datetime import datetime, UTC
-from typing import Optional
-from fastapi import APIRouter, Depends, HTTPException, status
+import uuid
+from datetime import UTC, datetime
 
-from src.routers.dependencies import (
-    SandboxActionRequest,
-    ModificationCreateRequest,
-    require_role,
-    get_connection
-)
+from fastapi import APIRouter, Depends, HTTPException
+
 from src.database import log_episodic_memory
 from src.middleware import SelfModificationFrozenError
+from src.routers.dependencies import ModificationCreateRequest, SandboxActionRequest, get_connection, require_role
 
 router = APIRouter()
 
@@ -35,7 +30,7 @@ def get_sandbox_status(current_party = Depends(require_role('user'))):
             }
         return {"active": False}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @router.get("/api/sandbox/diff")
@@ -46,7 +41,7 @@ def get_sandbox_diff_endpoint(current_party = Depends(require_role('user'))):
         diff = get_sandbox_diff()
         return {"diff": diff}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @router.get("/api/stage/status")
@@ -60,8 +55,12 @@ def post_sandbox_action(data: SandboxActionRequest, current_party = Depends(requ
     """Handles Git Sandbox initialization, test running, aborting, shipping, and promotion."""
     try:
         from src.sandbox_session import (
-            create_sandbox_session, run_sandbox_tests, ship_sandbox_session, abort_sandbox_session,
-            promote_evolution_sandbox, delete_project_sandbox
+            abort_sandbox_session,
+            create_sandbox_session,
+            delete_project_sandbox,
+            promote_evolution_sandbox,
+            run_sandbox_tests,
+            ship_sandbox_session,
         )
 
         if data.action == "start":
@@ -84,7 +83,10 @@ def post_sandbox_action(data: SandboxActionRequest, current_party = Depends(requ
             active = get_active_sandbox()
             copied = ship_sandbox_session()
             if active:
-                msg = f"Sandbox session branch '{active['active_sandbox_branch']}' successfully shipped and applied to active workspace. Files modified: {', '.join(copied)}."
+                msg = (
+                    f"Sandbox session branch '{active['active_sandbox_branch']}' successfully shipped and "
+                    f"applied to active workspace. Files modified: {', '.join(copied)}."
+                )
                 log_episodic_memory("sandbox_automation", msg, "user_visible")
             return {"success": True, "copied": copied}
         elif data.action == "promote":
@@ -126,7 +128,7 @@ def post_sandbox_action(data: SandboxActionRequest, current_party = Depends(requ
     except SelfModificationFrozenError as e:
         raise HTTPException(status_code=410, detail=str(e)) from e
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @router.post("/api/stage/action")
@@ -151,7 +153,7 @@ def post_v1_modification(data: ModificationCreateRequest, current_party = Depend
         conn.commit()
         return {"modification_id": mod_id, "status": status_val}
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Failed to create modification: {e}")
+        raise HTTPException(status_code=400, detail=f"Failed to create modification: {e}") from e
     finally:
         conn.close()
 
@@ -175,7 +177,7 @@ def approve_modification(mod_id: str, current_party = Depends(require_role('admi
             )
         if mod['status'] not in ('pending', 'pending_self_review'):
             raise HTTPException(status_code=400, detail=f"Cannot approve modification in status: {mod['status']}")
-            
+
         conn.execute(
             'UPDATE modifications SET status = ?, approved_by = ?, approved_at = ? WHERE id = ?',
             ('approved', current_party["party_id"], now, mod_id)
@@ -200,7 +202,7 @@ def deploy_modification(mod_id: str, current_party = Depends(require_role('admin
             raise HTTPException(status_code=404, detail="Modification not found")
         if mod['status'] != 'approved':
             raise HTTPException(status_code=400, detail=f"Cannot deploy modification in status: {mod['status']}")
-            
+
         conn.execute(
             'UPDATE modifications SET status = ?, deployed_at = ? WHERE id = ?',
             ('deployed', now, mod_id)
@@ -225,7 +227,7 @@ def rollback_modification(mod_id: str, current_party = Depends(require_role('adm
             raise HTTPException(status_code=404, detail="Modification not found")
         if mod['status'] != 'deployed':
             raise HTTPException(status_code=400, detail=f"Cannot rollback modification in status: {mod['status']}")
-            
+
         rollback_id = str(uuid.uuid4())
         conn.execute(
             'INSERT INTO modifications (id, initiated_by, feature, change_type, change_resource, diff, status, created_at) '

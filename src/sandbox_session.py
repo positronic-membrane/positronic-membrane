@@ -1,21 +1,17 @@
+import logging
 import os
 import re
 import shutil
 import subprocess
 import sys
-import logging
-from pathlib import Path
-import src.config
-from src.database import (
-    save_sandbox_session,
-    clear_sandbox_session,
-    get_sandbox_session,
-    get_connection,
-    log_episodic_memory
-)
-from src.regression_watcher import get_current_commit_sha, record_test_run
-from src.middleware import SelfModificationFrozenError
 from abc import ABC, abstractmethod
+from pathlib import Path
+
+import src.config
+from src.database import clear_sandbox_session, get_connection, get_sandbox_session, log_episodic_memory, save_sandbox_session
+from src.middleware import SelfModificationFrozenError
+from src.regression_watcher import get_current_commit_sha, record_test_run
+
 
 class SandboxExecutor(ABC):
     @abstractmethod
@@ -37,7 +33,7 @@ class LocalSandboxExecutor(SandboxExecutor):
         pytest_path = str(src.config.ROOT_DIR / ".venv" / "bin" / "pytest")
         if not os.path.exists(pytest_path):
             pytest_path = "pytest"
-            
+
         try:
             res = subprocess.run(
                 [pytest_path, "-v"],
@@ -250,7 +246,7 @@ def _create_evolution_sandbox(session_name: str) -> tuple:
         sandbox_path_str, branch_name, "active", fork_sha=fork_sha, purpose="evolution", session_name=session_name
     )
 
-    logger.info(f"Sandbox created successfully.")
+    logger.info("Sandbox created successfully.")
     return sandbox_path_str, branch_name
 
 def _create_project_sandbox(session_name: str, app_name: str, overwrite: bool = False) -> tuple:
@@ -412,11 +408,11 @@ def apply_changes_to_sandbox(proposed_mods: dict):
     session = get_active_sandbox()
     if not session:
         raise RuntimeError("No active sandbox session.")
-        
+
     sandbox_root = Path(session["active_sandbox_path"])
     if not sandbox_root.exists():
         raise RuntimeError(f"Sandbox directory '{sandbox_root}' does not exist.")
-        
+
     for rel_path, code_content in proposed_mods.items():
         staged_file = sandbox_root / rel_path
         os.makedirs(staged_file.parent, exist_ok=True)
@@ -433,42 +429,42 @@ def run_sandbox_tests() -> tuple:
     session = get_active_sandbox()
     if not session:
         return False, "No active sandbox session."
-        
+
     sandbox_root = Path(session["active_sandbox_path"])
     branch_name = session["active_sandbox_branch"]
-    
+
     logger.info(f"Running tests inside sandbox '{sandbox_root}' using provider '{src.config.SANDBOX_PROVIDER}'...")
-    
+
     env = os.environ.copy()
     env["JANUS_TEST_MODE"] = "1"
-    
+
     # Inject DB_PATH if isolated DB exists in sandbox root
     if (sandbox_root / "janus_test.db").exists():
         env["DB_PATH"] = str(sandbox_root / "janus_test.db")
-    
+
     current_pythonpath = env.get("PYTHONPATH", "")
     if current_pythonpath:
         env["PYTHONPATH"] = f"{sandbox_root}{os.pathsep}{current_pythonpath}"
     else:
         env["PYTHONPATH"] = str(sandbox_root)
-        
+
     try:
         executor = get_sandbox_executor()
         passed, logs = executor.run_tests(str(sandbox_root), src.config.SANDBOX_TEST_TIMEOUT, env)
     except Exception as e:
         passed = False
         logs = f"Error executing tests: {e}"
-        
+
     new_status = "passed" if passed else "failed"
     save_sandbox_session(str(sandbox_root), branch_name, new_status, test_logs=logs)
-    
+
     # Automatically commit sandbox state if tests passed
     if passed:
         try:
             commit_sandbox_state("Auto-commit: passing edits in sandbox session")
         except Exception as e:
             logger.warning(f"Failed to auto-commit sandbox state: {e}")
-    
+
     # Save copy of logs to sandbox root log file
     try:
         log_file = sandbox_root / "sandbox_test.log"
@@ -476,7 +472,7 @@ def run_sandbox_tests() -> tuple:
             f.write(logs)
     except Exception as log_err:
         logger.warning(f"Failed to write sandbox log file: {log_err}")
-        
+
     return passed, logs
 
 def get_sandbox_diff() -> str:
@@ -486,9 +482,9 @@ def get_sandbox_diff() -> str:
     session = get_active_sandbox()
     if not session:
         return "No active sandbox session."
-        
+
     sandbox_root = Path(session["active_sandbox_path"])
-    
+
     # Stage untracked files intent-to-add so they appear in diff
     subprocess.run(
         ["git", "add", "-N", "."],
@@ -496,7 +492,7 @@ def get_sandbox_diff() -> str:
         capture_output=True,
         text=True
     )
-    
+
     res = subprocess.run(
         ["git", "diff"],
         cwd=sandbox_root,
@@ -521,7 +517,7 @@ def get_sandbox_modified_files() -> list:
     session = get_active_sandbox()
     if not session:
         return []
-        
+
     sandbox_root = Path(session["active_sandbox_path"])
     files: set = set()
 
@@ -586,14 +582,14 @@ def parse_pytest_results(logs: str) -> dict:
         passed_match = re.search(r"(\d+)\s+passed", last_summary)
         error_match = re.search(r"(\d+)\s+error", last_summary)
         skipped_match = re.search(r"(\d+)\s+skipped", last_summary)
-        
+
         if failed_match:
             failed += int(failed_match.group(1))
         if error_match:
             failed += int(error_match.group(1))
         if passed_match:
             passed = int(passed_match.group(1))
-            
+
         total = passed + failed
         if skipped_match:
             total += int(skipped_match.group(1))
@@ -681,7 +677,7 @@ def ship_sandbox_session() -> list:
 
     sandbox_root = Path(session["active_sandbox_path"])
     branch_name = session["active_sandbox_branch"]
-    
+
     # 1. Run tests inside the sandbox before finalizing changes
     if (sandbox_root / "tests").exists():
         passed, logs = run_sandbox_tests()
@@ -699,16 +695,16 @@ def ship_sandbox_session() -> list:
     conn = get_connection(read_only_constitution=True)
     cursor = conn.cursor()
     cursor.execute("""
-        SELECT total_tests, passed_tests, failed_tests, coverage_percentage 
-        FROM test_run_baselines 
+        SELECT total_tests, passed_tests, failed_tests, coverage_percentage
+        FROM test_run_baselines
         ORDER BY id DESC LIMIT 1;
     """)
     baseline_row = cursor.fetchone()
     conn.close()
-    
+
     has_regression = False
     regression_reason = ""
-    
+
     if not passed or stats["failed"] > 0:
         has_regression = True
         regression_reason = f"Sandbox tests failed (failed={stats['failed']})."
@@ -717,14 +713,11 @@ def ship_sandbox_session() -> list:
         try:
             if isinstance(baseline_row, dict):
                 baseline_cov = baseline_row.get("coverage_percentage")
-                baseline_failed = baseline_row.get("failed_tests")
             else:
                 baseline_cov = baseline_row[3]
-                baseline_failed = baseline_row[2]
         except Exception:
             baseline_cov = None
-            baseline_failed = 0
-            
+
         if stats["coverage"] is not None and baseline_cov is not None:
             if stats["coverage"] < baseline_cov:
                 has_regression = True
@@ -753,7 +746,7 @@ def ship_sandbox_session() -> list:
         )
         abort_sandbox_session()
         raise RuntimeError(f"Regression detected: {regression_reason}. Sandbox session aborted.")
-        
+
     # If successful, insert new baseline row in test_run_baselines
     conn = get_connection(read_only_constitution=True)
     try:
@@ -767,7 +760,7 @@ def ship_sandbox_session() -> list:
         logger.error(f"Failed to insert test run baseline: {e}")
     finally:
         conn.close()
-        
+
     # Re-check immediately before writing: the first check (above) ran before the
     # potentially long test suite, so the flag could have been flipped mid-flight.
     # This narrows that race window down to the gap between this line and the copy
@@ -787,13 +780,13 @@ def ship_sandbox_session() -> list:
             shutil.copy2(src_file, dest_file)
             copied_files.append(rel_path)
             logger.info(f"Shipped file copy: {rel_path}")
-            
+
     # 4. Cleanup git worktree and branch
     cleanup_git_sandbox(str(sandbox_root), branch_name)
-    
+
     # 5. Clear SQLite session
     clear_sandbox_session()
-    
+
     return copied_files
 
 def promote_evolution_sandbox() -> dict:
@@ -946,7 +939,7 @@ def cleanup_git_sandbox(sandbox_path: str, branch_name: str):
         capture_output=True,
         text=True
     )
-    
+
     # 2. Delete branch
     subprocess.run(
         ["git", "branch", "-D", branch_name],
@@ -954,12 +947,12 @@ def cleanup_git_sandbox(sandbox_path: str, branch_name: str):
         capture_output=True,
         text=True
     )
-    
+
     # 3. Clean remaining directory
     sandbox_dir = Path(sandbox_path)
     if sandbox_dir.exists():
         shutil.rmtree(sandbox_dir, ignore_errors=True)
-    
+
     logger.info(f"Sandbox cleanup completed for '{sandbox_path}' ({branch_name})")
 
 
@@ -971,9 +964,9 @@ def commit_sandbox_state(message: str) -> bool:
     session = get_active_sandbox()
     if not session:
         return False
-        
+
     sandbox_root = Path(session["active_sandbox_path"])
-    
+
     # Check if there are changes to commit
     res_status = subprocess.run(
         ["git", "status", "--porcelain"],
@@ -984,14 +977,14 @@ def commit_sandbox_state(message: str) -> bool:
     if not res_status.stdout.strip():
         # No changes to commit
         return True
-        
+
     # Stage and commit with system environment variables for Project Janus git identity
     env = os.environ.copy()
     env["GIT_AUTHOR_NAME"] = "Project Janus"
     env["GIT_AUTHOR_EMAIL"] = "janus@local.net"
     env["GIT_COMMITTER_NAME"] = "Project Janus"
     env["GIT_COMMITTER_EMAIL"] = "janus@local.net"
-    
+
     subprocess.run(["git", "add", "."], cwd=sandbox_root, capture_output=True, env=env)
     res_commit = subprocess.run(
         ["git", "commit", "-m", message],
@@ -1012,7 +1005,7 @@ def rollback_sandbox_last_commit() -> bool:
     session = get_active_sandbox()
     if not session:
         return False
-        
+
     sandbox_root = Path(session["active_sandbox_path"])
     res = subprocess.run(
         ["git", "reset", "--hard", "HEAD~1"],
@@ -1032,7 +1025,7 @@ def discard_sandbox_changes() -> bool:
     session = get_active_sandbox()
     if not session:
         return False
-        
+
     sandbox_root = Path(session["active_sandbox_path"])
     res_reset = subprocess.run(
         ["git", "reset", "--hard", "HEAD"],

@@ -1,12 +1,9 @@
 import sqlite3
+
 from fastapi import APIRouter, HTTPException
 
-from src.routers.dependencies import (
-    TokenRequest,
-    bootstrap,
-    get_connection
-)
 from src.auth import create_access_token
+from src.routers.dependencies import TokenRequest, bootstrap, get_connection
 
 router = APIRouter()
 
@@ -22,11 +19,11 @@ def login_for_token(data: TokenRequest):
         ).fetchone()
         if not row:
             raise HTTPException(status_code=401, detail="Invalid Party ID/Username or Enrollment Key")
-            
+
         stored_key = row["public_key"]
         if not stored_key or stored_key != data.enrollment_key:
             raise HTTPException(status_code=401, detail="Invalid Party ID/Username or Enrollment Key")
-            
+
         party_id = row["id"]
         role = row["role"]
         token = create_access_token(party_id, role)

@@ -1,25 +1,25 @@
-import json
-import logging
 import asyncio
 import concurrent.futures
+import json
+import logging
 from typing import Optional
-from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect, Query
+
+from fastapi import APIRouter, Depends, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.responses import StreamingResponse
 
+import src.persona
+from src.daemon import reset_governor_state
+from src.database import get_recent_episodic_memories, log_episodic_memory
 from src.routers.dependencies import (
     ChatRequest,
     MemorySetRequest,
-    require_role,
     get_connection,
-    memory_orch,
     get_websocket_party,
+    memory_orch,
+    process_sandbox_updates,
+    require_role,
     verify_role,
-    process_sandbox_updates
 )
-from src.database import log_episodic_memory, get_recent_episodic_memories
-from src.daemon import reset_governor_state
-import src.persona
-
 
 logger = logging.getLogger("JanusWebServer")
 router = APIRouter()
@@ -40,7 +40,7 @@ def get_chat_history(current_party = Depends(require_role('user'))):
         return history
     except Exception as e:
         logger.error(f"Error fetching history: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @router.get("/api/deliberations")
@@ -50,9 +50,9 @@ def get_deliberations(current_party = Depends(require_role('user'))):
         conn = get_connection(read_only_constitution=True)
         cursor = conn.cursor()
         cursor.execute("""
-            SELECT id, timestamp, proposed_action, agent_debate_json, critic_decision, utility_score, justification 
-            FROM internal_deliberations 
-            ORDER BY id DESC 
+            SELECT id, timestamp, proposed_action, agent_debate_json, critic_decision, utility_score, justification
+            FROM internal_deliberations
+            ORDER BY id DESC
             LIMIT 20;
         """)
         rows = cursor.fetchall()
@@ -66,7 +66,7 @@ def get_deliberations(current_party = Depends(require_role('user'))):
                     debate_details = json.loads(r[3])
             except Exception as json_err:
                 logger.warning(f"Failed to parse agent_debate_json for ID {r[0]}: {json_err}")
-            
+
             deliberations.append({
                 "id": r[0],
                 "timestamp": r[1],
@@ -79,7 +79,7 @@ def get_deliberations(current_party = Depends(require_role('user'))):
         return deliberations
     except Exception as e:
         logger.error(f"Error fetching deliberations: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @router.post("/api/chat")
@@ -111,11 +111,11 @@ def post_chat(data: ChatRequest, current_party = Depends(require_role('user'))):
                 )
                 try:
                     response = _fut.result(timeout=_chat_timeout)
-                except concurrent.futures.TimeoutError:
+                except concurrent.futures.TimeoutError as timeout_err:
                     raise HTTPException(
                         status_code=503,
                         detail="Response timed out — the swarm is still thinking. Try again in a moment.",
-                    )
+                    ) from timeout_err
 
         log_episodic_memory("persona", response, "user_visible", party_id=party_id)
         process_sandbox_updates(response)
@@ -123,7 +123,7 @@ def post_chat(data: ChatRequest, current_party = Depends(require_role('user'))):
         return {"response": response}
     except Exception as e:
         logger.error(f"Error processing chat POST: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @router.post("/api/chat/stream")
@@ -235,12 +235,12 @@ async def websocket_deliberations(websocket: WebSocket, token: Optional[str] = Q
         if not verify_role(current_party["role"], "user"):
             raise HTTPException(status_code=403, detail="Forbidden")
     except Exception:
-        raise HTTPException(status_code=401, detail="Unauthorized")
-        
+        raise HTTPException(status_code=401, detail="Unauthorized") from None
+
     await websocket.accept()
-        
+
     last_id = 0
-    
+
     # Initialize last_id to max database id
     conn = get_connection()
     try:
@@ -249,7 +249,7 @@ async def websocket_deliberations(websocket: WebSocket, token: Optional[str] = Q
             last_id = max(0, row[0] - 1)
     finally:
         conn.close()
-        
+
     try:
         while True:
             # Poll DB for new deliberations
@@ -294,34 +294,34 @@ async def websocket_chat(websocket: WebSocket, token: Optional[str] = Query(None
         if not verify_role(current_party["role"], "user"):
             raise HTTPException(status_code=403, detail="Forbidden")
     except Exception:
-        raise HTTPException(status_code=401, detail="Unauthorized")
-        
+        raise HTTPException(status_code=401, detail="Unauthorized") from None
+
     await websocket.accept()
-        
+
     try:
         while True:
             data = await websocket.receive_json()
             user_msg = data.get("message", "").strip()
             if not user_msg:
                 continue
-                
+
             party_id = current_party["party_id"]
             log_episodic_memory("user", user_msg, "user_visible", party_id=party_id)
             reset_governor_state("user_chat")
 
             # Send 'thinking' state back to client
             await websocket.send_json({"event": "thinking"})
-            
+
             if user_msg.startswith("/"):
                 response = await src.persona.handle_web_slash_command(user_msg)
             elif src.persona.detect_metacognitive_intent(user_msg):
                 response = src.persona.generate_metacognitive_narrative(user_msg)
             else:
                 response = src.persona.generate_persona_response_autonomous(user_msg, party_id=party_id)
-                
+
             log_episodic_memory("persona", response, "user_visible", party_id=party_id)
             process_sandbox_updates(response)
-            
+
             # Stream response back
             await websocket.send_json({"event": "response", "message": response})
     except WebSocketDisconnect:

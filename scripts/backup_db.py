@@ -1,8 +1,9 @@
-import sqlite3
 import os
+import sqlite3
 from datetime import datetime
-import boto3
 from pathlib import Path
+
+import boto3
 from dotenv import load_dotenv
 
 # Load configuration
@@ -24,13 +25,13 @@ def run_backup():
     print("Initiating database backups (SQLite main DB & Chroma Vector DB)...")
     BACKUP_DIR.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
-    
+
     local_db_backup_path = BACKUP_DIR / f"janus_backup_{timestamp}.db"
     local_vector_backup_path = BACKUP_DIR / f"chromadb_backup_{timestamp}.tar.gz"
-    
+
     db_success = False
     vector_success = False
-    
+
     # 1. Perform main SQLite Online Backup (safely copying WAL active database)
     try:
         if os.path.exists(DB_PATH):
@@ -53,7 +54,7 @@ def run_backup():
         if os.path.exists(VECTOR_DB_PATH) and os.path.isdir(VECTOR_DB_PATH):
             print(f"Backing up Chroma Vector DB from {VECTOR_DB_PATH}...")
             os.makedirs(temp_vector_backup_dir, exist_ok=True)
-            
+
             # Safe copy of chroma.sqlite3
             chroma_db_src = os.path.join(VECTOR_DB_PATH, "chroma.sqlite3")
             chroma_db_dst = os.path.join(temp_vector_backup_dir, "chroma.sqlite3")
@@ -65,7 +66,7 @@ def run_backup():
                 dst_conn.close()
                 src_conn.close()
                 print("Chroma SQLite backup created successfully.")
-            
+
             # Copy all other folders (indexes) and files (skipping chroma.sqlite3 itself)
             import shutil
             for item in os.listdir(VECTOR_DB_PATH):
@@ -77,7 +78,7 @@ def run_backup():
                     if item.startswith("chroma.sqlite3"):
                         continue
                     shutil.copy2(s, d)
-            
+
             # Create compressed archive of the staging directory
             shutil.make_archive(
                 base_name=str(BACKUP_DIR / f"chromadb_backup_{timestamp}"),
@@ -98,11 +99,11 @@ def run_backup():
     # Resolve paths to return
     db_file_result = local_db_backup_path if db_success else None
     vector_file_result = local_vector_backup_path if vector_success else None
-    
+
     # We require the main DB to succeed. If vector DB exists, it should succeed too.
     vector_db_exists = os.path.exists(VECTOR_DB_PATH) and os.path.isdir(VECTOR_DB_PATH)
     overall_success = db_success and (not vector_db_exists or vector_success)
-    
+
     # 3. Upload to S3 if AWS configuration is present
     if AWS_ACCESS_KEY and AWS_SECRET_KEY and AWS_BUCKET:
         print(f"Uploading backups to S3 bucket '{AWS_BUCKET}'...")
@@ -113,7 +114,7 @@ def run_backup():
                 aws_secret_access_key=AWS_SECRET_KEY,
                 region_name=AWS_REGION
             )
-            
+
             # Upload main DB backup
             if db_file_result and os.path.exists(db_file_result):
                 s3_key_db = f"janus-backups/janus_backup_{timestamp}.db"
@@ -122,7 +123,7 @@ def run_backup():
                 os.remove(db_file_result)
                 print("Local main DB backup file removed (S3 storage active).")
                 db_file_result = None
-                
+
             # Upload vector DB backup
             if vector_file_result and os.path.exists(vector_file_result):
                 s3_key_vector = f"janus-backups/chromadb_backup_{timestamp}.tar.gz"
@@ -131,13 +132,13 @@ def run_backup():
                 os.remove(vector_file_result)
                 print("Local Chroma DB backup file removed (S3 storage active).")
                 vector_file_result = None
-                
+
         except Exception as e:
             print(f"Failed to upload backup to S3: {e}")
             overall_success = False
     else:
         print("AWS credentials not configured. Backups kept locally.")
-        
+
     return overall_success, db_file_result, vector_file_result
 
 if __name__ == "__main__":

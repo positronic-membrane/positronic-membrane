@@ -2,6 +2,7 @@ def commit_draft_to_db(
     filename: str, doc_title: str, tags: list = None, purpose: str = "memory", metadata: dict = None
 ) -> str:
     import os
+
     import src.config
     basename = os.path.basename(filename)
     safe_path = os.path.join(str(src.config.ROOT_DIR), "docs", "drafts", basename)

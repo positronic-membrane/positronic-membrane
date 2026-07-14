@@ -3,18 +3,13 @@ import textwrap
 from pathlib import Path
 from unittest.mock import patch
 
-import pytest
-
+from src.database import get_connection
 from src.skill_harness import (
-    MOCK_SDK_SOURCE,
-    SkillASTAuditor,
     _check_entry_point_defined,
     audit_skill_ast,
     stage_skill,
     sync_from_registry,
 )
-from src.database import get_connection
-
 
 # ---------------------------------------------------------------------------
 # audit_skill_ast

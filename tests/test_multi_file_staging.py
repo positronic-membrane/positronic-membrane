@@ -1,7 +1,5 @@
 import re
 
-import pytest
-
 
 def test_regex_extract_failing_tests():
     """Verify the regex used to find failing test files from pytest output."""
@@ -20,5 +18,5 @@ def test_regex_extract_failing_tests():
         logs,
     ):
         failing_tests.append(match[0] or match[1])
-    failing_tests = sorted(list(set(failing_tests)))
+    failing_tests = sorted(set(failing_tests))
     assert failing_tests == ["tests/test_memory.py", "tests/test_persona.py"]

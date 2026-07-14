@@ -6,7 +6,7 @@ def evaluate_drives():
             status = rows[0].get("config_value", "idle")
         elif isinstance(rows[0], (list, tuple)):
             status = rows[0][0]
-            
+
     thresh_rows = sdk['db'].query("SELECT config_value FROM system_config WHERE config_key = 'boredom_threshold';")
     threshold = 5
     if thresh_rows:
@@ -15,7 +15,7 @@ def evaluate_drives():
             threshold = int(val)
         except Exception:
             pass
-            
+
     if status == "idle":
         b = sdk['drives'].increment("boredom", 1)
         if b >= threshold:

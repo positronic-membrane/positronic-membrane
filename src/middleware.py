@@ -1,5 +1,6 @@
-import re
 import logging
+import re
+
 from src.database import get_connection, get_constitution
 
 logger = logging.getLogger("JanusMiddleware")
@@ -15,11 +16,11 @@ class SelfModificationFrozenError(Exception):
 
 def check_sql_safety(sql_query: str):
     """
-    Parses SQL queries to block any updates, deletes, drops, or alters 
+    Parses SQL queries to block any updates, deletes, drops, or alters
     targeting the core_constitution table, or modifying non-agent-modifiable system configs.
     """
     sql_clean = re.sub(r'\s+', ' ', sql_query).strip().lower()
-    
+
     # Check for direct modifications to core_constitution table
     if "core_constitution" in sql_clean:
         if any(op in sql_clean for op in ["insert", "update", "delete", "drop", "alter"]):
@@ -35,13 +36,13 @@ def validate_config_write(config_key: str):
     conn = get_connection(read_only_constitution=True)
     cursor = conn.cursor()
     cursor.execute("""
-    SELECT is_agent_modifiable 
-    FROM system_config 
+    SELECT is_agent_modifiable
+    FROM system_config
     WHERE config_key = ?;
     """, (config_key,))
     row = cursor.fetchone()
     conn.close()
-    
+
     # If key exists and is non-modifiable, block it
     if row is not None and row[0] == 0:
         raise SafetyViolationError(
@@ -54,7 +55,7 @@ def validate_action(proposed_action: str) -> bool:
     Checks for banned directories/paths and restricted domains.
     """
     logger.info(f"Middleware evaluating proposed action: '{proposed_action}'")
-    
+
     # 1. Check default config banned websites
     import src.config
     for site in src.config.DEFAULT_BANNED_WEBSITES:
@@ -63,21 +64,21 @@ def validate_action(proposed_action: str) -> bool:
             raise SafetyViolationError(
                 f"Safety Violation: Action contains references to default restricted boundary path/domain '{site}'."
             )
-            
+
     # 2. Check rules from constitution
     rules = get_constitution()
-    
+
     # Extract rules from constitution
     banned_boundaries = ""
     for key, text in rules:
         if key.upper() == "BANNED_BOUNDARIES":
             banned_boundaries = text
             break
-            
+
     if banned_boundaries:
         # Split banned boundaries into list
         boundaries = [b.strip() for b in banned_boundaries.split(",") if b.strip()]
-        
+
         for boundary in boundaries:
             # Check if boundary is a path or a domain
             if boundary.startswith("/") or boundary.startswith("\\") or "." in boundary:
@@ -87,7 +88,7 @@ def validate_action(proposed_action: str) -> bool:
                     raise SafetyViolationError(
                         f"Safety Violation: Action contains references to restricted boundary path/domain '{boundary}'."
                     )
-                    
+
     logger.info("Middleware validation passed.")
     return True
 
@@ -149,19 +150,19 @@ def check_loop_safety():
     """
     conn = get_connection(read_only_constitution=True)
     cursor = conn.cursor()
-    
+
     # Read loop counter
     cursor.execute("SELECT config_value FROM system_config WHERE config_key = 'consecutive_background_loops';")
     row = cursor.fetchone()
     counter = int(row[0]) if row else 0
-    
+
     # Read loop limit
     cursor.execute("SELECT config_value FROM system_config WHERE config_key = 'n_loop_limit';")
     row_limit = cursor.fetchone()
     limit = int(row_limit[0]) if row_limit else 5
-    
+
     conn.close()
-    
+
     if counter > limit:
         raise SafetyViolationError(
             f"Loop Safety Valve triggered: consecutive background loops ({counter}) exceeded limit ({limit})."

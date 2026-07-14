@@ -163,7 +163,7 @@ def test_spawn_child_success(mock_copytree, mock_popen, mock_get_root, tmp_path)
             return ConnectionProxy(real_child_db)
         return original_connect(database, *args, **kwargs)
 
-    with patch("sqlite3.connect", side_effect=mock_connect) as mock_sqlite_connect:
+    with patch("sqlite3.connect", side_effect=mock_connect):
         res = rep.spawn_child("my-child-instance", "my-child-instance")
 
     assert res["success"] is True

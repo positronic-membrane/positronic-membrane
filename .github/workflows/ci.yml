@@ -20,7 +20,15 @@ jobs:
       - name: Install dependencies
         run: pip install -e .[dev]
 
+      - name: Ruff lint
+        run: ruff check .
+
       - name: Run test suite
         env:
           JANUS_TEST_MODE: "1"
         run: pytest
+
+      - name: Run e2e suite
+        env:
+          JANUS_TEST_MODE: "1"
+        run: pytest -m e2e

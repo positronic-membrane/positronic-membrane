@@ -101,7 +101,7 @@ def test_stage_status_returns_410(web_server):
     req = urllib.request.Request(url, method="GET")
     try:
         urllib.request.urlopen(req)
-        assert False, "Expected HTTPError 410"
+        raise AssertionError("Expected HTTPError 410")
     except urllib.error.HTTPError as e:
         assert e.code == 410
 

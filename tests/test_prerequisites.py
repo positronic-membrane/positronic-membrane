@@ -174,10 +174,10 @@ def test_compress_episodic_memory_background_thought_only(mock_add_memory, mock_
 
 
 def _insert_backdated_episodic_row(speaker: str, message: str, context_type: str, days_ago: int):
-    from datetime import datetime, timedelta
+    from datetime import datetime, timedelta, timezone
 
     from src.database import get_connection
-    ts = (datetime.utcnow() - timedelta(days=days_ago)).strftime('%Y-%m-%d %H:%M:%S')
+    ts = (datetime.now(timezone.utc) - timedelta(days=days_ago)).strftime('%Y-%m-%d %H:%M:%S')
     conn = get_connection()
     conn.execute(
         "INSERT INTO episodic_memory (speaker, message_content, context_type, timestamp) VALUES (?, ?, ?, ?);",

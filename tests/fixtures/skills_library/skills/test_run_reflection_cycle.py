@@ -1,6 +1,5 @@
 """Staging test for Run Reflection Cycle skill."""
 import importlib.util
-import logging
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -58,7 +57,7 @@ def test_skill_entry_point_defined():
     mod.sdk = _make_sdk()
     spec.loader.exec_module(mod)
     assert hasattr(mod, "run_reflection_cycle")
-    assert callable(getattr(mod, "run_reflection_cycle"))
+    assert callable(mod.run_reflection_cycle)
 
 
 def _make_behavior_sdk(propose_raises=False, curiosity_response='["pgvector recall", "chroma benchmarks"]'):

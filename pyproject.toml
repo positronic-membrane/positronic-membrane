@@ -52,7 +52,7 @@ markers = [
 addopts = "-m 'not e2e'"
 
 [tool.ruff]
-line-length = 120
+line-length = 160
 target-version = "py310"
 
 [tool.ruff.lint]
@@ -65,4 +65,12 @@ select = [
     "C4",   # flake8-comprehensions
 ]
 ignore = []
+
+[tool.ruff.lint.flake8-bugbear]
+extend-immutable-calls = ["fastapi.Depends", "fastapi.Query", "src.routers.dependencies.require_role"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/fixtures/skills_library/**" = ["F821"]
+"src/web_server.py" = ["E402"]
+"src/migrations/env.py" = ["E402"]
 

@@ -1,12 +1,13 @@
 import pytest
+
 from src.self_modification import (
-    stage_and_test,
-    stage_and_test_multi,
+    apply_search_replace_blocks,
     apply_staged_change,
     apply_staged_multi,
     generate_diff,
     generate_multi_diff,
-    apply_search_replace_blocks,
+    stage_and_test,
+    stage_and_test_multi,
 )
 
 _DISABLED = "Direct source modification is disabled. Use the skill staging harness or a Project Sandbox."

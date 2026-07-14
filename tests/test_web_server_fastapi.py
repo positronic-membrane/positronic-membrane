@@ -2,6 +2,7 @@ from datetime import UTC, datetime
 
 import pytest
 from fastapi.testclient import TestClient
+from starlette.testclient import WebSocketDenialResponse
 
 import src.config
 from src.auth import create_access_token
@@ -153,7 +154,7 @@ def test_websocket_deliberations():
     try:
         # If REQUIRE_AUTH=True, connecting without a token fails
         src.config.REQUIRE_AUTH = True
-        with pytest.raises(Exception):
+        with pytest.raises(WebSocketDenialResponse):
             with client.websocket_connect("/ws/deliberations") as ws:
                 pass
 
@@ -179,7 +180,7 @@ def test_websocket_chat():
         try:
             # If REQUIRE_AUTH=True, connecting without a token fails
             src.config.REQUIRE_AUTH = True
-            with pytest.raises(Exception):
+            with pytest.raises(WebSocketDenialResponse):
                 with client.websocket_connect("/ws/chat") as ws:
                     pass
 
@@ -233,9 +234,10 @@ def test_rate_limiting():
 
 def test_header_resolution_isolation():
     # Enable Auth for test
+    from unittest.mock import patch
+
     import src.config
     from src.database import get_connection
-    from unittest.mock import patch
 
     original_require_auth = src.config.REQUIRE_AUTH
     src.config.REQUIRE_AUTH = True

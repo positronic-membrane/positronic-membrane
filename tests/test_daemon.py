@@ -266,7 +266,7 @@ def test_sdk_layered_cognition():
 
     layers = sdk_lc.get_layers()
     assert len(layers) == 3
-    layer_names = [l["name"] for l in layers]
+    layer_names = [layer["name"] for layer in layers]
     assert "high" in layer_names
     assert "mid" in layer_names
 
