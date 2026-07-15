@@ -74,6 +74,19 @@ CREATE TABLE IF NOT EXISTS agent_registry (
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+-- 7a. Create prompt_templates
+CREATE TABLE IF NOT EXISTS prompt_templates (
+    id SERIAL PRIMARY KEY,
+    name TEXT NOT NULL,
+    version INTEGER NOT NULL,
+    content TEXT NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    created_by TEXT,
+    change_reason TEXT,
+    is_active INTEGER DEFAULT 0,
+    UNIQUE(name, version)
+);
+
 -- 8. Create system_config
 CREATE TABLE IF NOT EXISTS system_config (
     config_key TEXT PRIMARY KEY,

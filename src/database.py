@@ -39,6 +39,7 @@ CONFLICT_COLUMNS = {
     "core_constitution": ["rule_key"],
     "system_config": ["config_key"],
     "agent_registry": ["agent_id"],
+    "prompt_templates": ["name", "version"],
     "agent_rules": ["rule_key"],
     "agent_skills": ["skill_id"],
     "instincts": ["key"],
@@ -461,6 +462,20 @@ def init_db():
         is_active INTEGER DEFAULT 1,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    """)
+
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS prompt_templates (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        version INTEGER NOT NULL,
+        content TEXT NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        created_by TEXT,
+        change_reason TEXT,
+        is_active INTEGER DEFAULT 0,
+        UNIQUE(name, version)
     );
     """)
 
@@ -1001,6 +1016,16 @@ def init_db():
         INSERT OR IGNORE INTO agent_registry (agent_id, agent_name, system_prompt, target_model)
         VALUES (?, ?, ?, ?);
         """, (agent_id, name, prompt, model))
+
+    # Seed version 1 of each core agent's prompt into the versioned prompt registry
+    # (issue #67). INSERT OR IGNORE keyed on (name, version) makes this idempotent
+    # across boots, mirroring the agent_registry seed above — a later source-code
+    # prompt edit won't silently clobber a live-rolled-back prompt.
+    for agent_id, _name, prompt, _model in default_agents:
+        cursor.execute("""
+        INSERT OR IGNORE INTO prompt_templates (name, version, content, created_by, change_reason, is_active)
+        VALUES (?, 1, ?, 'system', 'Initial migration from agent_registry seed', 1);
+        """, (agent_id, prompt))
 
     # Populate default agent rules
     default_rules = [
@@ -1728,6 +1753,14 @@ def register_helper_agent(agent_id: str, name: str, prompt: str, model: str = No
     """, (agent_id, name, prompt, model))
     conn.commit()
     conn.close()
+
+    # get_agent_settings() overlays the active prompt_templates row (issue #67)
+    # over agent_registry.system_prompt for any agent_id that has one — keep it
+    # in sync here or this write silently no-ops for that agent from then on.
+    from src.prompt_registry import get_prompt, update_prompt
+    existing = get_prompt(agent_id)
+    if existing is None or existing["content"] != prompt:
+        update_prompt(agent_id, prompt, change_reason="Registered via SafeSwarm.register_agent", created_by="system")
 
 def deactivate_helper_agent(agent_id: str):
     """Deactivates an agent in the registry (sets is_active to 0)."""
