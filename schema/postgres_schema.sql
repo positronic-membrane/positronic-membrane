@@ -70,6 +70,7 @@ CREATE TABLE IF NOT EXISTS agent_registry (
     system_prompt TEXT NOT NULL,
     target_model TEXT,
     is_active INTEGER DEFAULT 1,
+    allow_offbox INTEGER NOT NULL DEFAULT 0,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );

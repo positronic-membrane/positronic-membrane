@@ -57,6 +57,7 @@ class ConstitutionDeleteRequest(BaseModel):
 class RegistryUpdateRequest(BaseModel):
     agent_id: str
     model: Optional[str] = None
+    allow_offbox: Optional[bool] = None
 
 class RegistryRulesUpdateRequest(BaseModel):
     action: str

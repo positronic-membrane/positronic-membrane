@@ -4,7 +4,12 @@ import pytest
 
 import src.config
 from src.database import get_connection, init_db
-from src.llm import get_agent_settings, query_agent, resolve_agent_model
+from src.llm import (
+    OffboxRoutingViolationError,
+    get_agent_settings,
+    query_agent,
+    resolve_agent_model,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -17,6 +22,18 @@ def setup_test_db(tmp_path):
     yield
     src.config.DB_PATH = orig_db_path
 
+
+@pytest.fixture(autouse=True)
+def _default_no_openrouter(monkeypatch):
+    """Neutralize the developer's real .env OPENROUTER_API_KEY so tests that
+    exercise the real query_agent()/_prepare_llm_call() path aren't at the
+    mercy of local dev config for off-box routing (issue #108's allow_offbox
+    gate makes this consequential — previously irrelevant since the OpenAI
+    client itself was always mocked regardless of which endpoint it was
+    constructed with). Tests that specifically exercise OpenRouter routing
+    re-set this themselves via the same monkeypatch fixture."""
+    monkeypatch.setattr(src.config, "OPENROUTER_API_KEY", "")
+
 def test_get_agent_settings():
     """Verify registry queries return correct defaults for proposer and critic."""
     proposer_settings = get_agent_settings("proposer")
@@ -24,6 +41,7 @@ def test_get_agent_settings():
     assert proposer_settings[0] == "Proposer Agent"
     assert "You are the Proposer" in proposer_settings[1]
     assert proposer_settings[2] is None  # target_model defaults to Null
+    assert proposer_settings[3] == 0  # allow_offbox defaults to deny (issue #108)
 
 def test_resolve_agent_model(monkeypatch):
     """Verify dynamic model overrides resolve in order of priority."""
@@ -73,18 +91,133 @@ def test_resolve_agent_client_params(monkeypatch):
     assert base_url == src.config.LLM_BASE_URL
     assert api_key == src.config.LLM_API_KEY
 
-    # Case 2: OpenRouter automatic routing (contains '/' and OPENROUTER_API_KEY is configured)
+    # Case 2: OpenRouter automatic routing (contains '/' and OPENROUTER_API_KEY is configured).
+    # allow_offbox=True here since this is testing tier-resolution logic, not
+    # the allow_offbox gate itself (covered separately below) — the
+    # parameter's default is fail-closed (issue #108), so it must be passed
+    # explicitly to reach tier 2/3.
     monkeypatch.setattr(src.config, "OPENROUTER_API_KEY", "sk-or-v1-testkey")
-    base_url, api_key = resolve_agent_client_params("proposer", "google/gemini-2.5-flash")
+    base_url, api_key = resolve_agent_client_params("proposer", "google/gemini-2.5-flash", allow_offbox=True)
     assert base_url == "https://openrouter.ai/api/v1"
     assert api_key == "sk-or-v1-testkey"
 
     # Case 3: Agent-specific overrides (highest priority)
     monkeypatch.setattr(src.config, "PROPOSER_BASE_URL", "https://custom-agent-endpoint.com/v1")
     monkeypatch.setattr(src.config, "PROPOSER_API_KEY", "custom-agent-key")
-    base_url, api_key = resolve_agent_client_params("proposer", "google/gemini-2.5-flash")
+    base_url, api_key = resolve_agent_client_params("proposer", "google/gemini-2.5-flash", allow_offbox=True)
     assert base_url == "https://custom-agent-endpoint.com/v1"
     assert api_key == "custom-agent-key"
+
+
+def test_resolve_agent_client_params_allow_offbox_false(monkeypatch):
+    """Verify allow_offbox=False (issue #108) raises instead of silently
+    routing off-box, for both the agent-override tier and the OpenRouter
+    tier, but never blocks the LLM_BASE_URL fallback tier."""
+    from src.llm import resolve_agent_client_params
+
+    monkeypatch.setattr(src.config, "PROPOSER_BASE_URL", None)
+    monkeypatch.setattr(src.config, "PROPOSER_API_KEY", None)
+    monkeypatch.setattr(src.config, "OPENROUTER_API_KEY", "")
+
+    # Tier 3 fallback is always permitted, even with allow_offbox=False.
+    base_url, api_key = resolve_agent_client_params(
+        "proposer", "qwen2.5-coder:7b", allow_offbox=False
+    )
+    assert base_url == src.config.LLM_BASE_URL
+    assert api_key == src.config.LLM_API_KEY
+
+    # Tier 2 (OpenRouter) raises when allow_offbox=False.
+    monkeypatch.setattr(src.config, "OPENROUTER_API_KEY", "sk-or-v1-testkey")
+    with pytest.raises(OffboxRoutingViolationError):
+        resolve_agent_client_params("proposer", "google/gemini-2.5-flash", allow_offbox=False)
+
+    # Tier 1 (agent-specific override) raises when allow_offbox=False.
+    monkeypatch.setattr(src.config, "PROPOSER_BASE_URL", "https://custom-agent-endpoint.com/v1")
+    monkeypatch.setattr(src.config, "PROPOSER_API_KEY", "custom-agent-key")
+    with pytest.raises(OffboxRoutingViolationError):
+        resolve_agent_client_params("proposer", "qwen2.5-coder:7b", allow_offbox=False)
+
+
+@patch("src.llm.OpenAI")
+def test_offbox_violation_propagates_through_query_agent(mock_openai_class, monkeypatch):
+    """An agent with allow_offbox=0 (the default) and a '/'-model with
+    OPENROUTER_API_KEY set must raise OffboxRoutingViolationError from
+    query_agent() rather than silently falling back or routing off-box —
+    and must never construct/call the OpenAI client (issue #108)."""
+    monkeypatch.setattr(src.config, "OPENROUTER_API_KEY", "sk-or-v1-testkey")
+
+    conn = get_connection()
+    conn.cursor().execute(
+        "UPDATE agent_registry SET target_model = 'google/gemini-2.5-flash' WHERE agent_id = 'proposer';"
+    )
+    conn.commit()
+    conn.close()
+
+    with pytest.raises(OffboxRoutingViolationError):
+        query_agent("proposer", "Build action")
+
+    mock_openai_class.assert_not_called()
+
+
+@patch("src.llm.OpenAI")
+def test_allow_offbox_1_permits_openrouter_routing(mock_openai_class, monkeypatch):
+    """allow_offbox=1 permits the same agent/model combo that would
+    otherwise raise (issue #108)."""
+    monkeypatch.setattr(src.config, "OPENROUTER_API_KEY", "sk-or-v1-testkey")
+
+    conn = get_connection()
+    conn.cursor().execute(
+        "UPDATE agent_registry SET target_model = 'google/gemini-2.5-flash', allow_offbox = 1 "
+        "WHERE agent_id = 'proposer';"
+    )
+    conn.commit()
+    conn.close()
+
+    mock_client = MagicMock()
+    mock_openai_class.return_value = mock_client
+    mock_choice = MagicMock()
+    mock_choice.message.content = "PROPOSED_ACTION: ok"
+    mock_client.chat.completions.create.return_value.choices = [mock_choice]
+
+    resp = query_agent("proposer", "Build action")
+    assert resp == "PROPOSED_ACTION: ok"
+    mock_openai_class.assert_called_once()
+    call_kwargs = mock_openai_class.call_args[1]
+    assert call_kwargs["base_url"] == "https://openrouter.ai/api/v1"
+
+
+@patch("src.llm.OpenAI")
+def test_offbox_gate_does_not_block_a_cache_hit(mock_openai_class, monkeypatch):
+    """issue #108: a cache hit needs zero network egress, so it must be served
+    even for an agent whose *current* routing would violate allow_offbox=0 —
+    the gate must not run ahead of the cache short-circuit."""
+    mock_client = MagicMock()
+    mock_openai_class.return_value = mock_client
+    mock_resp = MagicMock()
+    mock_resp.choices = [MagicMock(message=MagicMock(content="cached content"))]
+    mock_resp.usage = MagicMock(prompt_tokens=10, completion_tokens=15)
+    mock_client.chat.completions.create.return_value = mock_resp
+
+    # First call: local on-box routing (default), populates the cache.
+    resp = query_agent("proposer", "cache-then-offbox test")
+    assert resp == "cached content"
+    assert mock_client.chat.completions.create.call_count == 1
+
+    # Flip this agent's target_model to something that would now violate
+    # allow_offbox=0 — the system prompt (and therefore prompt_hash) is
+    # unaffected by target_model, so the same prompt still hits the cache.
+    monkeypatch.setattr(src.config, "OPENROUTER_API_KEY", "sk-or-v1-testkey")
+    conn = get_connection()
+    conn.cursor().execute(
+        "UPDATE agent_registry SET target_model = 'google/gemini-2.5-flash' WHERE agent_id = 'proposer';"
+    )
+    conn.commit()
+    conn.close()
+
+    resp2 = query_agent("proposer", "cache-then-offbox test")
+    assert resp2 == "cached content"
+    # No new client call — served entirely from cache, gate never engaged.
+    assert mock_client.chat.completions.create.call_count == 1
 
 
 # --- Consolidating from test_v1_priority0.py ---

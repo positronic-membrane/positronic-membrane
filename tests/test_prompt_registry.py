@@ -83,7 +83,7 @@ def test_list_versions_orders_newest_first_and_marks_active():
 def test_get_agent_settings_reflects_prompt_registry_content():
     settings = get_agent_settings("persona")
     assert settings is not None
-    _, system_prompt, _ = settings
+    _, system_prompt, _, _ = settings
     active = get_prompt("persona")
     assert system_prompt == active["content"]
 

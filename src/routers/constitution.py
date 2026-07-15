@@ -19,6 +19,7 @@ from src.routers.dependencies import (
     require_role,
     resolve_party_by_api_key,
     resolve_party_by_fingerprint,
+    verify_role,
 )
 
 logger = logging.getLogger("JanusWebServer")
@@ -97,22 +98,37 @@ def delete_constitution(data: ConstitutionDeleteRequest, current_party = Depends
 
 @router.post("/api/registry/update")
 def update_registry(data: RegistryUpdateRequest, current_party = Depends(require_role('contributor'))):
-    """Updates target model override for a given agent registry record."""
+    """Updates target model override for a given agent registry record.
+    allow_offbox (issue #108) is operator-set only — setting it requires
+    admin role specifically, stricter than this endpoint's base contributor
+    gate on target_model."""
     agent_id = data.agent_id.strip()
     model = data.model.strip() if data.model else None
     if not agent_id:
         raise HTTPException(status_code=400, detail="Agent ID cannot be empty.")
+    if data.allow_offbox is not None and not verify_role(current_party["role"], "admin"):
+        raise HTTPException(status_code=403, detail="Setting allow_offbox requires admin role.")
     try:
         conn = get_connection(read_only_constitution=True)
         cursor = conn.cursor()
-        cursor.execute("""
-            UPDATE agent_registry
-            SET target_model = ?, updated_at = CURRENT_TIMESTAMP
-            WHERE agent_id = ?;
-        """, (model, agent_id))
+        if data.allow_offbox is not None:
+            cursor.execute("""
+                UPDATE agent_registry
+                SET target_model = ?, allow_offbox = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE agent_id = ?;
+            """, (model, int(data.allow_offbox), agent_id))
+        else:
+            cursor.execute("""
+                UPDATE agent_registry
+                SET target_model = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE agent_id = ?;
+            """, (model, agent_id))
         conn.commit()
         conn.close()
-        log_episodic_memory("system", f"User updated agent model override for '{agent_id}' to '{model or 'DEFAULT'}'.", "user_visible")
+        log_message = f"User updated agent model override for '{agent_id}' to '{model or 'DEFAULT'}'."
+        if data.allow_offbox is not None:
+            log_message += f" allow_offbox set to {data.allow_offbox}."
+        log_episodic_memory("system", log_message, "user_visible")
         return {"success": True}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e)) from e

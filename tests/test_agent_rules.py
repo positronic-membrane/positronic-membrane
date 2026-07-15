@@ -119,8 +119,12 @@ def test_agent_rules_crud_helpers(setup_test_db):
     assert len(rules_after_delete) == 5
 
 @patch("src.llm.OpenAI")
-def test_query_agent_compiles_rules(mock_openai_class, setup_test_db):
+def test_query_agent_compiles_rules(mock_openai_class, setup_test_db, monkeypatch):
     """Verify that query_agent compiles and appends active rules into the system prompt."""
+    # Neutralize the developer's real .env OPENROUTER_API_KEY so this test's
+    # unmodified target_model/LLM_MODEL fallback (issue #108's allow_offbox
+    # gate defaults to deny) doesn't depend on local dev config.
+    monkeypatch.setattr(src.config, "OPENROUTER_API_KEY", "")
     mock_client = MagicMock()
     mock_openai_class.return_value = mock_client
 

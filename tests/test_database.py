@@ -18,6 +18,7 @@ from src.database import (
     log_deliberation,
     log_episodic_memory,
     mark_setup_complete,
+    register_helper_agent,
     reset_boredom,
     update_curiosity_vector,
 )
@@ -257,6 +258,71 @@ def test_janus_documents_backfill_migration_adds_purpose_and_metadata(tmp_path):
         assert row[3] == "{}"
     finally:
         src.config.DB_PATH = orig_db_path
+
+
+def test_agent_registry_backfill_migration_adds_allow_offbox(tmp_path):
+    """Pre-existing DBs created before issue #108 only have the original 6
+    agent_registry columns; re-running init_db() must backfill allow_offbox
+    (defaulting to 0, deny) without dropping existing rows."""
+    legacy_db = tmp_path / "legacy_agent_registry.db"
+    conn = sqlite3.connect(str(legacy_db))
+    conn.execute("""
+        CREATE TABLE agent_registry (
+            agent_id TEXT PRIMARY KEY,
+            agent_name TEXT NOT NULL,
+            system_prompt TEXT NOT NULL,
+            target_model TEXT,
+            is_active INTEGER DEFAULT 1,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+    """)
+    conn.execute(
+        "INSERT INTO agent_registry (agent_id, agent_name, system_prompt, target_model) "
+        "VALUES ('legacy_agent', 'Legacy Agent', 'You are legacy.', 'openrouter/some-model');"
+    )
+    conn.commit()
+    conn.close()
+
+    orig_db_path = src.config.DB_PATH
+    src.config.DB_PATH = str(legacy_db)
+    try:
+        init_db()
+        conn = get_connection(read_only_constitution=True)
+        cursor = conn.cursor()
+        cursor.execute("PRAGMA table_info(agent_registry);")
+        columns = {row[1] for row in cursor.fetchall()}
+        assert "allow_offbox" in columns
+
+        cursor.execute("SELECT allow_offbox FROM agent_registry WHERE agent_id = 'legacy_agent';")
+        row = cursor.fetchone()
+        conn.close()
+        assert row[0] == 0
+    finally:
+        src.config.DB_PATH = orig_db_path
+
+
+def test_register_helper_agent_preserves_allow_offbox_on_rewrite():
+    """register_helper_agent() must not silently reset an operator-set
+    allow_offbox=1 back to the column default when re-registering an
+    already-existing agent (issue #108)."""
+    register_helper_agent("helper_agent", "Helper", "You are a helper.", "some-model")
+
+    conn = get_connection(read_only_constitution=True)
+    cursor = conn.cursor()
+    cursor.execute("UPDATE agent_registry SET allow_offbox = 1 WHERE agent_id = 'helper_agent';")
+    conn.commit()
+    conn.close()
+
+    register_helper_agent("helper_agent", "Helper", "You are a helper, updated.", "some-model")
+
+    conn = get_connection(read_only_constitution=True)
+    cursor = conn.cursor()
+    cursor.execute("SELECT allow_offbox, system_prompt FROM agent_registry WHERE agent_id = 'helper_agent';")
+    row = cursor.fetchone()
+    conn.close()
+    assert row[0] == 1
+    assert row[1] == "You are a helper, updated."
 
 
 def test_goal_checkpoints_backfill_migration_adds_completed_by_party_id(tmp_path):

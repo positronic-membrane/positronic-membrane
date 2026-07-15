@@ -28,6 +28,21 @@ def check_sql_safety(sql_query: str):
                 "Safety Violation: Direct mutation of the 'core_constitution' table is strictly forbidden."
             )
 
+    # issue #108: allow_offbox (agent_registry) is operator-set only — no
+    # agent-reachable SQL path (e.g. SafeDB.query()) may write it, even
+    # though the table itself is otherwise agent-writable. Uses \b word
+    # boundaries (unlike the plain substring checks above) so this doesn't
+    # false-positive on "update" appearing inside the table's own
+    # "updated_at" column name, and includes "replace"/"alter" so
+    # REPLACE INTO / ALTER TABLE RENAME COLUMN can't sidestep it the way a
+    # bare ["insert", "update"] substring list would allow.
+    if "agent_registry" in sql_clean and "allow_offbox" in sql_clean:
+        if re.search(r'\b(insert|update|replace|alter)\b', sql_clean):
+            raise SafetyViolationError(
+                "Safety Violation: 'allow_offbox' on 'agent_registry' is operator-set only "
+                "and cannot be modified by the agent swarm."
+            )
+
 def validate_config_write(config_key: str):
     """
     Validates if a configuration key is modifiable by agents.

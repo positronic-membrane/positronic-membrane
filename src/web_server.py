@@ -113,9 +113,17 @@ def serve_static(path: str):
 
 # --- Server Startup ---
 
-def run_server(port=5005):
-    """Starts the Uvicorn ASGI server. Blocks until process is interrupted."""
-    from src.config import run_config_check
+def run_server(port=5005, skip_agent_routing_check=False):
+    """Starts the Uvicorn ASGI server. Blocks until process is interrupted.
+
+    skip_agent_routing_check: set by src/main.py's threaded WEB-mode launch,
+    which already ran run_agent_routing_check() right after init_db() in the
+    same process — running it a second time here would be pure redundant
+    work (issue #108). Left False by default so the standalone janus-server
+    console-script entrypoint, which never calls init_db()/the routing check
+    itself, still gets this safety net.
+    """
+    from src.config import run_agent_routing_check, run_config_check
     from src.logging_config import setup_logging
     setup_logging()
     if run_config_check() != 0:
@@ -123,6 +131,12 @@ def run_server(port=5005):
         # in a background thread, where SystemExit only kills that thread and
         # is silently swallowed — the whole process must come down here.
         logger.critical("Aborting web server startup due to configuration errors.")
+        os._exit(1)
+    # issue #108: per-agent off-box LLM routing policy check. Degrades to a
+    # warning (not a crash) if agent_registry doesn't exist yet — the
+    # standalone janus-server entrypoint does not call init_db() itself.
+    if not skip_agent_routing_check and run_agent_routing_check() != 0:
+        logger.critical("Aborting web server startup due to agent routing policy violations.")
         os._exit(1)
     import uvicorn
     os.makedirs(STATIC_DIR, exist_ok=True)
