@@ -235,6 +235,7 @@ janus.db-wal
 janus.db-shm
 janus.db.bak
 data/
+backups/
 .janus_sandboxes/
 .janus_snapshots/
 .keys/

@@ -23,20 +23,32 @@ _PBKDF2_ITERATIONS = 600_000  # OWASP 2023 recommendation for PBKDF2-HMAC-SHA256
 _LEGACY_DEFAULT_KEY_DIGEST_HEX = "2c18ff4f40dc25cf4075b178ba06c919e412d49ea003774c6a9f06e3e33f4f83"
 
 
+def derive_fernet_key(secret: str, salt: bytes) -> bytes:
+    """PBKDF2-HMAC-SHA256-derives a Fernet-compatible urlsafe-base64 key from an arbitrary
+    secret string and a domain-separation salt. Shared primitive for every "Fernet key from
+    an operator-supplied secret" use case in this codebase (e.g. JANUS_ENCRYPTION_KEY here,
+    BACKUP_ENCRYPTION_KEY in scripts/backup_db.py) — each caller picks its own salt so
+    unrelated secrets derive unrelated keys even if the same underlying string were ever
+    accidentally reused across the two. Not cached: callers that call this repeatedly (PBKDF2
+    at this iteration count is deliberately slow) should cache at their own call site, keyed
+    on their own (secret, salt) pair."""
+    kdf = PBKDF2HMAC(
+        algorithm=hashes.SHA256(),
+        length=32,
+        salt=salt,
+        iterations=_PBKDF2_ITERATIONS,
+    )
+    derived = kdf.derive(secret.encode("utf-8"))
+    return base64.urlsafe_b64encode(derived)
+
+
 @lru_cache(maxsize=1)
 def _derive_fernet_key(secret: str) -> bytes:
     """PBKDF2-HMAC-SHA256-derives a Fernet-compatible urlsafe-base64 key from
     the raw JANUS_ENCRYPTION_KEY secret. Cached because PBKDF2 at this
     iteration count is deliberately slow and callers may encrypt/decrypt many
     keys per process lifetime."""
-    kdf = PBKDF2HMAC(
-        algorithm=hashes.SHA256(),
-        length=32,
-        salt=_PBKDF2_SALT,
-        iterations=_PBKDF2_ITERATIONS,
-    )
-    derived = kdf.derive(secret.encode("utf-8"))
-    return base64.urlsafe_b64encode(derived)
+    return derive_fernet_key(secret, _PBKDF2_SALT)
 
 
 def _get_fernet() -> Fernet:
