@@ -137,13 +137,21 @@ Because Janus serves over plain HTTP (`http://<droplet-ip>:5005`), your tokens a
 
 To ensure the safety of Project Janus, a dual-database backup system is automated on your droplet.
 
+> For a full bare-droplet-to-running-instance disaster recovery procedure (fresh
+> host, no code/deps/secrets yet), see `docs/restore_runbook.md`. The restore
+> steps in Part 4 below assume the code and systemd service are already installed
+> on the host being restored — use them for same-host recovery from a corrupted DB.
+
 ### 1. What is Backed Up?
 The backup system takes consistent snapshots of both databases used by Janus:
 *   **Main Database (`janus.db`):** Safe SQLite online copy of the active database (safely handling WAL/journal modes).
 *   **Chroma Vector Database (`data/chromadb`):** Safe SQLite online copy of `chroma.sqlite3`, combined with a recursive copy of the semantic vector index directories, packaged as a compressed `.tar.gz` archive.
+*   **Secrets inventory:** a small JSON file listing which `.env` vars and `.keys/` files are *configured* — names only, never values. It's a restore checklist, not a secrets export.
+
+Every artifact is verified after creation (`PRAGMA integrity_check` for the sqlite copies, an open+non-empty-member check for the vector archive) before it's uploaded or kept — a backup that fails verification is not counted as a successful run, and `send_webhook_notification` fires a `backup_failed` alert (configured webhook targets, see `src/notifications.py`) so a broken backup job doesn't fail silently.
 
 ### 2. S3 Backup Configuration
-Backups are triggered nightly at midnight (`00:00`) via a system crontab entry for the `root` user:
+Backups are triggered nightly at midnight (`00:00`) via a system crontab entry for the `devuser` user:
 ```bash
 0 0 * * * cd /opt/janus && .venv/bin/python scripts/backup_db.py
 ```
@@ -152,6 +160,8 @@ This script reads credentials from `/opt/janus/.env`:
 *   `AWS_SECRET_ACCESS_KEY`: AWS user secret key.
 *   `AWS_S3_BUCKET`: The destination S3 bucket.
 *   `AWS_DEFAULT_REGION`: The S3 bucket region (defaults to `us-east-1`).
+*   `BACKUP_ENCRYPTION_KEY`: optional Fernet key. If set, every artifact (db, vector archive, secrets inventory) is encrypted client-side before it touches disk or S3 — set this in production, the archive contains conversation history. Store the key itself somewhere other than inside the backups it protects.
+*   `BACKUP_RETENTION_DAILY` / `BACKUP_RETENTION_WEEKLY`: retention policy (defaults 7 daily, 4 weekly). **The first time retention ever runs against a given backup location (local dir or S3 prefix) it only arms a marker and prunes nothing** — it never deletes pre-existing history it wasn't around to plan for. Pruning of anything begins only on the run after that, and only for backups created at/after the marker.
 
 If AWS credentials are valid, backups are uploaded to S3 under the prefix `janus-backups/` and immediately deleted from the local disk to save VM space. If credentials are not present, backups are retained locally in `/opt/janus/backups/`.
 
@@ -163,9 +173,9 @@ cd /opt/janus && .venv/bin/python scripts/backup_db.py
 
 ---
 
-### 4. Disaster Recovery & Restore Procedures
+### 4. Disaster Recovery & Restore Procedures (same-host)
 
-In the event of a system failure, database corruption, or when migrating to a new droplet, follow these steps to restore your data from S3.
+In the event of a system failure, database corruption, or when migrating to a new droplet, follow these steps to restore your data from S3. If backups are encrypted (`BACKUP_ENCRYPTION_KEY` was set), decrypt each downloaded `.enc` file first — see the decrypt snippet in `docs/restore_runbook.md` Step 4.
 
 #### Step A: Stop the Janus Daemon
 Always stop the running application before replacing database files to prevent write collisions and lockouts:
@@ -178,12 +188,19 @@ sudo systemctl stop janus
 2. Backups are named with timestamps:
    *   Main DB: `janus_backup_YYYY-MM-DD_HHMMSS.db`
    *   Vector DB: `chromadb_backup_YYYY-MM-DD_HHMMSS.tar.gz`
+   *   If `BACKUP_ENCRYPTION_KEY` was set when the backup ran, both objects (and the
+       `secrets_inventory_YYYY-MM-DD_HHMMSS.json` object) will have a `.enc` suffix on top of
+       the extensions above — check `aws s3 ls` for the actual key before copying, the `.enc`
+       suffix is easy to miss and the plain (unsuffixed) key will 404.
 3. Download the matching pair of files to your server (e.g. into a temporary folder `/tmp/restore/` or directly to `/opt/janus/backups/`).
-   Using the AWS CLI:
+   Using the AWS CLI (adjust filenames to include `.enc` if applicable):
    ```bash
    aws s3 cp s3://YOUR_S3_BUCKET/janus-backups/janus_backup_2026-06-13_021714.db /opt/janus/backups/janus_backup_restore.db
    aws s3 cp s3://YOUR_S3_BUCKET/janus-backups/chromadb_backup_2026-06-13_021714.tar.gz /opt/janus/backups/chromadb_restore.tar.gz
    ```
+   If you downloaded `.enc` files, decrypt them before continuing — see the decrypt snippet in
+   `docs/restore_runbook.md` Step 4 (the key is PBKDF2-derived from `BACKUP_ENCRYPTION_KEY`, not
+   used directly as a raw Fernet key).
 
 #### Step C: Restore the Main Database
 1. Move your current active database files (including transient WAL/SHM files) out of the way:
