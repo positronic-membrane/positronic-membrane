@@ -13,6 +13,10 @@ logger = logging.getLogger("JanusLLM")
 def get_agent_settings(agent_id: str) -> tuple:
     """
     Queries agent registry in SQLite to retrieve name, system prompt, and target model.
+    The system prompt is overlaid with the active prompt_templates version for
+    agent_id, if one exists (issue #67), so a /prompt update or /prompt rollback
+    takes effect on the very next call. Falls back to agent_registry.system_prompt
+    for agents with no prompt_templates row (e.g. dynamically-spawned helper agents).
     """
     conn = get_connection(read_only_constitution=True)
     cursor = conn.cursor()
@@ -23,7 +27,14 @@ def get_agent_settings(agent_id: str) -> tuple:
     """, (agent_id,))
     row = cursor.fetchone()
     conn.close()
-    return row  # Returns (name, system_prompt, target_model) or None
+    if row is None:
+        return None
+    name, system_prompt, target_model = row
+    from src.prompt_registry import get_prompt
+    template = get_prompt(agent_id)
+    if template is not None:
+        system_prompt = template["content"]
+    return (name, system_prompt, target_model)  # Returns (name, system_prompt, target_model) or None
 
 def resolve_agent_model(agent_id: str, db_model: str) -> str:
     """

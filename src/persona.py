@@ -517,6 +517,71 @@ def handle_unpin_command(command_str: str) -> str:
     finally:
         conn.close()
 
+def handle_prompt_command(command_str: str) -> str:
+    from src.prompt_registry import get_prompt, list_prompt_names, list_versions, rollback_prompt, update_prompt
+
+    parts = command_str.strip().split(None, 2)
+    if len(parts) < 2:
+        return "[Error] Usage: /prompt list|show <name>|history <name>|update <name> | <content>|rollback <name> <version>"
+
+    subcommand = parts[1].lower()
+
+    if subcommand == "list":
+        names = list_prompt_names()
+        if not names:
+            return "No prompt templates registered."
+        return "### Registered Prompt Templates\n" + "\n".join(f"- {n}" for n in names)
+
+    if subcommand == "show":
+        if len(parts) < 3:
+            return "[Error] Usage: /prompt show <name>"
+        name = parts[2].strip()
+        tpl = get_prompt(name)
+        if tpl is None:
+            return f"[Error] No active prompt template found for '{name}'."
+        return f"### {name} (v{tpl['version']}, active)\n{tpl['content']}"
+
+    if subcommand == "history":
+        if len(parts) < 3:
+            return "[Error] Usage: /prompt history <name>"
+        name = parts[2].strip()
+        versions = list_versions(name)
+        if not versions:
+            return f"[Error] No prompt template history found for '{name}'."
+        lines = [
+            f"- v{v['version']}{' (active)' if v['is_active'] else ''} — "
+            f"{v['change_reason'] or 'n/a'} ({v['created_at']}, by {v['created_by']})"
+            for v in versions
+        ]
+        return f"### History for '{name}'\n" + "\n".join(lines)
+
+    if subcommand == "update":
+        update_match = re.match(r"^/prompt\s+update\s+([a-zA-Z0-9_-]+)\s*\|\s*(.*)", command_str, re.IGNORECASE | re.DOTALL)
+        if not update_match:
+            return "[Error] Usage: /prompt update <name> | <content>"
+        name = update_match.group(1).strip()
+        content = update_match.group(2).strip()
+        if not content:
+            return "[Error] Prompt content cannot be empty."
+        new_version = update_prompt(name, content, change_reason="Updated via /prompt update", created_by="user")
+        return f"[✔] Prompt '{name}' updated to version {new_version} and is now active."
+
+    if subcommand == "rollback":
+        arg_parts = parts[2].split() if len(parts) > 2 else []
+        if len(arg_parts) < 2:
+            return "[Error] Usage: /prompt rollback <name> <version>"
+        name, version_str = arg_parts[0], arg_parts[1]
+        try:
+            version = int(version_str)
+        except ValueError:
+            return "[Error] Version must be an integer."
+        ok = rollback_prompt(name, version, created_by="user")
+        if not ok:
+            return f"[Error] Version {version} not found for prompt '{name}'."
+        return f"[✔] Prompt '{name}' rolled back to version {version}."
+
+    return "[Error] Unknown /prompt subcommand. Usage: /prompt list|show|history|update|rollback"
+
 def handle_agent_command(command_str: str) -> str:
     from src.skills import SafeAgentOrchestration
     sao = SafeAgentOrchestration()
@@ -2509,6 +2574,11 @@ async def run_persona_chat():
                 print(f"\n{res}\n")
                 continue
 
+            if user_msg_lower == "/prompt" or user_msg_lower.startswith("/prompt "):
+                res = handle_prompt_command(user_msg)
+                print(f"\n{res}\n")
+                continue
+
             # Log user prompt to SQLite
             log_episodic_memory("user", user_msg, "user_visible")
 
@@ -2807,6 +2877,9 @@ async def handle_web_slash_command(user_msg: str) -> str:
 
     elif user_msg.strip().lower() == "/merge" or user_msg.strip().lower().startswith("/merge "):
         return handle_merge_command(user_msg)
+
+    elif user_msg.strip().lower() == "/prompt" or user_msg.strip().lower().startswith("/prompt "):
+        return handle_prompt_command(user_msg)
 
     return "[Error] Unknown slash command."
 
