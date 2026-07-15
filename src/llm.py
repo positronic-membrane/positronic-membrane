@@ -267,7 +267,7 @@ def _prepare_llm_call(agent_id: str, prompt_content: str, system_override: str =
     # Hyperparameters calibration
     temp = 0.2
     top_p = None
-    if agent_id in ("critic", "analyst", "auditor"):
+    if agent_id in ("critic", "analyst", "auditor", "benchmark_judge"):
         temp = 0.0
         top_p = 1.0
     elif agent_id in ("proposer", "explorer"):
@@ -375,6 +375,8 @@ def query_agent(agent_id: str, prompt_content: str, system_override: str = None)
             return "PROPOSED_ACTION: None necessary."
         elif agent_id == "explorer":
             return "RESEARCH_RESULTS:\nFound mock results matching search criteria."
+        elif agent_id == "benchmark_judge":
+            return '{"score": 3, "reasoning": "Mock mode: deterministic placeholder score."}'
         else:
             return "I am operating in offline mock mode. How can I assist you with the Positronic Membrane codebase?"
 
