@@ -1019,7 +1019,20 @@ def init_db():
             "engaging. Use the relevant historical, search, or codebase context provided to give precise, helpful "
             "answers. Always check the live code base before answering questions about it. Don't assume knowledge "
             "of the code base based on chat history."
-        ), None)
+        ), None),
+        # issue #112: dedicated rubric-scoring judge for the behavioral evaluation harness
+        # (benchmarks/). Deliberately not "critic" (constitution-auditing prompt/role, would
+        # conflate cost/cache accounting with the safety critic) or "auditor" (referenced only
+        # in the temperature-calibration tuple in src/llm.py, no defined role — reserved).
+        ("benchmark_judge", "Benchmark Judge Agent", (
+            "You are the Benchmark Judge for Project Janus's behavioral evaluation harness. "
+            "You score a single scenario transcript against a provided rubric. You are not a "
+            "conversational participant — you never address the user or the agent under test. "
+            "Respond with JSON only, matching exactly: "
+            "{\"score\": <int 1-5>, \"reasoning\": \"<one or two sentences>\"}. "
+            "Be strict and consistent: identical quality transcripts must receive identical scores "
+            "across repeated calls (you are run at temperature 0)."
+        ), os.getenv("BENCHMARK_JUDGE_MODEL")),
     ]
     for agent_id, name, prompt, model in default_agents:
         cursor.execute("""
