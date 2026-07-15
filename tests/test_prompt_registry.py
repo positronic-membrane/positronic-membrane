@@ -1,6 +1,6 @@
 import hashlib
 
-from src.database import get_connection
+from src.database import get_connection, register_helper_agent
 from src.llm import get_agent_settings
 from src.prompt_registry import get_prompt, list_prompt_names, list_versions, rollback_prompt, update_prompt
 
@@ -107,6 +107,42 @@ def test_get_agent_settings_falls_back_when_no_template_row():
     settings = get_agent_settings("helper_no_template")
     assert settings is not None
     assert settings[1] == "Raw agent_registry prompt."
+
+
+def test_register_helper_agent_stays_in_sync_with_prompt_registry():
+    """register_helper_agent() (the SafeSwarm.register_agent SDK write path) must
+    keep prompt_templates in sync for any agent_id that already has an active
+    template row, or get_agent_settings()'s overlay silently shadows this write."""
+    original = get_prompt("persona")
+
+    register_helper_agent("persona", "Persona Interface", "Registered via helper agent path.", None)
+
+    active = get_prompt("persona")
+    assert active["version"] == original["version"] + 1
+    assert active["content"] == "Registered via helper agent path."
+    assert active["created_by"] == "system"
+
+    settings = get_agent_settings("persona")
+    assert settings[1] == "Registered via helper agent path."
+
+
+def test_register_helper_agent_does_not_churn_version_on_identical_content():
+    """Re-registering with unchanged content should not create a redundant version."""
+    active_before = get_prompt("persona")
+    register_helper_agent("persona", "Persona Interface", active_before["content"], None)
+    active_after = get_prompt("persona")
+    assert active_after["version"] == active_before["version"]
+
+
+def test_register_helper_agent_creates_template_for_new_agent_id():
+    """A brand-new agent_id with no prior prompt_templates row gets one seeded
+    as version 1 the first time it's registered via this path."""
+    assert get_prompt("brand_new_helper") is None
+    register_helper_agent("brand_new_helper", "Brand New Helper", "Helper prompt content.", None)
+    tpl = get_prompt("brand_new_helper")
+    assert tpl is not None
+    assert tpl["version"] == 1
+    assert tpl["content"] == "Helper prompt content."
 
 
 def test_rollback_changes_llm_cache_hash():

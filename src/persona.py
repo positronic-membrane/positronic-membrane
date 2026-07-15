@@ -518,6 +518,8 @@ def handle_unpin_command(command_str: str) -> str:
         conn.close()
 
 def handle_prompt_command(command_str: str) -> str:
+    import sqlite3
+
     from src.prompt_registry import get_prompt, list_prompt_names, list_versions, rollback_prompt, update_prompt
 
     parts = command_str.strip().split(None, 2)
@@ -535,7 +537,7 @@ def handle_prompt_command(command_str: str) -> str:
     if subcommand == "show":
         if len(parts) < 3:
             return "[Error] Usage: /prompt show <name>"
-        name = parts[2].strip()
+        name = parts[2].strip().lower()
         tpl = get_prompt(name)
         if tpl is None:
             return f"[Error] No active prompt template found for '{name}'."
@@ -544,7 +546,7 @@ def handle_prompt_command(command_str: str) -> str:
     if subcommand == "history":
         if len(parts) < 3:
             return "[Error] Usage: /prompt history <name>"
-        name = parts[2].strip()
+        name = parts[2].strip().lower()
         versions = list_versions(name)
         if not versions:
             return f"[Error] No prompt template history found for '{name}'."
@@ -555,27 +557,45 @@ def handle_prompt_command(command_str: str) -> str:
         ]
         return f"### History for '{name}'\n" + "\n".join(lines)
 
+    # /prompt update and /prompt rollback rewrite a live agent's system prompt —
+    # require the same 'contributor' floor as the other write routes that touch
+    # agent-governing text (e.g. /api/registry/rules/update).
+    if subcommand in ("update", "rollback"):
+        from src.skills import has_role
+        party_id = get_session_party_id()
+        if not has_role(party_id, "contributor"):
+            return "[Error] /prompt update and /prompt rollback require the 'contributor' role."
+
     if subcommand == "update":
-        update_match = re.match(r"^/prompt\s+update\s+([a-zA-Z0-9_-]+)\s*\|\s*(.*)", command_str, re.IGNORECASE | re.DOTALL)
-        if not update_match:
+        if len(parts) < 3 or "|" not in parts[2]:
             return "[Error] Usage: /prompt update <name> | <content>"
-        name = update_match.group(1).strip()
-        content = update_match.group(2).strip()
-        if not content:
-            return "[Error] Prompt content cannot be empty."
-        new_version = update_prompt(name, content, change_reason="Updated via /prompt update", created_by="user")
+        name_part, _, content_part = parts[2].partition("|")
+        name = name_part.strip().lower()
+        content = content_part.strip()
+        if not name or not content:
+            return "[Error] Usage: /prompt update <name> | <content>"
+        integrity_error_types = (sqlite3.IntegrityError,)
+        try:
+            import psycopg2
+            integrity_error_types = (*integrity_error_types, psycopg2.IntegrityError)
+        except ImportError:
+            pass
+        try:
+            new_version = update_prompt(name, content, change_reason="Updated via /prompt update", created_by=party_id or "user")
+        except integrity_error_types:
+            return f"[Error] Prompt '{name}' was updated concurrently. Please retry."
         return f"[✔] Prompt '{name}' updated to version {new_version} and is now active."
 
     if subcommand == "rollback":
         arg_parts = parts[2].split() if len(parts) > 2 else []
         if len(arg_parts) < 2:
             return "[Error] Usage: /prompt rollback <name> <version>"
-        name, version_str = arg_parts[0], arg_parts[1]
+        name, version_str = arg_parts[0].lower(), arg_parts[1]
         try:
             version = int(version_str)
         except ValueError:
             return "[Error] Version must be an integer."
-        ok = rollback_prompt(name, version, created_by="user")
+        ok = rollback_prompt(name, version, created_by=party_id or "user")
         if not ok:
             return f"[Error] Version {version} not found for prompt '{name}'."
         return f"[✔] Prompt '{name}' rolled back to version {version}."

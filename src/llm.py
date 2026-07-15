@@ -26,14 +26,17 @@ def get_agent_settings(agent_id: str) -> tuple:
     WHERE agent_id = ? AND is_active = 1;
     """, (agent_id,))
     row = cursor.fetchone()
-    conn.close()
     if row is None:
+        conn.close()
         return None
     name, system_prompt, target_model = row
-    from src.prompt_registry import get_prompt
-    template = get_prompt(agent_id)
-    if template is not None:
-        system_prompt = template["content"]
+    cursor.execute("""
+    SELECT content FROM prompt_templates WHERE name = ? AND is_active = 1 LIMIT 1;
+    """, (agent_id,))
+    template_row = cursor.fetchone()
+    conn.close()
+    if template_row is not None:
+        system_prompt = template_row[0]
     return (name, system_prompt, target_model)  # Returns (name, system_prompt, target_model) or None
 
 def resolve_agent_model(agent_id: str, db_model: str) -> str:

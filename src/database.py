@@ -1754,6 +1754,14 @@ def register_helper_agent(agent_id: str, name: str, prompt: str, model: str = No
     conn.commit()
     conn.close()
 
+    # get_agent_settings() overlays the active prompt_templates row (issue #67)
+    # over agent_registry.system_prompt for any agent_id that has one — keep it
+    # in sync here or this write silently no-ops for that agent from then on.
+    from src.prompt_registry import get_prompt, update_prompt
+    existing = get_prompt(agent_id)
+    if existing is None or existing["content"] != prompt:
+        update_prompt(agent_id, prompt, change_reason="Registered via SafeSwarm.register_agent", created_by="system")
+
 def deactivate_helper_agent(agent_id: str):
     """Deactivates an agent in the registry (sets is_active to 0)."""
     conn = get_connection(read_only_constitution=True)
