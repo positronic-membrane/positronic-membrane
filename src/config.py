@@ -49,6 +49,10 @@ CHAT_TIMEOUT = int(os.getenv("CHAT_TIMEOUT", "85"))
 LLM_CALL_TIMEOUT = float(os.getenv("LLM_CALL_TIMEOUT", "80.0"))
 SANDBOX_PROVIDER = os.getenv("SANDBOX_PROVIDER", "docker")  # "local", "docker", or "e2b"
 ALLOW_LOCAL_SANDBOX_EXEC = os.getenv("ALLOW_LOCAL_SANDBOX_EXEC", "False").lower() in ("true", "1", "yes")
+# issue #108: escalates validate_agent_routing_policy() findings from warnings
+# to boot-blocking errors. Defaults to False (warn-only) so upgrading an
+# existing install doesn't crash boot the moment allow_offbox defaults to 0.
+STRICT_OFFBOX_VALIDATION = os.getenv("STRICT_OFFBOX_VALIDATION", "False").lower() in ("true", "1", "yes")
 E2B_API_KEY = os.getenv("E2B_API_KEY", "")
 SPAWN_PROVIDER = os.getenv("SPAWN_PROVIDER", "local")      # "local", "docker", or "ecs"
 
@@ -278,6 +282,75 @@ def run_config_check() -> int:
         return 1
     _config_logger.info(
         "Configuration validation passed"
+        + (f" with {len(result.warnings)} warning(s)." if result.warnings else ".")
+    )
+    return 0
+
+
+def validate_agent_routing_policy() -> ConfigValidationResult:
+    """
+    Post-init_db() check (issue #108): for every active agent_registry row,
+    flags any agent that would resolve off-box (OpenRouter or an agent-
+    specific *_BASE_URL override) without allow_offbox=1 explicitly set.
+
+    Unlike validate_config(), this queries the database, so it must run
+    AFTER init_db() — it is intentionally NOT part of validate_config()/
+    run_config_check(), which stay DB-free (used pre-init_db() in
+    src/main.py and by --check-config). Degrades to a warning rather than
+    crashing if agent_registry doesn't exist yet (e.g. the standalone
+    janus-server entry point, which does not call init_db() itself).
+
+    Findings are warnings by default; STRICT_OFFBOX_VALIDATION=true escalates
+    them to errors so run_agent_routing_check() aborts boot.
+    """
+    errors = []
+    warnings = []
+    try:
+        from src.llm import get_agent_routing_audit  # lazy: avoid import-time cycle with src.llm's `import src.config`
+        findings = get_agent_routing_audit()
+    except Exception as e:
+        msg = f"Could not query agent_registry for routing policy validation: {e}"
+        # A missing agent_registry table is the one *expected* failure here
+        # (the standalone janus-server entrypoint doesn't call init_db()
+        # itself) and always degrades to a warning, regardless of strict
+        # mode. Any other exception (a real DB connectivity failure, a
+        # malformed row) is a genuine bug, not a routine missing-table
+        # condition — it must still respect STRICT_OFFBOX_VALIDATION rather
+        # than being unconditionally downgraded to a warning.
+        missing_table = "no such table" in str(e).lower() or "does not exist" in str(e).lower()
+        if missing_table:
+            warnings.append(msg)
+        else:
+            (errors if STRICT_OFFBOX_VALIDATION else warnings).append(msg)
+        return ConfigValidationResult(errors=errors, warnings=warnings)
+
+    for f in findings:
+        if f["would_violate"]:
+            msg = (
+                f"Agent '{f['agent_id']}' (model='{f['model']}') resolves to off-box "
+                f"endpoint '{f['resolved_endpoint']}' but allow_offbox is not set — "
+                f"query_agent() will raise OffboxRoutingViolationError for this agent "
+                f"at call time. Set allow_offbox=1 in agent_registry to permit this "
+                f"route, or reconfigure the agent's model/endpoint."
+            )
+            (errors if STRICT_OFFBOX_VALIDATION else warnings).append(msg)
+    return ConfigValidationResult(errors=errors, warnings=warnings)
+
+
+def run_agent_routing_check() -> int:
+    """Runs validate_agent_routing_policy(), logs results, returns a process
+    exit code (0 = ok, possibly with warnings; 1 = critical errors present)."""
+    result = validate_agent_routing_policy()
+    for w in result.warnings:
+        _config_logger.warning(f"[agent-routing] {w}")
+    if not result.ok:
+        _config_logger.critical(
+            "Agent routing policy validation failed with %d error(s):\n  - %s",
+            len(result.errors), "\n  - ".join(result.errors),
+        )
+        return 1
+    _config_logger.info(
+        "Agent routing policy validation passed"
         + (f" with {len(result.warnings)} warning(s)." if result.warnings else ".")
     )
     return 0

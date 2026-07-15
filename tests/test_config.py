@@ -1,7 +1,12 @@
 import stat
 
 import src.config as config
-from src.config import run_config_check, validate_config
+from src.config import (
+    run_agent_routing_check,
+    run_config_check,
+    validate_agent_routing_policy,
+    validate_config,
+)
 
 
 def test_clean_config_has_no_errors_or_warnings():
@@ -215,3 +220,99 @@ def test_unknown_log_format_is_warning(monkeypatch):
     monkeypatch.setattr(config, "LOG_FORMAT", "xml")
     result = validate_config()
     assert any("LOG_FORMAT" in w for w in result.warnings)
+
+
+# ---------------------------------------------------------------------------
+# Per-agent off-box LLM routing policy (issue #108)
+# ---------------------------------------------------------------------------
+
+def test_validate_agent_routing_policy_clean_db_has_no_findings(monkeypatch):
+    """Freshly-seeded agent_registry rows have target_model=None, which
+    resolves to the local LLM_BASE_URL fallback — no violation. Explicitly
+    neutralizes OPENROUTER_API_KEY/LLM_MODEL so this doesn't depend on the
+    developer's real .env (which may set both to off-box-routing values)."""
+    monkeypatch.setattr(config, "OPENROUTER_API_KEY", "")
+    monkeypatch.setattr(config, "LLM_MODEL", "qwen2.5-coder:7b")
+    result = validate_agent_routing_policy()
+    assert result.ok
+    assert result.warnings == []
+
+
+def _seed_offbox_violation(monkeypatch):
+    from src.database import get_connection
+
+    monkeypatch.setattr(config, "OPENROUTER_API_KEY", "sk-or-v1-testkey")
+    conn = get_connection()
+    conn.cursor().execute(
+        "UPDATE agent_registry SET target_model = 'google/gemini-2.5-flash' WHERE agent_id = 'proposer';"
+    )
+    conn.commit()
+    conn.close()
+
+
+def test_validate_agent_routing_policy_warns_by_default(monkeypatch):
+    monkeypatch.setattr(config, "STRICT_OFFBOX_VALIDATION", False)
+    _seed_offbox_violation(monkeypatch)
+
+    result = validate_agent_routing_policy()
+    assert result.ok  # warning, not an error
+    assert any("proposer" in w and "OffboxRoutingViolationError" in w for w in result.warnings)
+
+
+def test_validate_agent_routing_policy_errors_when_strict(monkeypatch):
+    monkeypatch.setattr(config, "STRICT_OFFBOX_VALIDATION", True)
+    _seed_offbox_violation(monkeypatch)
+
+    result = validate_agent_routing_policy()
+    assert not result.ok
+    assert any("proposer" in e for e in result.errors)
+
+
+def test_run_agent_routing_check_returns_1_when_strict(monkeypatch, caplog):
+    monkeypatch.setattr(config, "STRICT_OFFBOX_VALIDATION", True)
+    _seed_offbox_violation(monkeypatch)
+
+    with caplog.at_level("CRITICAL"):
+        assert run_agent_routing_check() == 1
+    assert "agent routing policy" in caplog.text.lower()
+
+
+def test_run_agent_routing_check_returns_0_by_default(monkeypatch):
+    monkeypatch.setattr(config, "OPENROUTER_API_KEY", "")
+    monkeypatch.setattr(config, "LLM_MODEL", "qwen2.5-coder:7b")
+    assert run_agent_routing_check() == 0
+
+
+def test_validate_agent_routing_policy_degrades_to_warning_on_missing_table(monkeypatch, tmp_path):
+    """If agent_registry doesn't exist yet (e.g. the standalone janus-server
+    entrypoint runs before init_db()), this must warn, not crash."""
+    empty_db = tmp_path / "no_schema.db"
+    empty_db.touch()
+    monkeypatch.setattr(config, "DB_PATH", str(empty_db))
+
+    result = validate_agent_routing_policy()
+    assert result.ok
+    assert len(result.warnings) == 1
+    assert "agent_registry" in result.warnings[0]
+
+
+def test_validate_agent_routing_policy_genuine_error_respects_strict_mode(monkeypatch):
+    """A non-'missing table' failure (a real bug, not the expected pre-init_db()
+    condition) must still escalate to an error under STRICT_OFFBOX_VALIDATION,
+    instead of being unconditionally folded into a warning like a missing table."""
+    import src.llm
+
+    def _boom():
+        raise RuntimeError("connection reset by peer")
+
+    monkeypatch.setattr(src.llm, "get_agent_routing_audit", _boom)
+
+    monkeypatch.setattr(config, "STRICT_OFFBOX_VALIDATION", False)
+    result = validate_agent_routing_policy()
+    assert result.ok
+    assert any("connection reset by peer" in w for w in result.warnings)
+
+    monkeypatch.setattr(config, "STRICT_OFFBOX_VALIDATION", True)
+    result = validate_agent_routing_policy()
+    assert not result.ok
+    assert any("connection reset by peer" in e for e in result.errors)

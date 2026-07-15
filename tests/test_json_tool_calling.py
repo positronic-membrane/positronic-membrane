@@ -125,9 +125,13 @@ def test_parse_action_legacy_and_mock():
     assert "Action successfully run" in err
 
 @patch("src.memory.query_memories")
-def test_llm_prompt_retrieval(mock_query):
+def test_llm_prompt_retrieval(mock_query, monkeypatch):
     """Verify query_agent retrieves semantic skills when proposer or explorer is queried."""
     from src.llm import query_agent
+    # Neutralize the developer's real .env OPENROUTER_API_KEY so this test's
+    # unmodified target_model/LLM_MODEL fallback (issue #108's allow_offbox
+    # gate defaults to deny) doesn't depend on local dev config.
+    monkeypatch.setattr(src.config, "OPENROUTER_API_KEY", "")
     mock_query.return_value = [
         {"id": "test_skill", "content": "Skill: Test\nDescription: info\nParameters Schema: {}", "metadata": {}, "distance": 0.1}
     ]

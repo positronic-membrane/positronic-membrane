@@ -347,3 +347,47 @@ def test_api_system_metrics_requires_auth():
     finally:
         src.config.REQUIRE_AUTH = orig_require
 
+
+def test_registry_update_allow_offbox_requires_admin_role():
+    """Issue #108: allow_offbox is operator-set only — a contributor-role
+    party (the endpoint's normal minimum role for target_model updates) must
+    be rejected when it tries to also set allow_offbox; an admin-role party
+    must succeed and have the value persisted."""
+    client = TestClient(app)
+    orig_require = src.config.REQUIRE_AUTH
+    try:
+        src.config.REQUIRE_AUTH = True
+
+        contributor_token = create_access_token("contributor-uuid", "contributor")
+        resp = client.post(
+            "/api/registry/update",
+            json={"agent_id": "proposer", "allow_offbox": True},
+            headers={"Authorization": f"Bearer {contributor_token}"},
+        )
+        assert resp.status_code == 403
+
+        # A contributor may still update target_model alone (unaffected by the new gate).
+        resp = client.post(
+            "/api/registry/update",
+            json={"agent_id": "proposer", "model": "some-model"},
+            headers={"Authorization": f"Bearer {contributor_token}"},
+        )
+        assert resp.status_code == 200
+
+        admin_token = create_access_token("admin-uuid", "admin")
+        resp = client.post(
+            "/api/registry/update",
+            json={"agent_id": "proposer", "allow_offbox": True},
+            headers={"Authorization": f"Bearer {admin_token}"},
+        )
+        assert resp.status_code == 200
+
+        conn = get_connection(read_only_constitution=True)
+        row = conn.execute(
+            "SELECT allow_offbox FROM agent_registry WHERE agent_id = 'proposer';"
+        ).fetchone()
+        conn.close()
+        assert row[0] == 1
+    finally:
+        src.config.REQUIRE_AUTH = orig_require
+

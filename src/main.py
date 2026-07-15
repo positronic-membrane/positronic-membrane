@@ -5,7 +5,7 @@ import sys
 import threading
 import webbrowser
 
-from src.config import run_config_check
+from src.config import run_agent_routing_check, run_config_check
 from src.daemon import run_heartbeat_loop
 from src.database import init_db, is_setup_complete
 from src.logging_config import setup_logging
@@ -57,6 +57,18 @@ def main():
         logger.critical(f"Failed to initialize database: {e}", exc_info=True)
         sys.exit(1)
 
+    # Per-agent off-box LLM routing policy check (issue #108) — must run
+    # after init_db() since it queries agent_registry. Note --check-config
+    # exits above, before init_db(), so it does not exercise this check.
+    try:
+        routing_check_exit_code = run_agent_routing_check()
+    except Exception as e:
+        logger.critical(f"Agent routing policy validation crashed: {e}", exc_info=True)
+        sys.exit(1)
+
+    if routing_check_exit_code != 0:
+        sys.exit(1)
+
     # Check Socratic Setup status
     if not is_setup_complete():
         logger.info("Socratic Alignment setup is incomplete. Launching alignment interview...")
@@ -87,8 +99,13 @@ def main():
         # in src/sandbox_session.py) so they don't collide with the primary instance.
         port = int(os.getenv("JANUS_EVOLUTION_PORT", "5005"))
 
-        # 1. Start web server in background thread
-        web_thread = threading.Thread(target=run_server, kwargs={"port": port}, daemon=True)
+        # 1. Start web server in background thread. skip_agent_routing_check=True
+        # since main() already ran run_agent_routing_check() a few lines above,
+        # in this same process — re-running it inside run_server() would be
+        # redundant (issue #108).
+        web_thread = threading.Thread(
+            target=run_server, kwargs={"port": port, "skip_agent_routing_check": True}, daemon=True
+        )
         web_thread.start()
 
         # 2. Open default browser (only for the primary instance, not spawned children)

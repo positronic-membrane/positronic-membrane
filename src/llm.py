@@ -12,7 +12,8 @@ logger = logging.getLogger("JanusLLM")
 
 def get_agent_settings(agent_id: str) -> tuple:
     """
-    Queries agent registry in SQLite to retrieve name, system prompt, and target model.
+    Queries agent registry in SQLite to retrieve name, system prompt, target
+    model, and off-box routing policy (issue #108).
     The system prompt is overlaid with the active prompt_templates version for
     agent_id, if one exists (issue #67), so a /prompt update or /prompt rollback
     takes effect on the very next call. Falls back to agent_registry.system_prompt
@@ -21,7 +22,7 @@ def get_agent_settings(agent_id: str) -> tuple:
     conn = get_connection(read_only_constitution=True)
     cursor = conn.cursor()
     cursor.execute("""
-    SELECT agent_name, system_prompt, target_model
+    SELECT agent_name, system_prompt, target_model, allow_offbox
     FROM agent_registry
     WHERE agent_id = ? AND is_active = 1;
     """, (agent_id,))
@@ -29,7 +30,7 @@ def get_agent_settings(agent_id: str) -> tuple:
     if row is None:
         conn.close()
         return None
-    name, system_prompt, target_model = row
+    name, system_prompt, target_model, allow_offbox = row
     cursor.execute("""
     SELECT content FROM prompt_templates WHERE name = ? AND is_active = 1 LIMIT 1;
     """, (agent_id,))
@@ -37,7 +38,7 @@ def get_agent_settings(agent_id: str) -> tuple:
     conn.close()
     if template_row is not None:
         system_prompt = template_row[0]
-    return (name, system_prompt, target_model)  # Returns (name, system_prompt, target_model) or None
+    return (name, system_prompt, target_model, allow_offbox)  # Returns (name, system_prompt, target_model, allow_offbox) or None
 
 def resolve_agent_model(agent_id: str, db_model: str) -> str:
     """
@@ -50,7 +51,7 @@ def resolve_agent_model(agent_id: str, db_model: str) -> str:
 
     return src.config.LLM_MODEL
 
-def resolve_agent_client_params(agent_id: str, model: str) -> tuple:
+def resolve_agent_client_params(agent_id: str, model: str, allow_offbox: bool = False) -> tuple:
     """
     Resolves the API base URL and API key for a given agent and model.
     Checks:
@@ -58,6 +59,15 @@ def resolve_agent_client_params(agent_id: str, model: str) -> tuple:
     2. If the model name contains a '/' (typical for OpenRouter models) and
        OPENROUTER_API_KEY is configured, use OpenRouter.
     3. Fallback to global LLM_BASE_URL and LLM_API_KEY.
+
+    When allow_offbox is False (the default — issue #108, matching
+    agent_registry.allow_offbox's own safe-by-default DEFAULT 0), tiers 1 and
+    2 raise OffboxRoutingViolationError instead of returning a non-LLM_BASE_URL
+    endpoint — tier 3 is always permitted since it's the sanctioned local
+    default. Fails loudly rather than silently falling back. Callers resolving
+    an endpoint on an agent's behalf must pass the agent's real DB-sourced
+    allow_offbox value explicitly; the default is deliberately fail-closed so
+    an omitted argument can't silently grant off-box routing.
     """
     # 1. Check agent-specific overrides
     agent_base_url_key = f"{agent_id.upper()}_BASE_URL"
@@ -67,17 +77,70 @@ def resolve_agent_client_params(agent_id: str, model: str) -> tuple:
     api_key = getattr(src.config, agent_api_key_key, None)
 
     if base_url and api_key:
+        if not allow_offbox and base_url != src.config.LLM_BASE_URL:
+            raise OffboxRoutingViolationError(
+                f"Agent '{agent_id}' has allow_offbox=0 but resolved to agent-specific "
+                f"override endpoint '{base_url}' via {agent_base_url_key}. Set "
+                f"allow_offbox=1 on this agent_registry row to permit this route, or "
+                f"unset {agent_base_url_key}/{agent_api_key_key}."
+            )
         return base_url, api_key
 
     # 2. Check if model looks like an OpenRouter model and OpenRouter key is set
     if "/" in model and src.config.OPENROUTER_API_KEY:
+        if not allow_offbox and src.config.OPENROUTER_BASE_URL != src.config.LLM_BASE_URL:
+            raise OffboxRoutingViolationError(
+                f"Agent '{agent_id}' has allow_offbox=0 but model '{model}' looks like "
+                f"an OpenRouter model and OPENROUTER_API_KEY is configured. Set "
+                f"allow_offbox=1 on this agent_registry row to permit OpenRouter routing, "
+                f"or target a non-'/' model."
+            )
         return src.config.OPENROUTER_BASE_URL, src.config.OPENROUTER_API_KEY
 
     # 3. Default to global configs
     return src.config.LLM_BASE_URL, src.config.LLM_API_KEY
 
+
+def get_agent_routing_audit() -> list:
+    """
+    Enumerates every active agent_registry row's effective LLM endpoint under
+    the current env (issue #108 audit). Read-only — does not raise on a
+    would-be violation, reports it as would_violate=True instead. Consumed by
+    both the boot-time validator (src.config.validate_agent_routing_policy)
+    and scripts/audit_agent_routing.py.
+    """
+    conn = get_connection(read_only_constitution=True)
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT agent_id, target_model, allow_offbox FROM agent_registry WHERE is_active = 1;")
+        rows = cursor.fetchall()
+    finally:
+        conn.close()
+
+    findings = []
+    for agent_id, db_model, allow_offbox in rows:
+        model = resolve_agent_model(agent_id, db_model)
+        base_url, _ = resolve_agent_client_params(agent_id, model, allow_offbox=True)
+        findings.append({
+            "agent_id": agent_id,
+            "model": model,
+            "resolved_endpoint": base_url,
+            "allow_offbox": bool(allow_offbox),
+            "would_violate": base_url != src.config.LLM_BASE_URL and not allow_offbox,
+        })
+    return findings
+
+
 class BillingViolationError(Exception):
     """Raised when daily LLM cost exceeds configured threshold."""
+    pass
+
+
+class OffboxRoutingViolationError(Exception):
+    """Raised when an agent with allow_offbox=0 would resolve to any LLM
+    endpoint other than LLM_BASE_URL. Fails loudly rather than silently
+    falling back — mirrors BillingViolationError's uncaught-propagation
+    posture (issue #108)."""
     pass
 
 
@@ -125,7 +188,7 @@ def _prepare_llm_call(agent_id: str, prompt_content: str, system_override: str =
     if not settings:
         raise ValueError(f"Agent '{agent_id}' is not registered or is inactive.")
 
-    name, system_prompt, db_model = settings
+    name, system_prompt, db_model, allow_offbox = settings
     model = resolve_agent_model(agent_id, db_model)
     system = system_override if system_override is not None else system_prompt
 
@@ -228,7 +291,14 @@ def _prepare_llm_call(agent_id: str, prompt_content: str, system_override: str =
         ratio = min(max(b_cnt / (b_thresh or 5), 0.0), 1.0)
         temp = 0.2 + ratio * 0.6
 
-    base_url, api_key = resolve_agent_client_params(agent_id, model)
+    # Skip endpoint resolution (and its allow_offbox gate) entirely on a cache
+    # hit — query_agent()/query_agent_stream() return ctx["cache_hit"] without
+    # ever using base_url/api_key, so a would-be off-box agent must not be
+    # blocked from serving a response that needs zero network egress.
+    if cache_hit is None:
+        base_url, api_key = resolve_agent_client_params(agent_id, model, allow_offbox=bool(allow_offbox))
+    else:
+        base_url, api_key = None, None
 
     return {
         "name": name,

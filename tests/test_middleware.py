@@ -46,6 +46,35 @@ def test_sql_safety():
         # Should not raise any exception
         check_sql_safety(q)
 
+def test_sql_safety_blocks_allow_offbox_writes():
+    """Issue #108: agent_registry.allow_offbox is operator-set only — no
+    agent-reachable SQL path (e.g. SafeDB.query()) may write it, even though
+    the table itself is otherwise agent-writable."""
+    unsafe_queries = [
+        "UPDATE agent_registry SET allow_offbox = 1 WHERE agent_id = 'proposer';",
+        "INSERT INTO agent_registry (agent_id, agent_name, system_prompt, allow_offbox) "
+        "VALUES ('rogue', 'Rogue', 'hi', 1);",
+        # REPLACE INTO is a valid SQLite write path that must not bypass the guard.
+        "REPLACE INTO agent_registry (agent_id, agent_name, system_prompt, allow_offbox) "
+        "VALUES ('rogue', 'Rogue', 'hi', 1);",
+        # ALTER-based sidestep attempts must not bypass the guard either.
+        "ALTER TABLE agent_registry ADD COLUMN allow_offbox_2 INTEGER;",
+    ]
+    for q in unsafe_queries:
+        with pytest.raises(SafetyViolationError):
+            check_sql_safety(q)
+
+    # Reading the column, or writing other agent_registry columns, is unaffected —
+    # including a read that also selects the table's own updated_at column, whose
+    # name must not be mistaken for the "update" operation keyword.
+    safe_queries = [
+        "SELECT agent_id, allow_offbox FROM agent_registry;",
+        "SELECT agent_id, allow_offbox, updated_at FROM agent_registry;",
+        "UPDATE agent_registry SET target_model = 'foo' WHERE agent_id = 'proposer';",
+    ]
+    for q in safe_queries:
+        check_sql_safety(q)
+
 def test_config_write_permissions():
     """Verify that agent-modifiable configurations are write-allowed, while human-locked ones are blocked."""
     # boredom_threshold is modifiable (is_agent_modifiable = 1)

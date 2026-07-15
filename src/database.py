@@ -465,6 +465,16 @@ def init_db():
     );
     """)
 
+    # issue #108: per-agent off-box LLM routing policy, operator-set only.
+    # Defaults to 0 (deny) — safe-by-default. Existing installs with an agent
+    # currently relying on OpenRouter or an agent-specific *_BASE_URL override
+    # will start raising OffboxRoutingViolationError post-upgrade until the
+    # operator explicitly sets allow_offbox=1 for that agent.
+    _add_column_if_missing(
+        conn, cursor,
+        "ALTER TABLE agent_registry ADD COLUMN allow_offbox INTEGER NOT NULL DEFAULT 0;",
+    )
+
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS prompt_templates (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1747,9 +1757,29 @@ def register_helper_agent(agent_id: str, name: str, prompt: str, model: str = No
     """Registers or updates a helper agent in the agent registry."""
     conn = get_connection(read_only_constitution=True)
     cursor = conn.cursor()
+    # issue #108: allow_offbox is operator-set only. A plain INSERT OR REPLACE
+    # would silently reset it to the column default (0) on every
+    # re-registration. Omitting allow_offbox from the DO UPDATE SET clause
+    # (rather than a separate SELECT-then-preserve step) leaves an existing
+    # operator-set value untouched atomically, in one statement — avoiding a
+    # lost-update race against a concurrent POST /api/registry/update admin
+    # write that a SELECT-then-INSERT-OR-REPLACE approach would be exposed to.
+    # Native "INSERT ... ON CONFLICT ... DO UPDATE" (not the INSERT OR REPLACE
+    # shorthand) is used here specifically because it's the only way to
+    # express "update these columns, leave that one alone" atomically; this
+    # syntax is valid SQLite (3.24+) and Postgres as-is, so it passes through
+    # translate_sqlite_to_postgres() unmodified (only its generic `?` -> `%s`
+    # placeholder rewrite applies — see the INSERT OR IGNORE/REPLACE-specific
+    # regex a few hundred lines up, which this statement doesn't match).
     cursor.execute("""
-    INSERT OR REPLACE INTO agent_registry (agent_id, agent_name, system_prompt, target_model, is_active, updated_at)
-    VALUES (?, ?, ?, ?, 1, CURRENT_TIMESTAMP);
+    INSERT INTO agent_registry (agent_id, agent_name, system_prompt, target_model, is_active, allow_offbox, updated_at)
+    VALUES (?, ?, ?, ?, 1, 0, CURRENT_TIMESTAMP)
+    ON CONFLICT (agent_id) DO UPDATE SET
+        agent_name = excluded.agent_name,
+        system_prompt = excluded.system_prompt,
+        target_model = excluded.target_model,
+        is_active = excluded.is_active,
+        updated_at = excluded.updated_at;
     """, (agent_id, name, prompt, model))
     conn.commit()
     conn.close()
