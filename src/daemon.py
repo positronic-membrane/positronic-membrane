@@ -375,6 +375,20 @@ def run_background_maintenance():
 
 _last_executed_intervals = {}
 
+def _bare_arguments_skill(prefix: str) -> Optional[str]:
+    """
+    Returns the skill name when `prefix` (the text preceding a JSON block) ends
+    with '<identifier>:' — i.e. the model followed the documented
+    'PROPOSED_ACTION: <tool_name>:<arguments>' format literally, with a JSON
+    object of bare arguments after the colon. Tolerates an opening markdown
+    fence between the name and the block.
+    """
+    import re
+    prefix = re.sub(r"```(?:json|python)?\s*$", "", prefix)
+    m = re.search(r"([A-Za-z][A-Za-z0-9_]*)\s*:\s*$", prefix)
+    return m.group(1) if m else None
+
+
 def parse_action(action_str: str) -> tuple[Optional[str], dict, Optional[str]]:
     """
     Parses dynamic JSON actions or legacy tool execution statements.
@@ -390,13 +404,16 @@ def parse_action(action_str: str) -> tuple[Optional[str], dict, Optional[str]]:
         fence_match = re.search(r"```(?:json|python)?\s*({.*?})\s*```", action_clean, re.DOTALL)
         json_candidate = fence_match.group(1) if fence_match else None
 
-        # If not, check if there's any { ... } block containing tool-like keys
+        # If not, check if there's any { ... } block containing tool-like keys,
+        # or one directly prefixed by '<skill>:' (a bare-arguments call carries
+        # no tool-like keys at all)
         if not json_candidate:
             braces_match = re.search(r"({.*})", action_clean, re.DOTALL)
             if braces_match:
                 candidate = braces_match.group(1)
                 # Ensure it looks like a tool call dictionary to avoid false positives on random text
-                if any(k in candidate for k in ["skill_id", "tool", "tool_name", "arguments", "args"]):
+                if (any(k in candidate for k in ["skill_id", "tool", "tool_name", "arguments", "args"])
+                        or _bare_arguments_skill(action_clean[:braces_match.start()])):
                     json_candidate = candidate
 
         if json_candidate:
@@ -407,6 +424,16 @@ def parse_action(action_str: str) -> tuple[Optional[str], dict, Optional[str]]:
                     arguments = data.get("arguments") or data.get("args") or {}
                     if skill_id:
                         return skill_id, arguments, None
+                    # '<skill>:{...}' with no skill_id key inside the dict (issue
+                    # #136). Without this, the blob fell through to the legacy
+                    # pipe-split regexes below, which captured the whole JSON
+                    # text as the first positional argument — write_draft_file
+                    # got it as a filename (ENAMETOOLONG) and the content was
+                    # lost.
+                    prefix_skill = _bare_arguments_skill(action_clean[:action_clean.find(json_candidate)])
+                    if prefix_skill:
+                        inner = data.get("arguments") or data.get("args")
+                        return prefix_skill, (inner if isinstance(inner, dict) else data), None
             except json.JSONDecodeError as jde:
                 return None, {}, (
                     f"Error: Failed to parse JSON action block. JSON syntax error: {jde}. "

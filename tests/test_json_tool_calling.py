@@ -169,3 +169,46 @@ def test_run_interval_skills(mock_execute):
     # Second run: should not trigger (interval not elapsed yet)
     run_interval_skills()
     assert mock_execute.call_count == 1
+
+def test_parse_action_bare_arguments_json():
+    """'<skill>:{bare args dict}' must parse as a skill call, not fall through to
+    the legacy pipe-split regexes that swallowed the JSON as a filename (issue #136)."""
+    # The production failure shape: bare arguments dict, no skill_id/tool key at all
+    s, args, err = parse_action(
+        'write_draft_file:{"filename": "stagnation_counter_reset_analysis.md", '
+        '"content": "# Analysis\\n\\nHypothesis A | full reset."}'
+    )
+    assert s == "write_draft_file"
+    assert args == {
+        "filename": "stagnation_counter_reset_analysis.md",
+        "content": "# Analysis\n\nHypothesis A | full reset.",
+    }
+    assert err is None
+
+    # Variant: a sniffed keyword ("arguments") appears only inside content text,
+    # so the dict parses but has no skill_id — previously fell to legacy regexes
+    s, args, err = parse_action(
+        'write_draft_file:{"filename": "notes.md", "content": "discusses the arguments object"}'
+    )
+    assert s == "write_draft_file"
+    assert args == {"filename": "notes.md", "content": "discusses the arguments object"}
+    assert err is None
+
+    # Variant: arguments-wrapped dict without skill_id — unwrap, don't double-nest
+    s, args, err = parse_action('read_codebase:{"arguments": {"query": "governor"}}')
+    assert s == "read_codebase"
+    assert args == {"query": "governor"}
+    assert err is None
+
+    # Variant: bare args behind a markdown fence after the skill name
+    s, args, err = parse_action('write_draft_file:```json\n{"filename": "a.md", "content": "x"}\n```')
+    assert s == "write_draft_file"
+    assert args == {"filename": "a.md", "content": "x"}
+    assert err is None
+
+def test_parse_action_bare_json_without_skill_prefix_still_falls_through():
+    """A brace block with neither tool-like keys nor a '<skill>:' prefix must keep
+    the old behavior (mock fallback), not be misread as a skill call."""
+    s, args, err = parse_action('I reflected on {"topic": "governor"} today')
+    assert s is None
+    assert err is not None and "Action successfully run" in err
