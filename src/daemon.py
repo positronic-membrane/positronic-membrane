@@ -377,15 +377,19 @@ _last_executed_intervals = {}
 
 def _bare_arguments_skill(prefix: str) -> Optional[str]:
     """
-    Returns the skill name when `prefix` (the text preceding a JSON block) ends
-    with '<identifier>:' — i.e. the model followed the documented
-    'PROPOSED_ACTION: <tool_name>:<arguments>' format literally, with a JSON
-    object of bare arguments after the colon. Tolerates an opening markdown
-    fence between the name and the block.
+    Returns the skill name when `prefix` — the action text before a JSON
+    block — is exactly '<identifier>:', i.e. the documented
+    'PROPOSED_ACTION: <tool_name>:<arguments>' format followed literally with
+    a JSON object of bare arguments after the colon. Anchored against the
+    whole prefix (optionally allowing text before an explicit
+    'PROPOSED_ACTION:' marker) so prose or legacy argument text that merely
+    ends in 'word:' ('Here is the data:', 'read_codebase: the config:') is
+    not misread as a skill call.
     """
-    import re
-    prefix = re.sub(r"```(?:json|python)?\s*$", "", prefix)
-    m = re.search(r"([A-Za-z][A-Za-z0-9_]*)\s*:\s*$", prefix)
+    m = re.fullmatch(
+        r"(?s:.*PROPOSED_ACTION\s*:)?\s*([A-Za-z][A-Za-z0-9_]*)\s*:\s*",
+        prefix,
+    )
     return m.group(1) if m else None
 
 
@@ -402,19 +406,26 @@ def parse_action(action_str: str) -> tuple[Optional[str], dict, Optional[str]]:
     try:
         # Check if it starts/ends with markdown fences and strip them
         fence_match = re.search(r"```(?:json|python)?\s*({.*?})\s*```", action_clean, re.DOTALL)
-        json_candidate = fence_match.group(1) if fence_match else None
-
-        # If not, check if there's any { ... } block containing tool-like keys,
-        # or one directly prefixed by '<skill>:' (a bare-arguments call carries
-        # no tool-like keys at all)
-        if not json_candidate:
+        json_candidate = None
+        prefix_end = 0
+        candidate_from_prefix = False
+        if fence_match:
+            json_candidate = fence_match.group(1)
+            prefix_end = fence_match.start()
+        else:
+            # If not fenced, check for a { ... } block containing tool-like
+            # keys, or one where the entire preceding text is '<skill>:' —
+            # a bare-arguments call carries no tool-like keys at all
             braces_match = re.search(r"({.*})", action_clean, re.DOTALL)
             if braces_match:
                 candidate = braces_match.group(1)
+                prefix_end = braces_match.start()
                 # Ensure it looks like a tool call dictionary to avoid false positives on random text
-                if (any(k in candidate for k in ["skill_id", "tool", "tool_name", "arguments", "args"])
-                        or _bare_arguments_skill(action_clean[:braces_match.start()])):
+                if any(k in candidate for k in ["skill_id", "tool", "tool_name", "arguments", "args"]):
                     json_candidate = candidate
+                elif _bare_arguments_skill(action_clean[:prefix_end]):
+                    json_candidate = candidate
+                    candidate_from_prefix = True
 
         if json_candidate:
             try:
@@ -430,15 +441,26 @@ def parse_action(action_str: str) -> tuple[Optional[str], dict, Optional[str]]:
                     # text as the first positional argument — write_draft_file
                     # got it as a filename (ENAMETOOLONG) and the content was
                     # lost.
-                    prefix_skill = _bare_arguments_skill(action_clean[:action_clean.find(json_candidate)])
+                    prefix_skill = _bare_arguments_skill(action_clean[:prefix_end])
                     if prefix_skill:
-                        inner = data.get("arguments") or data.get("args")
-                        return prefix_skill, (inner if isinstance(inner, dict) else data), None
+                        # Unwrap an arguments/args wrapper only when it is
+                        # present as a dict — an explicit empty dict counts.
+                        inner = None
+                        for key in ("arguments", "args"):
+                            if isinstance(data.get(key), dict):
+                                inner = data[key]
+                                break
+                        return prefix_skill, (data if inner is None else inner), None
             except json.JSONDecodeError as jde:
-                return None, {}, (
-                    f"Error: Failed to parse JSON action block. JSON syntax error: {jde}. "
-                    "Ensure all keys and strings use double quotes and correct syntax."
-                )
+                if not candidate_from_prefix:
+                    return None, {}, (
+                        f"Error: Failed to parse JSON action block. JSON syntax error: {jde}. "
+                        "Ensure all keys and strings use double quotes and correct syntax."
+                    )
+                # A block admitted only via the '<skill>:' prefix that doesn't
+                # parse as JSON is most likely a legacy call whose argument
+                # text merely starts with a brace (e.g. "read_codebase:
+                # {governor}") — let the legacy parsers below have it.
     except Exception:
         pass
 

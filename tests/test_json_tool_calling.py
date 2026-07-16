@@ -212,3 +212,45 @@ def test_parse_action_bare_json_without_skill_prefix_still_falls_through():
     s, args, err = parse_action('I reflected on {"topic": "governor"} today')
     assert s is None
     assert err is not None and "Action successfully run" in err
+
+def test_parse_action_bare_json_prefix_is_anchored():
+    """The '<skill>:' prefix rule must not hijack prose or legacy argument text
+    that merely ends in 'word:' before a brace block (issue #136 review)."""
+    # Prose with a trailing 'word:' before an illustrative JSON object → mock fallback
+    s, args, err = parse_action('Here is the data: {"x": 1}')
+    assert s is None
+    assert err is not None and "Action successfully run" in err
+
+    # Interior 'word: {json}' inside a legacy free-text argument is not hijacked
+    s, args, err = parse_action('read_codebase: the config: {"a": 1}')
+    assert s == "read_codebase"
+    assert args == {"query": 'the config: {"a": 1}'}
+    assert err is None
+
+    # A full-response form is accepted when the explicit marker precedes the call
+    s, args, err = parse_action(
+        'I will save the draft now.\nPROPOSED_ACTION: write_draft_file:{"filename": "a.md", "content": "x"}'
+    )
+    assert s == "write_draft_file"
+    assert args == {"filename": "a.md", "content": "x"}
+    assert err is None
+
+def test_parse_action_prefix_admitted_non_json_falls_back_to_legacy():
+    """A brace block admitted only via the '<skill>:' prefix that is not valid
+    JSON must reach the legacy parsers, not return a JSON syntax error."""
+    s, args, err = parse_action("read_codebase: {governor}")
+    assert s == "read_codebase"
+    assert args == {"query": "{governor}"}
+    assert err is None
+
+    s, args, err = parse_action("execute_code: {1: 2}")
+    assert s == "execute_code"
+    assert args == {"code": "{1: 2}"}
+    assert err is None
+
+def test_parse_action_bare_json_empty_arguments_dict():
+    """An explicit empty arguments wrapper unwraps to {} (falsy-dict trap)."""
+    s, args, err = parse_action('list_draft_files:{"arguments": {}}')
+    assert s == "list_draft_files"
+    assert args == {}
+    assert err is None
