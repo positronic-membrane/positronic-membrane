@@ -98,13 +98,13 @@ def test_reindex_refreshes_changed_file(tmp_path, mock_embeddings, monkeypatch):
     index_codebase(workspace_dir=project_root)
 
     collection = src.memory.get_collection("janus_codebase")
-    doc = collection.get(ids=["code_src_crypto.py"])["documents"][0]
+    doc = collection.get(ids=["code_src/crypto.py"])["documents"][0]
     assert "XOR" in doc
 
     target.write_text('def encrypt_api_key(key):\n    """Encrypts an API key with Fernet."""\n')
     index_codebase(workspace_dir=project_root)
 
-    doc = collection.get(ids=["code_src_crypto.py"])["documents"][0]
+    doc = collection.get(ids=["code_src/crypto.py"])["documents"][0]
     assert "Fernet" in doc
     assert "XOR" not in doc
 
@@ -123,13 +123,54 @@ def test_reindex_prunes_deleted_files(tmp_path, mock_embeddings, monkeypatch):
     index_codebase(workspace_dir=project_root)
 
     collection = src.memory.get_collection("janus_codebase")
-    assert set(collection.get(ids=["code_src_keeper.py", "code_src_goner.py"])["ids"]) == {
-        "code_src_keeper.py", "code_src_goner.py"
+    assert set(collection.get(ids=["code_src/keeper.py", "code_src/goner.py"])["ids"]) == {
+        "code_src/keeper.py", "code_src/goner.py"
     }
 
     goner.unlink()
     index_codebase(workspace_dir=project_root)
 
     remaining = collection.get()["ids"]
-    assert "code_src_goner.py" not in remaining
-    assert "code_src_keeper.py" in remaining
+    assert "code_src/goner.py" not in remaining
+    assert "code_src/keeper.py" in remaining
+
+def test_prune_skipped_for_non_primary_workspace(tmp_path, mock_embeddings, monkeypatch):
+    """Indexing a sandbox-style worktree must not prune main-workspace entries (issue #134)."""
+    main_root = tmp_path / "main"
+    (main_root / "src").mkdir(parents=True)
+    (main_root / "src" / "main_only.py").write_text("def main_only(): pass")
+
+    monkeypatch.setattr(src.config, "ROOT_DIR", main_root)
+    index_codebase(workspace_dir=main_root)
+
+    collection = src.memory.get_collection("janus_codebase")
+    assert "code_src/main_only.py" in collection.get()["ids"]
+
+    # A worktree that lacks main_only.py, indexed while ROOT_DIR still points at main
+    worktree = tmp_path / "worktree"
+    (worktree / "src").mkdir(parents=True)
+    (worktree / "src" / "branch_file.py").write_text("def branch_file(): pass")
+    index_codebase(workspace_dir=worktree)
+
+    remaining = collection.get()["ids"]
+    assert "code_src/main_only.py" in remaining
+    assert "code_src/branch_file.py" in remaining
+
+def test_prune_skipped_on_empty_walk(tmp_path, mock_embeddings, monkeypatch):
+    """A walk that finds no files must not wipe the existing index (issue #134)."""
+    main_root = tmp_path / "main"
+    (main_root / "src").mkdir(parents=True)
+    (main_root / "src" / "keeper.py").write_text("def keep_me(): pass")
+
+    monkeypatch.setattr(src.config, "ROOT_DIR", main_root)
+    index_codebase(workspace_dir=main_root)
+
+    collection = src.memory.get_collection("janus_codebase")
+    assert "code_src/keeper.py" in collection.get()["ids"]
+
+    empty_root = tmp_path / "empty"
+    empty_root.mkdir()
+    monkeypatch.setattr(src.config, "ROOT_DIR", empty_root)
+    index_codebase(workspace_dir=empty_root)
+
+    assert "code_src/keeper.py" in collection.get()["ids"]

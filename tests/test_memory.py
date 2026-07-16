@@ -27,9 +27,11 @@ def setup_test_vector_db(tmp_path):
     orig_path = src.config.VECTOR_DB_PATH
     src.config.VECTOR_DB_PATH = str(tmp_path / "test_chromadb")
 
-    # Reset internal memory client cache to force re-initialization
+    # Reset internal memory client cache to force re-initialization. The
+    # collections cache must be cleared too — its wrappers hold collection
+    # handles bound to the previous client/path.
     src.memory._chroma_client = None
-    src.memory._collection = None
+    src.memory._collections = {}
 
     yield
 

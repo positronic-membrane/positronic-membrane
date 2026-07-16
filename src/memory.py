@@ -77,8 +77,12 @@ class PgVectorCollectionWrapper(VectorStoreAdapter):
                 for doc_id, doc, meta, emb in zip(ids, documents, metadatas, embeddings, strict=True):
                     emb_str = "[" + ",".join(map(str, emb)) + "]"
                     meta_str = json.dumps(meta)
+                    # DO NOTHING matches ChromaDB's add(), which silently skips
+                    # duplicate IDs — a plain INSERT raised IntegrityError here,
+                    # making add_memory's default behavior backend-dependent.
                     cur.execute(
-                        "INSERT INTO janus_embeddings (collection_name, id, document, metadata, embedding) VALUES (%s, %s, %s, %s, %s::vector)",
+                        "INSERT INTO janus_embeddings (collection_name, id, document, metadata, embedding) "
+                        "VALUES (%s, %s, %s, %s, %s::vector) ON CONFLICT (collection_name, id) DO NOTHING",
                         (self.name, doc_id, doc, meta_str, emb_str)
                     )
             conn.commit()
