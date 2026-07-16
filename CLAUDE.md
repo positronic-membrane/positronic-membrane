@@ -147,12 +147,14 @@ re-deriving that trust assumption first.
 1. **`src/sandbox.py::execute_code_safely`** — ad-hoc snippets (the `execute_code` skill). AST-walked to ban
    imports (`os`, `subprocess`, `socket`, …) and builtins (`eval`, `exec`, `open`, …), then run in a
    `multiprocessing.Process` with a restricted `__builtins__`/import hook and a hard timeout.
-2. **`src/self_modification.py`** (`stage_and_test`/`stage_and_test_multi`, backing the `modify_code` skill and
-   `/modify`, `/stage` console commands) — full-file rewrite proposals. AST-validated (`validate_python_ast`:
-   blocks `subprocess`/`pty`, `os.system`/`popen`/`spawn`/`fork`, `eval`/`exec`), copied into a fresh `tempfile`
-   clone of the whole workspace (with an isolated copy of `janus.db`), pytest run with `JANUS_TEST_MODE=1`,
-   then queued in `system_config` (`pending_mod_*` keys) for human y/n approval before `apply_staged_change`
-   copies it back — or, if `GITHUB_ENABLED=True`, opens a GitHub PR instead of writing locally.
+2. **`src/self_modification.py`** — the former staged full-file-rewrite path (`stage_and_test`,
+   `apply_staged_change`, the `modify_code` skill, `/modify`/`/stage` console commands) was removed at V1
+   sign-off (issue #97): every staging/apply function is now a stub that unconditionally raises
+   `PermissionError`, the skill is gone from the skills library, and Persona rejects `/modify`/`/stage` with
+   a pointer to the sandbox-session path. Only `apply_search_replace_blocks` (a pure text-transform helper
+   used by `SafeCodebase.apply_search_replace` and draft-file editing in `src/skills.py`) remains live. Do
+   not re-enable the stubs — workspace-mutating changes must go through path 3, which additionally honours
+   the `self_modification.frozen` system_config flag.
 3. **`src/sandbox_session.py`** (`/sandbox start|status|diff|ship|abort`, `SafeAgentOrchestration.dispatch_task`)
    — a real `git worktree`+branch under `.janus_sandboxes/session_<name>`, with its own copied DB, executed via
    a pluggable `SandboxExecutor` (`local`/`docker`, chosen by `SANDBOX_PROVIDER`; `e2b` is rejected at boot by
@@ -166,6 +168,11 @@ re-deriving that trust assumption first.
   against `DEFAULT_BANNED_WEBSITES` and any constitution rule keyed `BANNED_BOUNDARIES`.
 - `check_sql_safety()` blocks raw SQL touching `core_constitution`; `validate_config_write()` blocks writes to
   `system_config` rows with `is_agent_modifiable = 0`.
+- **V1 self-modification freeze** (issue #97): `system_config['self_modification.frozen']`
+  (`is_agent_modifiable = 0`, operator-set only) makes `ship_sandbox_session()` raise
+  `SelfModificationFrozenError` instead of copying files back to the live workspace — checked both before and
+  immediately after the sandbox test run to narrow the mid-flight-flip race. Blocked attempts are logged to
+  episodic memory.
 - The **Loop Safety Valve** (`check_loop_safety()`, hard cap `N_LOOP_LIMIT`) and the separate **Smart Loop
   Governor** (`src/daemon.py::check_smart_governor_stagnation`, a soft cap: pauses background autonomy once
   git-diff hash / DB write count / completed-checkpoint count are all unchanged for
@@ -207,7 +214,7 @@ via the `require_role()` FastAPI dependency and independently inside `DynamicSki
 a skill call from a low-privilege party is blocked even if it slipped past a route check.
 
 ### Persona (`src/persona.py`) is the single conversational surface
-It strips multi-agent jargon for the user, owns all `/slash` commands (`/sandbox`, `/stage`, `/modify`,
+It strips multi-agent jargon for the user, owns all `/slash` commands (`/sandbox`,
 `/goal`/`/goals`, `/agent`, `/dispatch`, `/docs`, `/pin`, `/unpin`, `/self`, `/skills`, `/runskill`, `/spawn`,
 `/children`, `/amend`, `/repeal`), and runs an autonomous ReAct-style loop
 (`generate_persona_response_autonomous`, capped at 5 turns) that scans the LLM's own response for JSON skill-
