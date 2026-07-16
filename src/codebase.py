@@ -4,7 +4,7 @@ import os
 from pathlib import Path
 
 import src.config
-from src.memory import add_memory, query_memories
+from src.memory import add_memory, get_collection, query_memories
 
 logger = logging.getLogger("JanusCodebase")
 
@@ -98,6 +98,7 @@ def index_codebase(workspace_dir: Path = None):
                           ".zip", ".tar", ".gz", ".lock", ".bin"}
 
     indexed_count = 0
+    current_ids = set()
 
     for root, dirs, files in os.walk(workspace_dir):
         # Prune ignored directories in-place
@@ -121,18 +122,39 @@ def index_codebase(workspace_dir: Path = None):
                 "last_modified": os.path.getmtime(file_path)
             }
 
+            # The file exists, so its entry must survive the prune below even if
+            # this indexing attempt fails — a stale summary beats none.
+            current_ids.add(memory_id)
+
             try:
                 add_memory(
                     content=summary_doc,
                     metadata=metadata,
                     memory_id=memory_id,
-                    collection_name="janus_codebase"
+                    collection_name="janus_codebase",
+                    upsert=True
                 )
                 indexed_count += 1
             except Exception as e:
                 logger.error(f"Failed to index codebase file {rel_path}: {e}")
 
-    logger.info(f"Codebase indexing complete. Indexed {indexed_count} files in 'janus_codebase'.")
+    # Remove index entries for files that no longer exist in the workspace, so
+    # self-inspection can't surface summaries of deleted code.
+    pruned_count = 0
+    try:
+        collection = get_collection("janus_codebase")
+        existing_ids = collection.get().get("ids") or []
+        stale_ids = [i for i in existing_ids if i not in current_ids]
+        if stale_ids:
+            collection.delete(ids=stale_ids)
+            pruned_count = len(stale_ids)
+    except Exception as e:
+        logger.error(f"Failed to prune stale codebase index entries: {e}")
+
+    logger.info(
+        f"Codebase indexing complete. Indexed {indexed_count} files in 'janus_codebase', "
+        f"pruned {pruned_count} stale entries."
+    )
 
 def query_codebase_context(query_text: str, limit: int = 3) -> str:
     """

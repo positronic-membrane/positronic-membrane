@@ -35,6 +35,10 @@ class VectorStoreAdapter(ABC):
     def upsert(self, documents, metadatas, ids, embeddings=None):
         pass
 
+    @abstractmethod
+    def delete(self, ids):
+        pass
+
 class ChromaCollectionWrapper(VectorStoreAdapter):
     def __init__(self, collection):
         self._collection = collection
@@ -53,6 +57,9 @@ class ChromaCollectionWrapper(VectorStoreAdapter):
 
     def upsert(self, documents, metadatas, ids, embeddings=None):
         self._collection.upsert(documents=documents, metadatas=metadatas, ids=ids, embeddings=embeddings)
+
+    def delete(self, ids):
+        self._collection.delete(ids=ids)
 
 class PgVectorCollectionWrapper(VectorStoreAdapter):
     def __init__(self, name):
@@ -229,6 +236,22 @@ class PgVectorCollectionWrapper(VectorStoreAdapter):
         finally:
             conn.close()
 
+    def delete(self, ids):
+        from src.database import get_connection
+        if not ids:
+            return
+        conn = get_connection(read_only_constitution=False)
+        try:
+            with conn.cursor() as cur:
+                id_placeholders = ",".join(["%s"] * len(ids))
+                cur.execute(
+                    f"DELETE FROM janus_embeddings WHERE collection_name = %s AND id IN ({id_placeholders})",
+                    [self.name] + list(ids)
+                )
+            conn.commit()
+        finally:
+            conn.close()
+
     def _build_where_clause(self, where_dict):
         if not where_dict:
             return "", []
@@ -313,16 +336,21 @@ def get_embeddings(texts: list) -> list:
         logger.error(f"Failed to generate embeddings via endpoint: {e}", exc_info=True)
         raise RuntimeError(f"Embedding generation failed: {e}") from e
 
-def add_memory(content: str, metadata: dict, memory_id: str, collection_name: str = "janus_long_term"):
+def add_memory(content: str, metadata: dict, memory_id: str, collection_name: str = "janus_long_term", upsert: bool = False):
     """
     Generates embedding for the content and stores it in the specified vector collection.
+
+    With upsert=False (default), an existing memory_id is left untouched — ChromaDB's add
+    silently skips duplicate IDs. Pass upsert=True when the caller re-derives content for a
+    stable ID and needs the stored entry refreshed (e.g. the codebase index).
     """
     logger.info(f"Ingesting semantic memory [{memory_id}] into collection '{collection_name}'...")
     embeddings = get_embeddings([content])
     embedding = embeddings[0]
 
     collection = get_collection(collection_name)
-    collection.add(
+    write = collection.upsert if upsert else collection.add
+    write(
         documents=[content],
         metadatas=[metadata],
         ids=[memory_id],

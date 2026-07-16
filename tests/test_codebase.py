@@ -84,3 +84,52 @@ def test_index_and_query_codebase(tmp_path, mock_embeddings, monkeypatch):
     # Check that ignored paths were not indexed
     context_ignored = query_codebase_context("should_ignore", limit=5)
     assert "should_ignore" not in context_ignored
+
+def test_reindex_refreshes_changed_file(tmp_path, mock_embeddings, monkeypatch):
+    """Verify a second index_codebase run replaces the stored summary of a changed file (issue #134)."""
+    project_root = tmp_path / "project"
+    src_dir = project_root / "src"
+    src_dir.mkdir(parents=True)
+
+    target = src_dir / "crypto.py"
+    target.write_text('def encrypt_api_key(key):\n    """Encrypts an API key using XOR."""\n')
+
+    monkeypatch.setattr(src.config, "ROOT_DIR", project_root)
+    index_codebase(workspace_dir=project_root)
+
+    collection = src.memory.get_collection("janus_codebase")
+    doc = collection.get(ids=["code_src_crypto.py"])["documents"][0]
+    assert "XOR" in doc
+
+    target.write_text('def encrypt_api_key(key):\n    """Encrypts an API key with Fernet."""\n')
+    index_codebase(workspace_dir=project_root)
+
+    doc = collection.get(ids=["code_src_crypto.py"])["documents"][0]
+    assert "Fernet" in doc
+    assert "XOR" not in doc
+
+def test_reindex_prunes_deleted_files(tmp_path, mock_embeddings, monkeypatch):
+    """Verify index entries for files removed from the workspace are deleted on re-index (issue #134)."""
+    project_root = tmp_path / "project"
+    src_dir = project_root / "src"
+    src_dir.mkdir(parents=True)
+
+    keeper = src_dir / "keeper.py"
+    keeper.write_text("def keep_me(): pass")
+    goner = src_dir / "goner.py"
+    goner.write_text("def delete_me(): pass")
+
+    monkeypatch.setattr(src.config, "ROOT_DIR", project_root)
+    index_codebase(workspace_dir=project_root)
+
+    collection = src.memory.get_collection("janus_codebase")
+    assert set(collection.get(ids=["code_src_keeper.py", "code_src_goner.py"])["ids"]) == {
+        "code_src_keeper.py", "code_src_goner.py"
+    }
+
+    goner.unlink()
+    index_codebase(workspace_dir=project_root)
+
+    remaining = collection.get()["ids"]
+    assert "code_src_goner.py" not in remaining
+    assert "code_src_keeper.py" in remaining

@@ -173,3 +173,16 @@ def test_episodic_memory_cleanup_ttl():
     conn.close()
 
 
+
+def test_add_memory_upsert_refreshes_existing_id(mock_embeddings):
+    """add_memory default keeps the first write for a duplicate ID; upsert=True replaces it."""
+    add_memory("old content", {"v": "1"}, "stable_id")
+    add_memory("new content", {"v": "2"}, "stable_id")  # default add: duplicate ID silently skipped
+
+    collection = get_collection("janus_long_term")
+    assert collection.get(ids=["stable_id"])["documents"] == ["old content"]
+
+    add_memory("new content", {"v": "2"}, "stable_id", upsert=True)
+    res = collection.get(ids=["stable_id"])
+    assert res["documents"] == ["new content"]
+    assert res["metadatas"][0]["v"] == "2"
