@@ -329,19 +329,22 @@ def sync_from_registry(
 
         try:
             if cache_dir.exists():
-                # Fetch then checkout the configured ref before pulling, so a change
-                # in SKILLS_LIBRARY_REF between boots is honoured.
+                # Fetch the pinned ref EXPLICITLY and check out the fetched
+                # commit. A bare `fetch origin` honours the clone's refspec,
+                # and a cache created single-branch (e.g. from 'main' before
+                # the skills.library_ref pin existed) never brings the pinned
+                # ref down — `checkout <ref>` then fails with "pathspec ...
+                # did not match" (issue #139: this silently degraded boot sync
+                # on every restart for a day). FETCH_HEAD + --detach works
+                # regardless of refspec or local branch state, honours ref
+                # changes between boots, and needs no follow-up pull.
                 subprocess.run(
-                    ["git", "-C", str(cache_dir), "fetch", "origin"],
+                    ["git", "-C", str(cache_dir), "fetch", "origin", branch],
                     check=True, capture_output=True, text=True, timeout=60,
                 )
                 subprocess.run(
-                    ["git", "-C", str(cache_dir), "checkout", branch],
+                    ["git", "-C", str(cache_dir), "checkout", "--detach", "FETCH_HEAD"],
                     check=True, capture_output=True, text=True, timeout=30,
-                )
-                subprocess.run(
-                    ["git", "-C", str(cache_dir), "pull", "--ff-only"],
-                    check=True, capture_output=True, text=True, timeout=60,
                 )
             else:
                 cache_dir.parent.mkdir(parents=True, exist_ok=True)

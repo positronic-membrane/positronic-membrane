@@ -630,3 +630,128 @@ def test_sync_from_registry_uses_pinned_ref_from_system_config(tmp_path, monkeyp
     clone_cmd = captured_cmds[0]
     assert "v7-custom-pin" in clone_cmd
     assert "should-not-be-used" not in clone_cmd
+
+# ---------------------------------------------------------------------------
+# sync_from_registry — git path (issue #139)
+# ---------------------------------------------------------------------------
+
+def _git(args, cwd):
+    import subprocess
+    subprocess.run(
+        ["git", *args], cwd=str(cwd), check=True, capture_output=True, text=True,
+        env={"PATH": "/usr/bin:/bin", "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+             "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t",
+             "HOME": str(cwd)},
+    )
+
+
+def _write_echo_library(lib_dir: Path, marker: str) -> None:
+    """Write a complete one-skill library layout whose code carries `marker`."""
+    (lib_dir / "skills").mkdir(exist_ok=True)
+    (lib_dir / "skills" / "echo_message.py").write_text(
+        f'def run(sdk, args):\n    return {{"msg": "{marker}"}}\n', encoding="utf-8"
+    )
+    (lib_dir / "skills" / "test_echo_message.py").write_text(
+        textwrap.dedent(f"""\
+            from skill import run
+            from mock_sdk import make_mock_sdk
+
+            def test_echo():
+                assert run(make_mock_sdk(), {{}})["msg"] == "{marker}"
+        """),
+        encoding="utf-8",
+    )
+    _make_local_registry(lib_dir, [{
+        "skill_id": "echo_message",
+        "name": "Echo Message",
+        "description": "Returns a marker",
+        "parameters_schema": '{"type": "object", "properties": {}}',
+        "entry_point_function": "run",
+        "required_role": "observer",
+        "trigger_type": "manual",
+        "trigger_config": "{}",
+        "file": "skills/echo_message.py",
+        "test_file": "skills/test_echo_message.py",
+    }])
+
+
+def _make_git_library_remote(tmp_path: Path) -> Path:
+    """A real git repo with 'main' (marker from-main) and 'v1' (marker from-v1)."""
+    remote = tmp_path / "remote_lib"
+    remote.mkdir()
+    _git(["init", "-b", "main"], remote)
+    _write_echo_library(remote, "from-main")
+    _git(["add", "-A"], remote)
+    _git(["commit", "-m", "main content"], remote)
+    _git(["checkout", "-b", "v1"], remote)
+    _write_echo_library(remote, "from-v1")
+    _git(["add", "-A"], remote)
+    _git(["commit", "-m", "v1 content"], remote)
+    _git(["checkout", "main"], remote)
+    return remote
+
+
+def _synced_code_blob() -> str:
+    with get_connection() as conn:
+        row = conn.execute(
+            "SELECT code_blob FROM agent_skills WHERE skill_id = ?", ("echo_message",)
+        ).fetchone()
+    assert row is not None
+    return row[0]
+
+
+def test_sync_git_path_single_branch_cache_still_fetches_pinned_ref(tmp_path, monkeypatch):
+    """A pre-existing cache cloned single-branch from 'main' must not break the
+    'v1' pin — the production failure behind issue #139."""
+    import subprocess
+
+    import src.config
+
+    remote = _make_git_library_remote(tmp_path)
+
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    monkeypatch.setattr(src.config, "ROOT_DIR", workspace)
+
+    # Recreate the bad state: cache exists but only knows origin/main
+    cache_dir = workspace / ".janus_sandboxes" / "skills_library"
+    cache_dir.parent.mkdir(parents=True)
+    subprocess.run(
+        ["git", "clone", "--branch", "main", "--single-branch", "--depth", "1",
+         str(remote), str(cache_dir)],
+        check=True, capture_output=True, text=True,
+    )
+
+    with patch("src.skill_harness.config.get_effective_workspace_root", return_value=workspace):
+        result = sync_from_registry(repo_url=str(remote))
+
+    assert result["fatal_error"] is None, f"sync failed: {result}"
+    assert result["synced"] == ["echo_message"]
+    assert "from-v1" in _synced_code_blob()
+
+
+def test_sync_git_path_honours_ref_change_between_syncs(tmp_path, monkeypatch):
+    """Changing skills.library_ref between syncs must switch the fetched content."""
+    import src.config
+
+    remote = _make_git_library_remote(tmp_path)
+
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    monkeypatch.setattr(src.config, "ROOT_DIR", workspace)
+
+    with patch("src.skill_harness.config.get_effective_workspace_root", return_value=workspace):
+        result = sync_from_registry(repo_url=str(remote))
+        assert result["fatal_error"] is None, f"first sync failed: {result}"
+        assert "from-v1" in _synced_code_blob()
+
+        with get_connection() as conn:
+            conn.execute(
+                "UPDATE system_config SET config_value = ? WHERE config_key = ?",
+                ("main", "skills.library_ref"),
+            )
+            conn.commit()
+
+        result = sync_from_registry(repo_url=str(remote))
+        assert result["fatal_error"] is None, f"re-sync failed: {result}"
+        assert "from-main" in _synced_code_blob()
