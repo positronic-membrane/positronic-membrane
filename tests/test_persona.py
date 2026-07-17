@@ -627,3 +627,43 @@ async def test_goals_resolve_cancel_keeps_dispute_open(mock_get_input):
     row = conn.execute("SELECT config_value FROM system_config WHERE config_key = 'dispute_paused';").fetchone()
     conn.close()
     assert row[0] == "true"
+
+# ---------------------------------------------------------------------------
+# Streaming-path skill-call parsing — bare-arguments form (issue #137)
+# ---------------------------------------------------------------------------
+
+def test_extract_skill_calls_bare_arguments_registered_skill():
+    """'<skill>:{bare args}' is extracted when the label names a registered skill."""
+    from src.persona import _extract_skill_calls
+
+    calls = _extract_skill_calls('I will check presence now.\ncheck_presence:{"probe": true}')
+    assert calls == [("check_presence", {"probe": True})]
+
+    # arguments-wrapper unwraps
+    calls = _extract_skill_calls('check_presence:{"arguments": {"x": 1}}')
+    assert calls == [("check_presence", {"x": 1})]
+
+def test_extract_skill_calls_bare_arguments_guards():
+    """Prose labels and mid-line labels must not become skill calls."""
+    from src.persona import _extract_skill_calls
+
+    # Line-anchored label that is NOT a registered skill → illustrative JSON, not a call
+    assert _extract_skill_calls('Example:\n{"foo": 1}') == []
+
+    # Registered skill name mid-line (prose context) → not a call
+    assert _extract_skill_calls('read the check_presence: {"a": 1} output') == []
+
+    # Canonical dict shape needs no registration and keeps working
+    calls = _extract_skill_calls('{"skill_id": "web_search", "arguments": {"query": "q"}}')
+    assert calls == [("web_search", {"query": "q"})]
+
+def test_strip_skill_call_json_bare_arguments():
+    """Stripping removes the bare block AND its '<skill>:' label; plain JSON survives."""
+    from src.persona import _strip_skill_call_json
+
+    text = 'Let me check.\ncheck_presence:{"probe": true}\nDone soon.'
+    assert _strip_skill_call_json(text) == "Let me check.\n\nDone soon."
+
+    # Non-skill JSON in prose is untouched
+    text = 'Here is data: {"x": 1} for you'
+    assert _strip_skill_call_json(text) == text

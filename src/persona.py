@@ -1694,34 +1694,74 @@ def _find_json_blocks(text: str) -> list:
     return blocks
 
 
+def _skill_exists(skill_id: str) -> bool:
+    """True when skill_id names a registered agent_skills row."""
+    try:
+        conn = get_connection(read_only_constitution=True)
+        try:
+            cursor = conn.cursor()
+            cursor.execute("SELECT 1 FROM agent_skills WHERE skill_id = ?;", (skill_id,))
+            return cursor.fetchone() is not None
+        finally:
+            conn.close()
+    except Exception:
+        return False
+
+
+def _classify_skill_block(text: str, blob: str, start: int):
+    """Decides whether one balanced JSON block is a skill call.
+
+    Returns (skill_id, arguments, strip_start) or None. Two accepted shapes:
+    the canonical dict ({"skill_id"/"tool"/"tool_name": ..., "arguments": ...}),
+    and the bare-arguments form '<skill>:{...}' (issue #137, the streaming twin
+    of daemon.parse_action's issue #136 fix) — the '<skill>:' label must sit
+    line-anchored immediately before the block AND name a registered skill,
+    because streamed responses are full prose where labels like 'Example:'
+    can legitimately precede illustrative JSON. strip_start extends to the
+    label so stripping doesn't leave a dangling 'skill_name:' in the chat text.
+    """
+    import json as _json
+    try:
+        data = _json.loads(blob)
+    except ValueError:
+        return None
+    if not isinstance(data, dict):
+        return None
+
+    skill_id = data.get("skill_id") or data.get("tool") or data.get("tool_name")
+    if skill_id:
+        arguments = data.get("arguments") or data.get("args") or {}
+        return skill_id, arguments, start
+
+    label = re.search(r"(?:^|\n)[ \t]*([A-Za-z][A-Za-z0-9_]*)[ \t]*:[ \t]*\r?$", text[:start])
+    if label and _skill_exists(label.group(1)):
+        inner = None
+        for key in ("arguments", "args"):
+            if isinstance(data.get(key), dict):
+                inner = data[key]
+                break
+        return label.group(1), (data if inner is None else inner), label.start(1)
+    return None
+
+
 def _extract_skill_calls(text: str) -> list:
     """Return list of (skill_id, arguments) for every skill-call JSON block found."""
-    import json as _json
     results = []
-    for blob, _, _ in _find_json_blocks(text):
-        try:
-            data = _json.loads(blob)
-            if isinstance(data, dict):
-                skill_id = data.get("skill_id") or data.get("tool") or data.get("tool_name")
-                arguments = data.get("arguments") or data.get("args") or {}
-                if skill_id:
-                    results.append((skill_id, arguments))
-        except (ValueError, KeyError):
-            pass
+    for blob, start, _ in _find_json_blocks(text):
+        classified = _classify_skill_block(text, blob, start)
+        if classified:
+            results.append((classified[0], classified[1]))
     return results
 
 
 def _strip_skill_call_json(text: str) -> str:
-    """Remove skill-call JSON blocks from text, leaving only conversational content."""
-    import json as _json
+    """Remove skill-call JSON blocks (and any '<skill>:' label introducing a
+    bare-arguments block) from text, leaving only conversational content."""
     ranges_to_remove = []
     for blob, start, end in _find_json_blocks(text):
-        try:
-            data = _json.loads(blob)
-            if isinstance(data, dict) and (data.get("skill_id") or data.get("tool") or data.get("tool_name")):
-                ranges_to_remove.append((start, end))
-        except (ValueError, KeyError):
-            pass
+        classified = _classify_skill_block(text, blob, start)
+        if classified:
+            ranges_to_remove.append((classified[2], end))
     if not ranges_to_remove:
         return text
     result = []
