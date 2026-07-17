@@ -1,10 +1,13 @@
 """LLM-judge rubric scoring for the behavioral evaluation harness (issue #112).
 
-Mirrors src/pr_review.py::_evaluate_criterion()'s pattern exactly: a JSON-only
-prompt to a deterministic (temperature 0) agent, parsed with a strict
-try/except, failing CLOSED on any parse failure -- a malformed judge response
-must never silently read as a passing score in a baseline record (unlike
-src/epistemic.py's fail-open default, which is appropriate there but not here).
+Follows src/pr_review.py::_evaluate_criterion()'s posture: a JSON-only prompt
+to a deterministic (temperature 0) agent, failing CLOSED on any parse failure
+-- a malformed judge response must never silently read as a passing score in a
+baseline record (unlike src/epistemic.py's fail-open default, which is
+appropriate there but not here). One divergence since issue #142: the verdict
+is located with _extract_judge_verdict below, which tolerates the ubiquitous
+markdown-fence wrapper while still failing closed on anything ambiguous;
+pr_review still parses raw (see issue #143).
 """
 import json
 import logging
@@ -19,6 +22,44 @@ _JUDGE_AGENT_ID = "benchmark_judge"
 # Lowest score on the 1-5 scale -- what a parse failure scores, per the
 # fail-closed posture above.
 _FAIL_CLOSED_SCORE = 1
+
+
+def _extract_judge_verdict(raw: str):
+    """Returns the single parsed verdict dict from a judge response, or None.
+
+    Strict json.loads on the whole response first (the documented contract).
+    Otherwise scans for balanced JSON objects with json.JSONDecoder.raw_decode
+    -- a real parser, so fences, nesting, and braces inside strings are all
+    handled -- and accepts ONLY an unambiguous result: exactly one object
+    carrying a "score" key. Multiple candidates fail closed: the transcript
+    the judge reads is adversarial (quarantine-wrapped, trusted=False), and a
+    decoy verdict echoed from it must never be mistaken for the real one
+    (issue #142 review). The echoed prompt template '{"score": <int 1-5>...}'
+    is not valid JSON and never becomes a candidate.
+    """
+    try:
+        parsed = json.loads(raw.strip())
+        if isinstance(parsed, dict):
+            return parsed
+    except ValueError:
+        pass
+
+    decoder = json.JSONDecoder()
+    candidates = []
+    idx = 0
+    while True:
+        brace = raw.find("{", idx)
+        if brace == -1:
+            break
+        try:
+            obj, end = decoder.raw_decode(raw, brace)
+        except ValueError:
+            idx = brace + 1
+            continue
+        if isinstance(obj, dict) and "score" in obj:
+            candidates.append(obj)
+        idx = end if end > brace else brace + 1
+    return candidates[0] if len(candidates) == 1 else None
 
 
 def score_scenario(scenario: dict, transcript: str) -> dict:
@@ -43,9 +84,9 @@ def score_scenario(scenario: dict, transcript: str) -> dict:
     )
     raw = query_agent(_JUDGE_AGENT_ID, prompt)
     try:
-        parsed = json.loads(raw)
-        if not isinstance(parsed, dict):
-            raise ValueError("judge response was valid JSON but not an object")
+        parsed = _extract_judge_verdict(raw)
+        if parsed is None:
+            raise ValueError("no unambiguous JSON verdict object in judge response")
         score = int(parsed["score"])
         if not (1 <= score <= 5):
             raise ValueError(f"score {score} out of range 1-5")
