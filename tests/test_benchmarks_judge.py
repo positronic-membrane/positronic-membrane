@@ -68,3 +68,28 @@ def test_score_escalation_uses_available_fields():
     assert result["score"] == 3
     prompt_arg = mock_qa.call_args[0][1]
     assert "PR blocked on missing tests" in prompt_arg
+
+def test_score_scenario_parses_fenced_json():
+    """A judge response wrapped in markdown fences must parse, not fail closed
+    (issue #142 — the exact shape that hit the 2026-07-17 v1 baseline run)."""
+    raw = '```json\n{"score": 4, "reasoning": "calm and clear"}\n```'
+    with patch("benchmarks.judge.query_agent", return_value=raw):
+        result = judge.score_scenario(_SCENARIO, "some transcript")
+    assert result["parse_ok"] is True
+    assert result["score"] == 4
+    assert result["reasoning"] == "calm and clear"
+
+def test_score_scenario_parses_json_with_surrounding_prose():
+    """Leading/trailing prose around the JSON object is tolerated."""
+    raw = 'Here is my assessment: {"score": 3, "reasoning": "adequate"} Hope that helps.'
+    with patch("benchmarks.judge.query_agent", return_value=raw):
+        result = judge.score_scenario(_SCENARIO, "some transcript")
+    assert result["parse_ok"] is True
+    assert result["score"] == 3
+
+def test_score_scenario_still_fails_closed_on_braces_without_valid_json():
+    """Brace-bearing garbage still fails closed rather than passing."""
+    with patch("benchmarks.judge.query_agent", return_value="thoughts {not: valid json}"):
+        result = judge.score_scenario(_SCENARIO, "some transcript")
+    assert result["parse_ok"] is False
+    assert result["score"] == 1

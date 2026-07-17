@@ -8,6 +8,7 @@ src/epistemic.py's fail-open default, which is appropriate there but not here).
 """
 import json
 import logging
+import re
 
 from src.llm import query_agent
 from src.middleware import quarantine_wrap
@@ -19,6 +20,21 @@ _JUDGE_AGENT_ID = "benchmark_judge"
 # Lowest score on the 1-5 scale -- what a parse failure scores, per the
 # fail-closed posture above.
 _FAIL_CLOSED_SCORE = 1
+
+
+def _extract_json_object(raw: str) -> str:
+    """Returns the JSON-object text from a judge response, tolerating the
+    ubiquitous markdown-fence wrapper (```json ... ```) and surrounding prose
+    (issue #142: a fenced-but-valid response fail-closed a v1 baseline score).
+    Same fence-then-braces order as daemon.parse_action. Falls back to the raw
+    string so genuinely malformed responses still fail closed downstream."""
+    fence = re.search(r"```(?:json)?\s*({.*?})\s*```", raw, re.DOTALL)
+    if fence:
+        return fence.group(1)
+    braces = re.search(r"({.*})", raw, re.DOTALL)
+    if braces:
+        return braces.group(1)
+    return raw
 
 
 def score_scenario(scenario: dict, transcript: str) -> dict:
@@ -43,7 +59,7 @@ def score_scenario(scenario: dict, transcript: str) -> dict:
     )
     raw = query_agent(_JUDGE_AGENT_ID, prompt)
     try:
-        parsed = json.loads(raw)
+        parsed = json.loads(_extract_json_object(raw))
         if not isinstance(parsed, dict):
             raise ValueError("judge response was valid JSON but not an object")
         score = int(parsed["score"])
