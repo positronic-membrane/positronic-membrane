@@ -157,9 +157,17 @@
       "checkpoints_completed": 0,
       "checkpoints_completed_autonomously": 0,
       "cost_per_completed_checkpoint": null,
-      "stagnation_pause_rate": 0,
+      "stagnation_pause_rate": 1,
       "escalation_quality_mean": null,
-      "escalation_count": 0
+      "escalation_count": 0,
+      "window_seconds": 3600.0,
+      "window_start": "2026-07-17T14:50:37.566540+00:00",
+      "window_end": "2026-07-17T15:50:37.569319+00:00",
+      "cost_total_usd": 0.2596935,
+      "stagnation_pauses": 1,
+      "hard_cap_pauses": 0,
+      "open_checkpoints_at_start": 0,
+      "note": "1-hour JANUS_TEST_MODE window (~2.5 days of accelerated scheduler time), recorded 2026-07-17 before the freeze, superseding the 8s bounded run. Zero checkpoints is doubly determined: the active goal is aspirational with no decomposed checkpoints (goal_checkpoints table empty), and the governor paused once and held absent operator presence \u2014 see issue #96 audit."
     }
   },
   "operator_blind_ranking": null
