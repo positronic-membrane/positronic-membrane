@@ -20,6 +20,7 @@ _COUNTER_KEYS = (
     "metrics.daemon_cycles_total",
     "metrics.skills_executed_total",
     "metrics.skills_failed_total",
+    "metrics.skills_sync_failed_total",
     "metrics.http_requests_total",
 )
 
@@ -85,6 +86,10 @@ def increment_skills_executed_total() -> None:
 
 def increment_skills_failed_total() -> None:
     _increment_counter("metrics.skills_failed_total")
+
+
+def increment_skills_sync_failed_total() -> None:
+    _increment_counter("metrics.skills_sync_failed_total")
 
 
 def increment_http_requests_total() -> None:

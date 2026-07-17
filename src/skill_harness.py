@@ -1,4 +1,5 @@
 import ast
+import fcntl
 import json
 import logging
 import os
@@ -300,6 +301,57 @@ def format_sync_summary(result: dict) -> str:
     return "\n".join(lines)
 
 
+def _update_cache_to_ref(cache_dir: Path, ref: str) -> None:
+    """Points an existing cache clone's worktree at the tip of `ref` on origin.
+
+    Fetches the ref explicitly — a cache created single-branch has a refspec
+    that never brings other refs down, so a bare `fetch origin` + `checkout
+    <ref>` fails with "pathspec ... did not match" (issue #139). Checking out
+    the fetched commit detached is independent of refspec and local-branch
+    state and honours ref changes between boots. Branches are tried before
+    tags so an ambiguously-named ref resolves deterministically (plain
+    `fetch origin <name>` prefers the tag).
+    """
+    try:
+        subprocess.run(
+            ["git", "-C", str(cache_dir), "fetch", "origin", f"refs/heads/{ref}"],
+            check=True, capture_output=True, text=True, timeout=60,
+        )
+    except subprocess.CalledProcessError:
+        # Not a branch — retry as a tag or other ref name.
+        subprocess.run(
+            ["git", "-C", str(cache_dir), "fetch", "origin", ref],
+            check=True, capture_output=True, text=True, timeout=60,
+        )
+
+    # A pin that no longer fast-forwards means upstream history was rewritten
+    # or the pin moved backwards — a supply-chain-shaped event. The ref owner
+    # is trusted, so sync proceeds, but loudly. Skipped for shallow caches:
+    # their truncated history makes ancestry checks report false negatives on
+    # perfectly normal updates.
+    shallow = subprocess.run(
+        ["git", "-C", str(cache_dir), "rev-parse", "--is-shallow-repository"],
+        capture_output=True, text=True, timeout=30,
+    )
+    if shallow.returncode == 0 and shallow.stdout.strip() == "false":
+        ancestry = subprocess.run(
+            ["git", "-C", str(cache_dir), "merge-base", "--is-ancestor", "HEAD", "FETCH_HEAD"],
+            capture_output=True, text=True, timeout=30,
+        )
+        if ancestry.returncode == 1:
+            logger.warning(
+                "skills-library ref '%s' does not fast-forward from the cache's previous "
+                "state (ref change, or upstream history rewritten?) — syncing to it anyway.",
+                ref,
+            )
+
+    # --force: a dirty or partially-checked-out cache must not wedge boot sync.
+    subprocess.run(
+        ["git", "-C", str(cache_dir), "checkout", "--force", "--detach", "FETCH_HEAD"],
+        check=True, capture_output=True, text=True, timeout=30,
+    )
+
+
 def sync_from_registry(
     repo_url: str | None = None,
     local_path: str | None = None,
@@ -328,33 +380,28 @@ def sync_from_registry(
         cache_dir = config.ROOT_DIR / ".janus_sandboxes" / "skills_library"
 
         try:
-            if cache_dir.exists():
-                # Fetch the pinned ref EXPLICITLY and check out the fetched
-                # commit. A bare `fetch origin` honours the clone's refspec,
-                # and a cache created single-branch (e.g. from 'main' before
-                # the skills.library_ref pin existed) never brings the pinned
-                # ref down — `checkout <ref>` then fails with "pathspec ...
-                # did not match" (issue #139: this silently degraded boot sync
-                # on every restart for a day). FETCH_HEAD + --detach works
-                # regardless of refspec or local branch state, honours ref
-                # changes between boots, and needs no follow-up pull.
-                subprocess.run(
-                    ["git", "-C", str(cache_dir), "fetch", "origin", branch],
-                    check=True, capture_output=True, text=True, timeout=60,
-                )
-                subprocess.run(
-                    ["git", "-C", str(cache_dir), "checkout", "--detach", "FETCH_HEAD"],
-                    check=True, capture_output=True, text=True, timeout=30,
-                )
-            else:
-                cache_dir.parent.mkdir(parents=True, exist_ok=True)
-                subprocess.run(
-                    ["git", "clone", "--branch", branch, "--depth", "1", url, str(cache_dir)],
-                    check=True,
-                    capture_output=True,
-                    text=True,
-                    timeout=120,
-                )
+            # Serialize git work on the shared cache: in docker mode the web
+            # server and daemon both run init_db() concurrently, and the manual
+            # sync_skill_library skill can overlap a boot sync. FETCH_HEAD is a
+            # single per-repo file, so unserialized fetch + checkout could land
+            # the cache on another sync's ref (or collide on index.lock).
+            cache_dir.parent.mkdir(parents=True, exist_ok=True)
+            lock_path = cache_dir.parent / "skills_library.lock"
+            with open(lock_path, "w") as lock_file:
+                fcntl.flock(lock_file, fcntl.LOCK_EX)
+                try:
+                    if cache_dir.exists():
+                        _update_cache_to_ref(cache_dir, branch)
+                    else:
+                        subprocess.run(
+                            ["git", "clone", "--branch", branch, "--depth", "1", url, str(cache_dir)],
+                            check=True,
+                            capture_output=True,
+                            text=True,
+                            timeout=120,
+                        )
+                finally:
+                    fcntl.flock(lock_file, fcntl.LOCK_UN)
         except subprocess.CalledProcessError as e:
             err = e.stderr or str(e)
             return _sync_result(fatal_error=f"git operation failed: {err}")
