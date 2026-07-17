@@ -1914,10 +1914,10 @@ def execute_chat_sandbox_commands(block: str) -> str:
       - discard
       - rollback
     """
-    from src.config import get_effective_workspace_root
+    from src.config import get_effective_workspace_root, path_has_protected_secret
     from src.sandbox_session import get_sandbox_diff, run_sandbox_tests
 
-    workspace_root = get_effective_workspace_root()
+    workspace_root = get_effective_workspace_root().resolve()
     results = []
 
     for line in block.splitlines():
@@ -1933,8 +1933,13 @@ def execute_chat_sandbox_commands(block: str) -> str:
             try:
                 # Ensure path is clean and resolved within the effective workspace root
                 full_path = (workspace_root / rel_path).resolve()
-                if not str(full_path).startswith(str(workspace_root.resolve())):
+                try:
+                    rel_parts = full_path.relative_to(workspace_root).parts
+                except ValueError:
                     results.append(f"- read {rel_path}: Access denied (outside workspace).")
+                    continue
+                if path_has_protected_secret(rel_parts):
+                    results.append(f"- read {rel_path}: Access denied (protected secrets '.env*'/'.keys').")
                     continue
 
                 if full_path.exists() and full_path.is_file():
@@ -1951,8 +1956,13 @@ def execute_chat_sandbox_commands(block: str) -> str:
             try:
                 # Ensure path is clean and resolved within the effective workspace root
                 full_path = (workspace_root / rel_path).resolve()
-                if not str(full_path).startswith(str(workspace_root.resolve())):
+                try:
+                    rel_parts = full_path.relative_to(workspace_root).parts
+                except ValueError:
                     results.append(f"- checkout {rel_path}: Access denied (outside workspace).")
+                    continue
+                if path_has_protected_secret(rel_parts):
+                    results.append(f"- checkout {rel_path}: Access denied (protected secrets '.env*'/'.keys').")
                     continue
 
                 import subprocess

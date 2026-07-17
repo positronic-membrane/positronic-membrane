@@ -89,6 +89,19 @@ def test_execute_chat_sandbox_commands(mock_rollback, mock_discard, mock_run, mo
     res = execute_chat_sandbox_commands(block)
     assert "Access denied" in res
 
+    # Secrets denylist (issue #147): read/checkout of .env / .keys is refused
+    # even though the paths resolve inside the workspace, and the file content
+    # is never echoed back.
+    (tmp_path / ".env").write_text("NEO4J_PASSWORD=supersecret")
+    (tmp_path / ".keys").mkdir()
+    (tmp_path / ".keys" / "jwt_private.pem").write_text("PRIVATE KEY MATERIAL")
+    for secret in ("read .env", "read: .keys/jwt_private.pem", "checkout .env"):
+        res = execute_chat_sandbox_commands(secret)
+        assert "Access denied" in res
+        assert "protected secrets" in res
+        assert "supersecret" not in res
+        assert "PRIVATE KEY MATERIAL" not in res
+
     # Test discard command
     mock_discard.return_value = True
     block = "discard"

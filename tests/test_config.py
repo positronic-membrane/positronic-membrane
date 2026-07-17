@@ -316,3 +316,24 @@ def test_validate_agent_routing_policy_genuine_error_respects_strict_mode(monkey
     result = validate_agent_routing_policy()
     assert not result.ok
     assert any("connection reset by peer" in e for e in result.errors)
+
+
+# ---------------------------------------------------------------------------
+# Protected-secret path predicate (issue #147)
+# ---------------------------------------------------------------------------
+
+def test_is_protected_secret_component():
+    from src.config import is_protected_secret_component
+    for name in (".env", ".env.local", ".env.production", ".env.example", ".keys"):
+        assert is_protected_secret_component(name) is True
+    for name in ("env", "keys", "notes.md", "config.json", "keys.txt", "myenv"):
+        assert is_protected_secret_component(name) is False
+
+
+def test_path_has_protected_secret():
+    from src.config import path_has_protected_secret
+    assert path_has_protected_secret((".env",)) is True
+    assert path_has_protected_secret((".keys", "jwt_private.pem")) is True
+    assert path_has_protected_secret(("sub", "dir", ".env.local")) is True
+    assert path_has_protected_secret(("docs", "note.md")) is False
+    assert path_has_protected_secret(()) is False

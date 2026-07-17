@@ -199,6 +199,23 @@ def test_generate_handoff_handles_missing_target_file_gracefully(monkeypatch, tm
     assert "does not exist yet" in bundle
 
 
+def test_generate_handoff_never_surfaces_secret_target_files(monkeypatch, tmp_path):
+    """A Target Files list naming .env/.keys must not leak content, existence, or
+    size into the handoff packet (issue #147)."""
+    (tmp_path / ".env").write_text("NEO4J_PASSWORD=handoff_secret_value")
+    (tmp_path / ".keys").mkdir()
+    (tmp_path / ".keys" / "jwt_private.pem").write_text("HANDOFF PRIVATE KEY")
+    monkeypatch.setattr("src.config.get_effective_workspace_root", lambda: tmp_path)
+
+    body = "## Target Files\n\n- `.env`\n- `.keys/jwt_private.pem`\n"
+    with _mock_urlopen(_issue_payload(body=body), []):
+        bundle = generate_handoff(68, party_id="system")
+
+    assert "handoff_secret_value" not in bundle
+    assert "HANDOFF PRIVATE KEY" not in bundle
+    assert "Protected secret path" in bundle
+
+
 def test_generate_handoff_falls_back_when_optional_sections_missing():
     body = "## Summary\n\nJust a summary, no other sections.\n"
     with _mock_urlopen(_issue_payload(body=body), []):

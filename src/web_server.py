@@ -21,7 +21,7 @@ from src.routers.dependencies import (  # noqa: F401 -- unused here; re-exported
 logger = logging.getLogger("JanusWebServer")
 
 # Initialize FastAPI App
-app = FastAPI(title="Positronic Membrane API Layer", version="1.0.0")
+app = FastAPI(title="Positronic Membrane API Layer", version="1.0.1")
 
 # Setup CORS
 app.add_middleware(

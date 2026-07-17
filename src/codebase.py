@@ -76,7 +76,7 @@ def generate_file_summary(file_path: Path, workspace_dir: Path = None) -> str:
         structure = parse_python_structure(content)
         return f"File: {rel_path}\nLanguage: Python\nStructure:\n{structure}"
 
-    elif file_path.suffix in (".md", ".txt", ".css", ".json", ".env", ".example"):
+    elif file_path.suffix in (".md", ".txt", ".css", ".json"):
         # For markdown/text, get the first 500 characters or lines
         snippet = content[:800].strip()
         return f"File: {rel_path}\nSnippet:\n{snippet}..."
@@ -94,7 +94,7 @@ def index_codebase(workspace_dir: Path = None):
 
     logger.info(f"Scanning and indexing codebase at: {workspace_dir} ...")
 
-    ignored_dirs = {".git", ".venv", "venv", "__pycache__", "data", ".pytest_cache", ".janus_sandboxes", ".janus_snapshots"}
+    ignored_dirs = {".git", ".venv", "venv", "__pycache__", "data", ".pytest_cache", ".janus_sandboxes", ".janus_snapshots", ".keys"}
     ignored_files = {".DS_Store", "janus.db", "janus.db-journal", "janus.db-wal", "janus.db-shm"}
     # Extensions that produce no useful summary and would trigger expensive embedding calls
     ignored_extensions = {".pyc", ".pyo", ".db", ".sqlite", ".sqlite3", ".db-wal", ".db-shm", ".db-journal",
@@ -111,6 +111,9 @@ def index_codebase(workspace_dir: Path = None):
 
         for file in files:
             if file in ignored_files or Path(file).suffix in ignored_extensions:
+                continue
+            # Never embed live secrets (.env*/.keys) into the queryable index (issue #147).
+            if src.config.is_protected_secret_component(file):
                 continue
 
             file_path = Path(root) / file

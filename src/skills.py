@@ -150,9 +150,15 @@ class SafeFS:
 
     def _resolve_path(self, path: str) -> Any:
         from pathlib import Path
+
+        from src.config import path_has_protected_secret
         full_path = Path(self.root / path).resolve()
-        if not str(full_path).startswith(str(self.root)):
-            raise PermissionError(f"Access Denied: Path '{path}' lies outside the active workspace directory.")
+        try:
+            rel_parts = full_path.relative_to(self.root).parts
+        except ValueError:
+            raise PermissionError(f"Access Denied: Path '{path}' lies outside the active workspace directory.") from None
+        if path_has_protected_secret(rel_parts):
+            raise PermissionError(f"Access Denied: Path '{path}' targets protected secrets ('.env*'/'.keys') and is not accessible to skills.")
         return full_path
 
     def read(self, path: str) -> str:
@@ -1309,15 +1315,18 @@ class SafeReplication:
         from pathlib import Path
 
         import src.config
-        from src.config import get_effective_workspace_root
+        from src.config import get_effective_workspace_root, is_protected_secret_component
 
         # 1. Safe resolve path
         root = Path(get_effective_workspace_root()).resolve()
         full_path = Path(root / relative_path).resolve()
-        if not str(full_path).startswith(str(root)):
-            raise PermissionError(f"Access Denied: Path '{relative_path}' lies outside the active workspace directory.")
+        try:
+            full_path.relative_to(root)
+        except ValueError:
+            raise PermissionError(f"Access Denied: Path '{relative_path}' lies outside the active workspace directory.") from None
 
-        # 2. Codebase copy
+        # 2. Codebase copy — never propagate live secrets (.env*/.keys) into a
+        #    child clone (issue #147).
         def _ignore_patterns(path, names):
             ignored = []
             for n in names:
@@ -1328,6 +1337,8 @@ class SafeReplication:
                 ):
                     ignored.append(n)
                 elif n.endswith('.db') or n.endswith('.db-wal') or n.endswith('.db-shm'):
+                    ignored.append(n)
+                elif is_protected_secret_component(n):
                     ignored.append(n)
             return ignored
 
