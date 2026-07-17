@@ -129,6 +129,47 @@ def test_spawn_child_path_safety():
     with pytest.raises(PermissionError):
         rep.spawn_child("attacker-child", "../../../../outside-dir")
 
+
+@patch("src.config.get_effective_workspace_root")
+@patch("subprocess.Popen")
+@patch("shutil.copytree")
+def test_spawn_child_ignore_excludes_secrets(mock_copytree, mock_popen, mock_get_root, tmp_path):
+    """The copytree ignore filter must drop .env*/.keys so secrets never land in
+    a child clone (issue #147)."""
+    mock_get_root.return_value = tmp_path
+    mock_popen.return_value = MagicMock(pid=1234)
+
+    import sqlite3
+    original_connect = sqlite3.connect
+    real_child_db = original_connect(":memory:")
+
+    class ConnectionProxy:
+        def __init__(self, conn):
+            self._conn = conn
+        def __getattr__(self, name):
+            if name == "close":
+                return lambda: None
+            return getattr(self._conn, name)
+
+    def mock_connect(database, *args, **kwargs):
+        if "test_janus" in str(database):
+            return original_connect(database, *args, **kwargs)
+        if "janus.db" in str(database) or database == ":memory:":
+            return ConnectionProxy(real_child_db)
+        return original_connect(database, *args, **kwargs)
+
+    with patch("sqlite3.connect", side_effect=mock_connect):
+        SafeReplication().spawn_child("child", "child")
+
+    ignore_fn = mock_copytree.call_args.kwargs["ignore"]
+    names = [".env", ".env.production", ".keys", "src", "README.md", "pyproject.toml"]
+    ignored = ignore_fn("/whatever", names)
+    assert ".env" in ignored
+    assert ".env.production" in ignored
+    assert ".keys" in ignored
+    assert "src" not in ignored
+    assert "README.md" not in ignored
+
 @patch("src.config.get_effective_workspace_root")
 @patch("subprocess.Popen")
 @patch("shutil.copytree")

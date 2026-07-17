@@ -140,6 +140,27 @@ def get_effective_workspace_root() -> Path:
     return ROOT_DIR
 
 
+# Path components that hold live deployment secrets and must never be read,
+# written, indexed, or cloned through any agent-reachable filesystem surface:
+# `.env`/`.env.*` (credentials) and `.keys/` (the RS256 JWT signing key). This
+# is the single source of truth shared by SafeFS, the persona sandbox commands,
+# codebase indexing, and child replication — see issue #147. `.env.example` is
+# a committed non-secret template but is intentionally covered too: agents have
+# no need to read it, and blocking the whole `.env.*` family avoids a carve-out
+# that a real secret (`.env.local`, `.env.production`) could hide behind.
+PROTECTED_SECRET_NAMES = frozenset({".env", ".keys"})
+
+
+def is_protected_secret_component(name: str) -> bool:
+    """True if a single path component names a protected secret (see issue #147)."""
+    return name in PROTECTED_SECRET_NAMES or name.startswith(".env.")
+
+
+def path_has_protected_secret(rel_parts) -> bool:
+    """True if any component of a workspace-relative path is a protected secret."""
+    return any(is_protected_secret_component(p) for p in rel_parts)
+
+
 _config_logger = logging.getLogger("JanusConfig")
 
 

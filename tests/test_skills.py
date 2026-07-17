@@ -461,3 +461,73 @@ def test_safe_goals_complete_checkpoint_without_party_id_leaves_null():
     conn.close()
     assert row[0] is None
 
+
+
+# ---------------------------------------------------------------------------
+# SafeFS secrets denylist (issue #147)
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def safefs_workspace(tmp_path):
+    """Workspace containing the secret paths SafeFS must refuse to touch."""
+    (tmp_path / ".keys").mkdir()
+    (tmp_path / ".keys" / "jwt_private.pem").write_text("PRIVATE KEY")
+    (tmp_path / ".env").write_text("NEO4J_PASSWORD=secret")
+    (tmp_path / ".env.production").write_text("AWS_SECRET_ACCESS_KEY=secret")
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs" / "note.md").write_text("hello")
+    with patch("src.config.get_effective_workspace_root", return_value=tmp_path):
+        yield tmp_path
+
+
+def test_safefs_blocks_env_and_keys_reads(safefs_workspace):
+    from src.skills import SafeFS
+    fs = SafeFS()
+    for path in (".env", ".env.production", ".keys/jwt_private.pem"):
+        with pytest.raises(PermissionError, match="protected secrets"):
+            fs.read(path)
+
+
+def test_safefs_blocks_traversal_spellings_of_env(safefs_workspace):
+    from src.skills import SafeFS
+    fs = SafeFS()
+    for path in ("./.env", "docs/../.env", "docs/../../" + safefs_workspace.name + "/.env"):
+        with pytest.raises(PermissionError):
+            fs.read(path)
+
+
+def test_safefs_blocks_secret_writes(safefs_workspace):
+    from src.skills import SafeFS
+    fs = SafeFS()
+    with pytest.raises(PermissionError, match="protected secrets"):
+        fs.write(".env", "LLM_BASE_URL=http://attacker")
+    with pytest.raises(PermissionError, match="protected secrets"):
+        fs.write(".keys/jwt_private.pem", "tampered")
+    assert (safefs_workspace / ".env").read_text() == "NEO4J_PASSWORD=secret"
+
+
+def test_safefs_exists_denies_secrets(safefs_workspace):
+    from src.skills import SafeFS
+    fs = SafeFS()
+    assert fs.exists(".env") is False
+    assert fs.exists(".keys/jwt_private.pem") is False
+
+
+def test_safefs_blocks_sibling_root_prefix_escape(safefs_workspace):
+    # str(root).startswith() would have accepted a sibling dir sharing the
+    # root's name as a prefix; relative_to() must reject it.
+    from src.skills import SafeFS
+    sibling = safefs_workspace.parent / (safefs_workspace.name + "_evil")
+    sibling.mkdir()
+    (sibling / "loot.txt").write_text("outside")
+    fs = SafeFS()
+    with pytest.raises(PermissionError, match="outside the active workspace"):
+        fs.read(str(sibling / "loot.txt"))
+
+
+def test_safefs_normal_paths_unaffected(safefs_workspace):
+    from src.skills import SafeFS
+    fs = SafeFS()
+    assert fs.read("docs/note.md") == "hello"
+    fs.write("docs/new.md", "content")
+    assert fs.exists("docs/new.md") is True

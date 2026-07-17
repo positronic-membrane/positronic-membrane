@@ -85,6 +85,30 @@ def test_index_and_query_codebase(tmp_path, mock_embeddings, monkeypatch):
     context_ignored = query_codebase_context("should_ignore", limit=5)
     assert "should_ignore" not in context_ignored
 
+def test_index_codebase_excludes_secrets(tmp_path, mock_embeddings, monkeypatch):
+    """index_codebase must never embed .env*/.keys content into the queryable
+    vector store (issue #147)."""
+    project_root = tmp_path / "project"
+    (project_root / "src").mkdir(parents=True)
+    (project_root / "src" / "app.py").write_text("def run(): pass")
+    (project_root / ".env").write_text("NEO4J_PASSWORD=embedded_secret_value")
+    (project_root / ".env.production").write_text("AWS_SECRET_ACCESS_KEY=embedded_secret_value")
+    keys_dir = project_root / ".keys"
+    keys_dir.mkdir()
+    (keys_dir / "jwt_private.pem").write_text("EMBEDDED PRIVATE KEY")
+
+    monkeypatch.setattr(src.config, "ROOT_DIR", project_root)
+    index_codebase(workspace_dir=project_root)
+
+    collection = src.memory.get_collection("janus_codebase")
+    all_docs = "\n".join(collection.get()["documents"])
+    assert "embedded_secret_value" not in all_docs
+    assert "EMBEDDED PRIVATE KEY" not in all_docs
+    assert "code_.env" not in collection.get()["ids"]
+    # Legitimate source still indexed.
+    assert "def run()" in query_codebase_context("run", limit=3)
+
+
 def test_reindex_refreshes_changed_file(tmp_path, mock_embeddings, monkeypatch):
     """Verify a second index_codebase run replaces the stored summary of a changed file (issue #134)."""
     project_root = tmp_path / "project"

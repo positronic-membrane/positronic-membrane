@@ -98,6 +98,9 @@ def _build_context_files_section(target_paths: List[str]) -> str:
             parts.append(
                 f"### {rel_path}\n*(File does not exist yet — target for new creation.)*"
             )
+        elif src.config.path_has_protected_secret(resolved.relative_to(root).parts):
+            # Never surface secrets (.env*/.keys) in a handoff packet (issue #147).
+            parts.append(f"### {rel_path}\n*(Protected secret path — not included.)*")
         else:
             parts.append(f"### {rel_path}\n{generate_file_summary(resolved)}")
     return "\n\n".join(parts)
