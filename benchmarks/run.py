@@ -90,6 +90,9 @@ def run_layer2(target: str, skip_sandbox: bool = False) -> dict:
             "scenario_id": scenario["id"],
             "score": judged["score"],
             "reasoning": judged["reasoning"],
+            # Recorded so a fail-closed 1 is distinguishable from a genuine
+            # judge-assigned 1 in the baseline document (issue #142 review).
+            "parse_ok": judged["parse_ok"],
         })
 
     layer2 = {
