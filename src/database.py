@@ -969,6 +969,7 @@ def init_db():
         ("metrics.daemon_cycles_total", "0", 0),
         ("metrics.skills_executed_total", "0", 0),
         ("metrics.skills_failed_total", "0", 0),
+        ("metrics.skills_sync_failed_total", "0", 0),
         ("metrics.http_requests_total", "0", 0),
         # Agent status sync polling cadence (issue #70): throttles poll_agent_status()
         # independently of the 5s mid-loop tick, since each poll costs several GitHub
@@ -1186,6 +1187,13 @@ def check_presence():
                     "skills only: %s",
                     _result["fatal_error"],
                 )
+                # Surface the degradation on /metrics — a log line alone let
+                # issue #139 go unnoticed for a day of restarts.
+                try:
+                    from src.metrics import increment_skills_sync_failed_total
+                    increment_skills_sync_failed_total()
+                except Exception:
+                    pass
             else:
                 for _f in _result["failed"]:
                     logger.warning(
@@ -1201,6 +1209,11 @@ def check_presence():
                 "init_db: skill library boot sync crashed — operating with bootstrap skills only: %s",
                 _exc,
             )
+            try:
+                from src.metrics import increment_skills_sync_failed_total
+                increment_skills_sync_failed_total()
+            except Exception:
+                pass
 
     # Check if parties table exists; if not, apply multi-party migrations
     cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='parties';")
