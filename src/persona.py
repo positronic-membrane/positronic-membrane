@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 import re
 from typing import Optional
@@ -1694,40 +1695,105 @@ def _find_json_blocks(text: str) -> list:
     return blocks
 
 
-def _extract_skill_calls(text: str) -> list:
-    """Return list of (skill_id, arguments) for every skill-call JSON block found."""
-    import json as _json
-    results = []
-    for blob, _, _ in _find_json_blocks(text):
+def _skill_exists(skill_id: str) -> bool:
+    """True when skill_id names an active agent_skills row (is_active matches
+    what DynamicSkillExecutor will actually run)."""
+    try:
+        conn = get_connection(read_only_constitution=True)
         try:
-            data = _json.loads(blob)
-            if isinstance(data, dict):
-                skill_id = data.get("skill_id") or data.get("tool") or data.get("tool_name")
-                arguments = data.get("arguments") or data.get("args") or {}
-                if skill_id:
-                    results.append((skill_id, arguments))
-        except (ValueError, KeyError):
-            pass
-    return results
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT 1 FROM agent_skills WHERE skill_id = ? AND is_active = 1;",
+                (skill_id,),
+            )
+            return cursor.fetchone() is not None
+        finally:
+            conn.close()
+    except Exception:
+        return False
 
 
-def _strip_skill_call_json(text: str) -> str:
-    """Remove skill-call JSON blocks from text, leaving only conversational content."""
-    import json as _json
-    ranges_to_remove = []
+# The '<skill>:' label of a bare-arguments call (issue #137, the prose twin of
+# daemon.parse_action's issue #136 form): line-anchored, optionally behind a
+# PROPOSED_ACTION marker, with the JSON block on the same or the next line —
+# but never across a blank line, which keeps illustrative JSON later in a
+# paragraph from binding to a distant label.
+_BARE_LABEL_RE = re.compile(
+    r"(?:^|\n)[ \t]*(?:PROPOSED_ACTION[ \t]*:[ \t]*)?"
+    r"([A-Za-z][A-Za-z0-9_]*)[ \t]*:[ \t]*(?:\r?\n[ \t]*)?\Z"
+)
+
+
+def _classify_skill_block(text: str, blob: str, start: int):
+    """Decides whether one balanced JSON block is a skill call.
+
+    Returns (skill_id, arguments, strip_start) or None. A line-anchored
+    '<skill>:' label naming a registered, active skill takes precedence over
+    keys inside the dict (a bare-arguments payload may itself contain a
+    'tool'-like key); otherwise the canonical dict shape
+    ({"skill_id"/"tool"/"tool_name": ..., "arguments": ...}) applies. The
+    label must name a registered skill because streamed responses are full
+    prose where labels like 'Example:' legitimately precede illustrative
+    JSON. strip_start extends to the label so stripping doesn't leave a
+    dangling 'skill_name:' in the chat text.
+    """
+    try:
+        data = json.loads(blob)
+    except (ValueError, RecursionError):
+        return None
+    if not isinstance(data, dict):
+        return None
+
+    label = _BARE_LABEL_RE.search(text[:start])
+    if label and _skill_exists(label.group(1)):
+        inner = None
+        for key in ("arguments", "args"):
+            if isinstance(data.get(key), dict):
+                inner = data[key]
+                break
+        return label.group(1), (data if inner is None else inner), label.start()
+
+    skill_id = data.get("skill_id") or data.get("tool") or data.get("tool_name")
+    if skill_id:
+        arguments = data.get("arguments") or data.get("args") or {}
+        return skill_id, arguments, start
+    return None
+
+
+def _classify_skill_calls(text: str) -> list:
+    """One pass over text: [(skill_id, arguments, strip_start, end), ...].
+
+    Shared by extract and strip so both operate on the same classification —
+    two independent passes could disagree if agent_skills changes between
+    them (skill executed but its JSON leaked to the user, or vice versa).
+    """
+    classified = []
     for blob, start, end in _find_json_blocks(text):
-        try:
-            data = _json.loads(blob)
-            if isinstance(data, dict) and (data.get("skill_id") or data.get("tool") or data.get("tool_name")):
-                ranges_to_remove.append((start, end))
-        except (ValueError, KeyError):
-            pass
-    if not ranges_to_remove:
+        block = _classify_skill_block(text, blob, start)
+        if block:
+            skill_id, arguments, strip_start = block
+            classified.append((skill_id, arguments, strip_start, end))
+    return classified
+
+
+def _extract_skill_calls(text: str, classified: list = None) -> list:
+    """Return list of (skill_id, arguments) for every skill-call JSON block found."""
+    if classified is None:
+        classified = _classify_skill_calls(text)
+    return [(skill_id, arguments) for skill_id, arguments, _, _ in classified]
+
+
+def _strip_skill_call_json(text: str, classified: list = None) -> str:
+    """Remove skill-call JSON blocks (and any '<skill>:' label introducing a
+    bare-arguments block) from text, leaving only conversational content."""
+    if classified is None:
+        classified = _classify_skill_calls(text)
+    if not classified:
         return text
     result = []
     prev = 0
-    for start, end in ranges_to_remove:
-        result.append(text[prev:start])
+    for _, _, strip_start, end in classified:
+        result.append(text[prev:strip_start])
         prev = end
     result.append(text[prev:])
     return "".join(result).strip()
@@ -1787,7 +1853,8 @@ def stream_persona_response(user_msg: str, party_id=None):
             chunks.append(chunk)
         full_response = "".join(chunks)
 
-        skill_calls = _extract_skill_calls(full_response)
+        classified_blocks = _classify_skill_calls(full_response)
+        skill_calls = _extract_skill_calls(full_response, classified_blocks)
         sandbox_blocks = re.findall(r"```sandbox\s*\n(.*?)\n```", full_response, re.DOTALL)
 
         if not skill_calls and not sandbox_blocks:
@@ -1799,7 +1866,7 @@ def stream_persona_response(user_msg: str, party_id=None):
         # that preceded / followed the JSON blocks, then execute all calls.
         log_episodic_memory("persona", full_response, "background_thought", party_id=party_id)
 
-        preamble = _strip_skill_call_json(full_response)
+        preamble = _strip_skill_call_json(full_response, classified_blocks)
         if preamble:
             yield ("token", preamble)
 
@@ -1972,6 +2039,17 @@ def generate_persona_response_autonomous(user_msg: str, party_id: Optional[str] 
         from src.daemon import parse_action
         from src.skills import DynamicSkillExecutor
         skill_id, arguments, mock_result = parse_action(response)
+
+        # parse_action's bare-arguments anchor targets single-action proposer
+        # strings; persona prose ('I'll check.\ncheck_presence:{...}') only
+        # matches the streaming classifier's line-anchored rule. Fall back to
+        # it so identical persona output executes on both transports
+        # (issue #137).
+        if skill_id is None:
+            persona_calls = _extract_skill_calls(response)
+            if persona_calls:
+                skill_id, arguments = persona_calls[0]
+                mock_result = None
 
         # 3. Check for legacy sandbox command blocks (```sandbox ... ```)
         sandbox_blocks = re.findall(r"```sandbox\s*\n(.*?)\n```", response, re.DOTALL)

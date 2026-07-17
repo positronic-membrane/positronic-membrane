@@ -627,3 +627,96 @@ async def test_goals_resolve_cancel_keeps_dispute_open(mock_get_input):
     row = conn.execute("SELECT config_value FROM system_config WHERE config_key = 'dispute_paused';").fetchone()
     conn.close()
     assert row[0] == "true"
+
+# ---------------------------------------------------------------------------
+# Streaming-path skill-call parsing — bare-arguments form (issue #137)
+# ---------------------------------------------------------------------------
+
+def test_extract_skill_calls_bare_arguments_registered_skill():
+    """'<skill>:{bare args}' is extracted when the label names a registered skill."""
+    from src.persona import _extract_skill_calls
+
+    calls = _extract_skill_calls('I will check presence now.\ncheck_presence:{"probe": true}')
+    assert calls == [("check_presence", {"probe": True})]
+
+    # arguments-wrapper unwraps
+    calls = _extract_skill_calls('check_presence:{"arguments": {"x": 1}}')
+    assert calls == [("check_presence", {"x": 1})]
+
+    # Block on the next line (with indentation) still binds to the label
+    calls = _extract_skill_calls('check_presence:\n  {"probe": true}')
+    assert calls == [("check_presence", {"probe": True})]
+
+    # Optional PROPOSED_ACTION marker before the label is tolerated
+    calls = _extract_skill_calls('PROPOSED_ACTION: check_presence:{"probe": true}')
+    assert calls == [("check_presence", {"probe": True})]
+
+def test_extract_skill_calls_registered_label_wins_over_embedded_tool_key():
+    """A registered '<skill>:' label takes precedence over 'tool'-like keys
+    inside the bare arguments payload (which would otherwise hijack routing)."""
+    from src.persona import _extract_skill_calls
+
+    calls = _extract_skill_calls('check_presence:{"tool": "hammer", "probe": true}')
+    assert calls == [("check_presence", {"tool": "hammer", "probe": True})]
+
+def test_extract_skill_calls_bare_arguments_guards():
+    """Prose labels, mid-line labels, distant blocks, and inactive skills must
+    not become skill calls."""
+    from src.persona import _extract_skill_calls
+
+    # Line-anchored label that is NOT a registered skill → illustrative JSON, not a call
+    assert _extract_skill_calls('Example:\n{"foo": 1}') == []
+
+    # Registered skill name mid-line (prose context) → not a call
+    assert _extract_skill_calls('read the check_presence: {"a": 1} output') == []
+
+    # A blank line between label and block breaks the binding
+    assert _extract_skill_calls('check_presence:\n\n{"probe": true}') == []
+
+    # Inactive skills are not extractable (executor would reject them anyway)
+    with get_connection() as conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO agent_skills (skill_id, name, description, parameters_schema, "
+            "code_blob, entry_point_function, required_role, trigger_type, trigger_config, is_active) "
+            "VALUES ('dormant_skill', 'Dormant', 'off', '{}', 'def run(sdk, args): pass', 'run', "
+            "'observer', 'manual', '{}', 0)"
+        )
+        conn.commit()
+    assert _extract_skill_calls('dormant_skill:{"x": 1}') == []
+
+    # Canonical dict shape needs no registration and keeps working
+    calls = _extract_skill_calls('{"skill_id": "web_search", "arguments": {"query": "q"}}')
+    assert calls == [("web_search", {"query": "q"})]
+
+def test_strip_skill_call_json_bare_arguments():
+    """Stripping removes the bare block AND its '<skill>:' label; plain JSON survives."""
+    from src.persona import _strip_skill_call_json
+
+    text = 'Let me check.\ncheck_presence:{"probe": true}\nDone soon.'
+    assert _strip_skill_call_json(text) == "Let me check.\nDone soon."
+
+    # Non-skill JSON in prose is untouched
+    text = 'Here is data: {"x": 1} for you'
+    assert _strip_skill_call_json(text) == text
+
+def test_autonomous_loop_executes_bare_arguments_call():
+    """The non-streaming loop must execute the same prose bare call the
+    streaming path accepts — behavior must not fork by transport (issue #137)."""
+    from src.persona import generate_persona_response_autonomous
+
+    executed = []
+
+    def fake_execute(skill_id, arguments, party_id=None):
+        executed.append((skill_id, arguments))
+        return {"success": True, "result": "presence ok"}
+
+    responses = iter([
+        'Let me check presence.\ncheck_presence:{"probe": true}',
+        "All done — you are active.",
+    ])
+    with patch("src.persona.generate_persona_response", side_effect=lambda *a, **k: next(responses)), \
+         patch("src.skills.DynamicSkillExecutor.execute", side_effect=fake_execute):
+        final = generate_persona_response_autonomous("are you there?")
+
+    assert executed == [("check_presence", {"probe": True})]
+    assert "All done" in final
